@@ -1,0 +1,11 @@
+MAX_TURNS = 50
+
+SUMMARY_LAYERS = ("1m", "1h", "1d")
+
+SUMMARY_BUCKET_NS = {
+    "1m": 60 * 1_000_000_000,
+    "1h": 60 * 60 * 1_000_000_000,
+    "1d": 24 * 60 * 60 * 1_000_000_000,
+}
+
+DEFAULT_TOOL_TIMEOUT_SECONDS = 60.0

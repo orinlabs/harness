@@ -1,0 +1,153 @@
+"""Chunk 2 verification: SQLite storage + migrations, real filesystem only."""
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def storage_env(tmp_path, monkeypatch):
+    """Point storage at a tmp dir and reload the module so env vars take effect."""
+    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
+
+    import importlib
+
+    from harness.core import storage as storage_module
+
+    importlib.reload(storage_module)
+    yield storage_module
+    storage_module.close()
+
+
+@pytest.fixture
+def custom_migrations(tmp_path, monkeypatch):
+    """A writable migrations directory that tests can drop files into."""
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+
+    initial = Path(__file__).parent.parent / "src/harness/memory/migrations/0001_initial.sql"
+    (mig_dir / "0001_initial.sql").write_text(initial.read_text())
+
+    monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
+    return mig_dir
+
+
+def test_fresh_db_applies_initial_migration(storage_env, custom_migrations):
+    storage = storage_env
+    conn = storage.load("agent-1")
+
+    rows = list(conn.execute("SELECT name FROM applied_migrations ORDER BY name"))
+    assert [r["name"] for r in rows] == ["0001_initial"]
+
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "messages" in tables
+    assert "one_minute_summaries" in tables
+    assert "monthly_summaries" in tables
+
+
+def test_messages_survive_reopen(storage_env, custom_migrations):
+    storage = storage_env
+    conn = storage.load("agent-1")
+    now = time.time_ns()
+    for i in range(100):
+        conn.execute(
+            "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+            (f"m{i}", now + i, "user", f'{{"i": {i}}}'),
+        )
+    storage.flush()
+    storage.close()
+
+    conn2 = storage.load("agent-1")
+    count = conn2.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"]
+    assert count == 100
+
+    applied = list(conn2.execute("SELECT name FROM applied_migrations"))
+    assert len(applied) == 1, "migrations must not re-apply on reopen"
+
+
+def test_new_migration_applied_on_next_load(storage_env, custom_migrations):
+    storage = storage_env
+    storage.load("agent-1")
+    storage.close()
+
+    (custom_migrations / "0002_add_tags.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS tags (id TEXT PRIMARY KEY, label TEXT NOT NULL);"
+    )
+
+    conn = storage.load("agent-1")
+    applied = [
+        r["name"]
+        for r in conn.execute("SELECT name FROM applied_migrations ORDER BY name")
+    ]
+    assert applied == ["0001_initial", "0002_add_tags"]
+
+    conn.execute("INSERT INTO tags (id, label) VALUES (?, ?)", ("t1", "hello"))
+    got = conn.execute("SELECT label FROM tags WHERE id='t1'").fetchone()["label"]
+    assert got == "hello"
+
+
+def test_idempotent_second_load(storage_env, custom_migrations):
+    storage = storage_env
+    conn1 = storage.load("agent-1")
+    first = conn1.execute(
+        "SELECT applied_at_ns FROM applied_migrations WHERE name='0001_initial'"
+    ).fetchone()["applied_at_ns"]
+    storage.close()
+
+    time.sleep(0.01)
+    conn2 = storage.load("agent-1")
+    second = conn2.execute(
+        "SELECT applied_at_ns FROM applied_migrations WHERE name='0001_initial'"
+    ).fetchone()["applied_at_ns"]
+
+    assert first == second, "applied_at_ns must not change on re-load"
+
+
+def test_fresh_load_time_under_250ms(storage_env, custom_migrations):
+    storage = storage_env
+    t = time.perf_counter()
+    storage.load("agent-fresh")
+    elapsed = time.perf_counter() - t
+    assert elapsed < 0.25, f"fresh load took {elapsed * 1000:.1f}ms, budget 250ms"
+
+
+def test_populated_load_time_under_250ms(storage_env, custom_migrations):
+    """Load against a ~5MB sqlite file and assert <250ms."""
+    storage = storage_env
+    conn = storage.load("agent-big")
+
+    blob = "x" * 500
+    now = time.time_ns()
+    for i in range(10_000):
+        conn.execute(
+            "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+            (f"m{i}", now + i, "user", f'{{"b": "{blob}"}}'),
+        )
+    storage.flush()
+    storage.close()
+
+    t = time.perf_counter()
+    storage.load("agent-big")
+    elapsed = time.perf_counter() - t
+    assert elapsed < 0.25, f"populated load took {elapsed * 1000:.1f}ms, budget 250ms"
+
+
+def test_per_agent_isolation(storage_env, custom_migrations):
+    storage = storage_env
+
+    conn_a = storage.load("agent-A")
+    conn_a.execute(
+        "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+        ("a1", 1, "user", "{}"),
+    )
+    storage.flush()
+    storage.close()
+
+    conn_b = storage.load("agent-B")
+    count = conn_b.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"]
+    assert count == 0, "agent-B must not see agent-A's messages"

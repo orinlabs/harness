@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import importlib
+import os
+from pathlib import Path
+
+import pytest
+from dotenv import load_dotenv
+
+from tests.fake_platform import FakePlatform
+
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+
+@pytest.fixture
+def fake_platform(monkeypatch):
+    """Start a FakePlatform, wire env vars, reload core clients so they pick them up."""
+    platform = FakePlatform()
+    platform.start()
+    monkeypatch.setenv("HARNESS_PLATFORM_URL", platform.url)
+    monkeypatch.setenv("HARNESS_PLATFORM_TOKEN", "test-token")
+
+    from harness.core import runtime_api, tracer
+
+    importlib.reload(tracer)
+    importlib.reload(runtime_api)
+
+    try:
+        yield platform
+    finally:
+        platform.stop()
+
+
+@pytest.fixture
+def openrouter_key():
+    """Return the OpenRouter API key. Fail loudly if missing (never skip)."""
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        pytest.fail(
+            "OPENROUTER_API_KEY not set. Live-API tests fail loudly on purpose — "
+            "set the key or remove the test."
+        )
+    return key

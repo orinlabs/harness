@@ -1,0 +1,43 @@
+[project]
+name = "harness"
+version = "0.1.0"
+description = "Agent harness. Runnable agent loop with memory, tools, and OpenRouter-backed LLM calls."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2.3",
+    "python-dotenv>=1.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tiered memory tests live under tests/memory/ and aren't part of the default
+# fast run. Invoke them explicitly with:
+#   pytest tests/memory -o "addopts="
+addopts = "-v --tb=short --ignore=tests/memory"
+timeout = 120
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Long narrative prompt strings in PERIOD_META — reflowing hurts readability.
+"src/harness/memory/types.py" = ["E501"]
