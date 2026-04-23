@@ -33,8 +33,10 @@ Optional env (override defaults):
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import os
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -94,6 +96,52 @@ def _configure_logging(level: str) -> None:
         sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
     except (AttributeError, OSError):
         pass
+
+
+def _install_shutdown_handlers() -> None:
+    """Make force-stops close open traces/spans on the platform.
+
+    The platform kills the harness subprocess with SIGTERM when the agent
+    flips to sleeping mid-run. Python's default SIGTERM handler just exits
+    without unwinding — `finally` blocks in `tracer.span()` never run, so the
+    trace stays open forever on the platform side.
+
+    We install two layers:
+
+    1. SIGTERM / SIGHUP -> raise KeyboardInterrupt from the handler. This
+       unwinds the stack, lets every `with text_span(...)` / `with llm_span(...)`
+       run its `finally`, and closes spans normally with an `error` field.
+
+    2. atexit -> force-close anything still in the tracer's open-span/trace
+       registry. Covers the edge case where the interpreter is shutting down
+       before a `with` block has had a chance to fully unwind (e.g. a second
+       signal arrives, or the process is exiting via `os._exit` somewhere).
+    """
+    from harness.core import tracer
+
+    def _handler(signum, _frame):
+        sig_name = signal.Signals(signum).name
+        logger.warning("received %s, closing open traces and exiting", sig_name)
+        # KeyboardInterrupt is a BaseException, which `tracer.span()`'s
+        # `except BaseException` catches, records as the span error, then
+        # re-raises so it bubbles up through the whole stack.
+        raise KeyboardInterrupt(sig_name)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError) as e:
+            # SIGHUP doesn't exist on Windows; signal.signal also fails if
+            # we're not on the main thread. Best-effort is fine.
+            logger.debug("could not install handler for %s: %s", sig, e)
+
+    def _atexit_close() -> None:
+        try:
+            tracer.close_all_open("harness process exiting")
+        except Exception:
+            logger.exception("tracer: close_all_open failed during atexit")
+
+    atexit.register(_atexit_close)
 
 
 def _load_env() -> None:
@@ -187,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _configure_logging(args.log_level)
+    _install_shutdown_handlers()
 
     if not args.agent_id:
         parser.error("agent_id is required (pass as arg or set $AGENT_ID)")
@@ -224,6 +273,14 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("starting harness run agent=%s run=%s", args.agent_id, run_id)
     try:
         Harness(config, run_id=run_id).run()
+    except KeyboardInterrupt:
+        # SIGTERM/SIGHUP/Ctrl-C. `tracer.span()`'s finally blocks have already
+        # closed open spans+trace with an `error` field as they unwound; we
+        # just log and exit non-zero so the platform sees the interruption.
+        logger.warning(
+            "harness run interrupted agent=%s run=%s", args.agent_id, run_id
+        )
+        return 130
     except Exception:
         logger.exception("harness run failed agent=%s run=%s", args.agent_id, run_id)
         raise

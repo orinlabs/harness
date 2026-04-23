@@ -66,6 +66,16 @@ _current_parent_span_id: ContextVar[str | None] = ContextVar(
 )
 _client: httpx.Client | None = None
 
+# Emergency registry of still-open traces/spans.
+#
+# ContextVars are scoped per-task, so a signal handler or atexit hook can't see
+# them. We mirror open-trace and open-span info into these module-level dicts
+# so `close_all_open(error)` can force-close anything left dangling when the
+# process is killed (SIGTERM from the platform, crash, etc.). Entries are
+# removed on normal close.
+_open_traces: dict[str, dict[str, Any]] = {}
+_open_spans: dict[str, dict[str, Any]] = {}
+
 
 def _platform_url() -> str | None:
     """Return the platform base URL or None if tracing is disabled.
@@ -195,6 +205,24 @@ def span(
     if metadata:
         handle._metadata.update(metadata)
 
+    # Register in the emergency map so `close_all_open()` can flush this span
+    # (and any trace we created) if we get killed before the finally runs.
+    _open_spans[span_id] = {
+        "span_id": span_id,
+        "trace_id": trace_id,
+        "parent_id": parent_id,
+        "name": name,
+        "span_type": span_type,
+        "handle": handle,
+    }
+    if created_trace:
+        _open_traces[trace_id] = {
+            "trace_id": trace_id,
+            "name": name,
+            "agent_id": agent_id,
+            "handle": handle,
+        }
+
     parent_token = _current_parent_span_id.set(span_id)
     status = "ok"
     error_msg: str | None = None
@@ -208,6 +236,7 @@ def span(
     finally:
         _current_parent_span_id.reset(parent_token)
         ended_at = _now_iso()
+        _open_spans.pop(span_id, None)
         _close_span(
             span_id=span_id,
             trace_id=trace_id,
@@ -221,6 +250,7 @@ def span(
             metadata=handle._metadata,
         )
         if created_trace:
+            _open_traces.pop(trace_id, None)
             _close_trace(
                 trace_id=trace_id,
                 name=name,
@@ -483,6 +513,56 @@ def _close_span(
         )
     except httpx.HTTPError as e:
         logger.warning("tracer: failed to close span %s: %s", span_id, e)
+
+
+def close_all_open(error: str) -> None:
+    """Force-close every still-open span and trace with `error`.
+
+    Called from the CLI's signal handlers / atexit hook when the harness is
+    killed mid-run (e.g. platform sends SIGTERM when the agent flips to
+    sleeping). Iterates over a snapshot of the registries so closing is
+    idempotent even if the normal `finally` path also fires.
+    """
+    if not _open_spans and not _open_traces:
+        return
+    ended_at = _now_iso()
+    logger.info(
+        "tracer: force-closing %d span(s) and %d trace(s) (%s)",
+        len(_open_spans),
+        len(_open_traces),
+        error,
+    )
+
+    # Close spans first (leaves-to-root would be ideal, but PATCH is
+    # idempotent on the platform so order doesn't matter for correctness).
+    for span_id, info in list(_open_spans.items()):
+        handle: Span = info["handle"]
+        handle._metadata.setdefault("error", error)
+        _close_span(
+            span_id=span_id,
+            trace_id=info["trace_id"],
+            parent_id=info["parent_id"],
+            name=info["name"],
+            span_type=info["span_type"],
+            ended_at=ended_at,
+            input_text=handle._input,
+            output_text=handle._output,
+            error=error,
+            metadata=handle._metadata,
+        )
+        _open_spans.pop(span_id, None)
+
+    for trace_id, info in list(_open_traces.items()):
+        handle = info["handle"]
+        _close_trace(
+            trace_id=trace_id,
+            name=info["name"],
+            agent_id=info["agent_id"],
+            ended_at=ended_at,
+            error=error,
+            metadata=dict(handle._metadata),
+        )
+        _open_traces.pop(trace_id, None)
 
 
 def _safe_json(obj: Any) -> Any:

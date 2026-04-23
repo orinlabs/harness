@@ -25,6 +25,62 @@ _client: httpx.Client | None = None
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+# ---------------------------------------------------------------------------
+# Model slug translation
+# ---------------------------------------------------------------------------
+#
+# Bedrock speaks Anthropic API IDs for Claude models (`claude-opus-4-7`,
+# `claude-sonnet-4-6`, ...). OpenRouter uses its own namespaced slugs
+# (`anthropic/claude-opus-4.7`, `anthropic/claude-sonnet-4.6`, ...).
+# Passing the Anthropic ID directly yields a 400 from OpenRouter ("Invalid
+# model"), so translate at the edge.
+#
+# Keep this map in sync with whatever Cursor's bedrock hands us. Anything
+# that already looks like an OpenRouter slug (contains `/`) or that isn't
+# recognised here is passed through untouched so OpenAI/Google/etc. still
+# work.
+_MODEL_MAP: dict[str, str] = {
+    # Current Anthropic flagship models (per docs.anthropic.com and
+    # openrouter.ai/anthropic as of 2026-04). Some bedrock IDs carry a
+    # `-YYYYMMDD` suffix; we key on both the aliased and dated forms.
+    "claude-opus-4-7": "anthropic/claude-opus-4.7",
+    "claude-opus-4-6": "anthropic/claude-opus-4.6",
+    "claude-opus-4-5": "anthropic/claude-opus-4.5",
+    "claude-opus-4-5-20251101": "anthropic/claude-opus-4.5",
+    "claude-opus-4-1": "anthropic/claude-opus-4.1",
+    "claude-opus-4-1-20250805": "anthropic/claude-opus-4.1",
+    "claude-opus-4-0": "anthropic/claude-opus-4",
+    "claude-opus-4-20250514": "anthropic/claude-opus-4",
+    "claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
+    "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
+    "claude-sonnet-4-5-20250929": "anthropic/claude-sonnet-4.5",
+    "claude-sonnet-4-0": "anthropic/claude-sonnet-4",
+    "claude-sonnet-4-20250514": "anthropic/claude-sonnet-4",
+    "claude-haiku-4-5": "anthropic/claude-haiku-4.5",
+    "claude-haiku-4-5-20251001": "anthropic/claude-haiku-4.5",
+}
+
+
+def _translate_model(model: str) -> str:
+    """Translate a bedrock/Anthropic model id to an OpenRouter slug.
+
+    Pass-through rules:
+      - Already namespaced (`foo/bar`): leave alone.
+      - Explicit entry in `_MODEL_MAP`: use it.
+      - Otherwise: return untouched and trust the caller.
+
+    We log at INFO the first time a translation happens per-process to make
+    misconfigured model names obvious in the trace.
+    """
+    if "/" in model:
+        return model
+    mapped = _MODEL_MAP.get(model)
+    if mapped is not None and mapped != model:
+        logger.info("translating model slug %r -> %r for openrouter", model, mapped)
+        return mapped
+    return model
+
+
 def _http() -> httpx.Client:
     global _client
     if _client is None:
@@ -127,6 +183,11 @@ def complete(
         reasoning_effort: optional "low" | "medium" | "high" for reasoning models.
         timeout_seconds: request timeout.
     """
+    # Translate Anthropic/bedrock model IDs (`claude-opus-4-7`) into
+    # OpenRouter slugs (`anthropic/claude-opus-4.7`). OpenRouter 400s on the
+    # un-namespaced form. No-op for OpenAI/Google/etc. slugs.
+    model = _translate_model(model)
+
     full_messages: list[dict] = []
     if system:
         full_messages.append({"role": "system", "content": system})
