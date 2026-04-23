@@ -18,6 +18,9 @@ dev = [
     "ruff>=0.6",
 ]
 
+[project.scripts]
+harness = "harness.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
