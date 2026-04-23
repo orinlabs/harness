@@ -10,15 +10,19 @@ The CLI fetches the agent's harness-config from the bedrock platform, builds an
 `AgentConfig`, and runs a single `Harness` run to completion. Environment is
 loaded from `.env` in the current working directory if present.
 
-Required env:
-    HARNESS_PLATFORM_URL          e.g. http://127.0.0.1:8000
+Non-secret identifiers (platform URL, Turso org/group) have baked-in defaults
+below. Only the actual secrets must be provided via env.
+
+Required env (secrets):
     HARNESS_PLATFORM_TOKEN        bedrock product API key
-    HARNESS_TURSO_ORG             Turso org for agent DB storage
-    HARNESS_TURSO_PLATFORM_TOKEN
-    HARNESS_DATABASE_TOKEN
+    HARNESS_TURSO_PLATFORM_TOKEN  Turso platform API token (for DB provisioning)
+    HARNESS_DATABASE_TOKEN        Turso group-scoped data token
     OPENROUTER_API_KEY
 
-Optional env:
+Optional env (override defaults):
+    HARNESS_PLATFORM_URL          default: http://127.0.0.1:8000
+    HARNESS_TURSO_ORG             default: bryanhoulton
+    HARNESS_TURSO_GROUP           default: default
     MODEL                         override the agent's configured model
     REASONING_EFFORT              override reasoning_effort (low|medium|high)
 """
@@ -33,10 +37,16 @@ from pathlib import Path
 import httpx
 
 
+# Non-secret identifiers. Safe to commit; env overrides still win via
+# os.environ.setdefault below.
+DEFAULT_ENV: dict[str, str] = {
+    "HARNESS_PLATFORM_URL": "http://127.0.0.1:8000",
+    "HARNESS_TURSO_ORG": "bryanhoulton",
+    "HARNESS_TURSO_GROUP": "default",
+}
+
 REQUIRED_ENV = (
-    "HARNESS_PLATFORM_URL",
     "HARNESS_PLATFORM_TOKEN",
-    "HARNESS_TURSO_ORG",
     "HARNESS_TURSO_PLATFORM_TOKEN",
     "HARNESS_DATABASE_TOKEN",
     "OPENROUTER_API_KEY",
@@ -123,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("agent_id is required (pass as arg or set $AGENT_ID)")
 
     _load_env()
+
+    for k, v in DEFAULT_ENV.items():
+        os.environ.setdefault(k, v)
 
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
     if missing:
