@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from harness.config import AgentConfig
@@ -95,6 +96,7 @@ class Harness:
 
     def _step(self, turn_span) -> bool:
         """Run one turn. Return False if the loop should stop."""
+        logger.info("turn %d start (run=%s)", self.ctx.turn, self.ctx.run_id)
         # Roll up any completed buckets into higher-tier summaries exactly once
         # per turn, before building the LLM inputs. Skipped internally (no
         # trace span emitted) when nothing is pending.
@@ -102,6 +104,13 @@ class Harness:
 
         system, messages = self.memory.build_llm_inputs(self.config.system_prompt)
         tools_schema = [t.schema.to_openai() for t in self.tool_map.values()]
+        logger.info(
+            "turn %d built inputs: system_chars=%d messages=%d tools=%d",
+            self.ctx.turn,
+            len(system or ""),
+            len(messages),
+            len(tools_schema),
+        )
 
         llm_started_at = _now_iso()
         with llm_span(
@@ -146,7 +155,25 @@ class Harness:
         assistant_msg = resp.raw["choices"][0]["message"]
         self.memory.log_messages([assistant_msg])
 
-        for tc in resp.tool_calls:
+        logger.info(
+            "turn %d dispatching %d tool_call(s): %s",
+            self.ctx.turn,
+            len(resp.tool_calls),
+            ", ".join(tc.name for tc in resp.tool_calls) or "-",
+        )
+        for i, tc in enumerate(resp.tool_calls):
+            args_preview = json.dumps(tc.args, default=str)
+            if len(args_preview) > 200:
+                args_preview = args_preview[:200] + "…"
+            logger.info(
+                "tool_call[%d/%d] start name=%s id=%s args=%s",
+                i + 1,
+                len(resp.tool_calls),
+                tc.name,
+                tc.id,
+                args_preview,
+            )
+            t0 = time.monotonic()
             with tool_span(
                 tc.name,
                 input=json.dumps({"args": tc.args, "tool_call_id": tc.id}),
@@ -165,15 +192,25 @@ class Harness:
                         logger.exception("tool %s raised", tc.name)
                         s.set_metadata(error=f"{type(e).__name__}: {e}")
                         result_text = f"Tool {tc.name} raised: {type(e).__name__}: {e}"
+            logger.info(
+                "tool_call[%d/%d] done name=%s elapsed=%.2fs result_chars=%d",
+                i + 1,
+                len(resp.tool_calls),
+                tc.name,
+                time.monotonic() - t0,
+                len(result_text),
+            )
 
             self.memory.log_messages(
                 [{"role": "tool", "tool_call_id": tc.id, "content": result_text}]
             )
 
         if self.ctx.sleep_requested:
+            logger.info("turn %d sleep_requested -> exiting loop", self.ctx.turn)
             return False
 
         if not resp.tool_calls:
+            logger.info("turn %d no tool_calls -> nudging memory", self.ctx.turn)
             self.memory.nudge()
 
         return True

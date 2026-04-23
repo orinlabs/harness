@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -146,14 +147,51 @@ def complete(
         reasoning_cfg["effort"] = reasoning_effort
     body["reasoning"] = reasoning_cfg
 
-    resp = _http().post(
-        _OPENROUTER_URL,
-        json=body,
-        headers={
-            "Authorization": f"Bearer {_api_key()}",
-            "Content-Type": "application/json",
-        },
-        timeout=timeout_seconds,
+    body_bytes = len(json.dumps(body, default=str))
+    logger.info(
+        "openrouter POST start model=%s messages=%d tools=%d "
+        "reasoning_effort=%s body_bytes=%d timeout=%.1fs",
+        model,
+        len(full_messages),
+        len(tools) if tools else 0,
+        reasoning_effort or "-",
+        body_bytes,
+        timeout_seconds,
+    )
+    t0 = time.monotonic()
+    try:
+        resp = _http().post(
+            _OPENROUTER_URL,
+            json=body,
+            headers={
+                "Authorization": f"Bearer {_api_key()}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout_seconds,
+        )
+    except httpx.TimeoutException as e:
+        logger.error(
+            "openrouter POST timeout after %.2fs model=%s (%s: %s)",
+            time.monotonic() - t0,
+            model,
+            type(e).__name__,
+            e,
+        )
+        raise
+    except Exception as e:
+        logger.exception(
+            "openrouter POST failed after %.2fs model=%s (%s)",
+            time.monotonic() - t0,
+            model,
+            type(e).__name__,
+        )
+        raise
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "openrouter POST done status=%d elapsed=%.2fs model=%s",
+        resp.status_code,
+        elapsed,
+        model,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -190,6 +228,18 @@ def complete(
         reasoning_tokens=int(completion_details.get("reasoning_tokens") or 0),
         model=str(data.get("model") or model),
         llm_calls=1,
+    )
+
+    logger.info(
+        "openrouter response finish=%s tool_calls=%d "
+        "tokens in=%d out=%d cached=%d reasoning=%d cost=$%.5f",
+        finish_reason or "-",
+        len(tool_calls),
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.cached_tokens,
+        usage.reasoning_tokens,
+        usage.total_cost,
     )
 
     return LLMResponse(

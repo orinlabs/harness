@@ -28,16 +28,21 @@ Optional env (override defaults):
     HARNESS_TURSO_GROUP           default: default
     MODEL                         override the agent's configured model
     REASONING_EFFORT              override reasoning_effort (low|medium|high)
+    LOG_LEVEL                     default: DEBUG (DEBUG|INFO|WARNING|ERROR)
 """
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 # Non-secret identifiers. Safe to commit; env overrides still win via
@@ -55,6 +60,42 @@ REQUIRED_ENV = (
 )
 
 
+def _configure_logging(level: str) -> None:
+    """Configure root logging for the CLI process.
+
+    Writes to stdout (not stderr) so the live harness trace — turns, LLM calls,
+    tool calls — interleaves with ordinary process output and is easy to pipe
+    into `tee` / `grep`. Uses `force=True` so this wins even if some transitive
+    import (e.g. httpx, libsql) called `basicConfig` first.
+    """
+    numeric = getattr(logging, level.upper(), None)
+    if not isinstance(numeric, int):
+        numeric = logging.INFO
+
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
+    logging.basicConfig(level=numeric, handlers=[handler], force=True)
+
+    # Third-party libraries are chatty at DEBUG; keep them at INFO unless the
+    # user explicitly asked for DEBUG on the root.
+    if numeric > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # Ensure stdout is line-buffered so each log record flushes immediately —
+    # critical when the process hangs mid-LLM-call and we need to see the last
+    # log that made it out.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        pass
+
+
 def _load_env() -> None:
     """Load .env from cwd if `python-dotenv` is available. Silent no-op otherwise.
 
@@ -64,17 +105,21 @@ def _load_env() -> None:
     try:
         from dotenv import load_dotenv
     except ImportError:
+        logger.debug("python-dotenv not installed; skipping .env load")
         return
     env_path = Path.cwd() / ".env"
     if env_path.exists():
+        logger.debug("loading env from %s", env_path)
         load_dotenv(env_path)
 
 
 def _fetch_config(agent_id: str) -> dict:
     base = os.environ["BEDROCK_URL"].rstrip("/")
     token = os.environ["BEDROCK_TOKEN"]
+    url = f"{base}/api/cloud/agents/{agent_id}/harness-config/"
+    logger.info("fetching harness config from %s", url)
     resp = httpx.get(
-        f"{base}/api/cloud/agents/{agent_id}/harness-config/",
+        url,
         headers={"Authorization": f"Bearer {token}"},
         timeout=10.0,
     )
@@ -134,7 +179,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.",
     )
+    parser.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "DEBUG"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR. Defaults to $LOG_LEVEL or DEBUG.",
+    )
     args = parser.parse_args(argv)
+
+    _configure_logging(args.log_level)
 
     if not args.agent_id:
         parser.error("agent_id is required (pass as arg or set $AGENT_ID)")
@@ -153,16 +205,29 @@ def main(argv: list[str] | None = None) -> int:
 
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
     if missing:
+        logger.error("missing required env: %s", ", ".join(missing))
         print(f"missing required env: {', '.join(missing)}", file=sys.stderr)
         return 2
 
     cfg = _fetch_config(args.agent_id)
     config = _build_config(cfg)
+    logger.info(
+        "built agent config: id=%s model=%s adapters=%d",
+        config.id,
+        config.model,
+        len(config.adapters),
+    )
 
     from harness import Harness
 
     run_id = args.run_id or str(uuid.uuid4())
-    Harness(config, run_id=run_id).run()
+    logger.info("starting harness run agent=%s run=%s", args.agent_id, run_id)
+    try:
+        Harness(config, run_id=run_id).run()
+    except Exception:
+        logger.exception("harness run failed agent=%s run=%s", args.agent_id, run_id)
+        raise
+    logger.info("harness run complete agent=%s run=%s", args.agent_id, run_id)
     return 0
 
 
