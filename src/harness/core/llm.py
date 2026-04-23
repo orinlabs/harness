@@ -28,7 +28,9 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 def _http() -> httpx.Client:
     global _client
     if _client is None:
-        _client = httpx.Client(timeout=120.0)
+        # Default client timeout is intentionally lenient; each call overrides
+        # with an `httpx.Timeout` that splits connect / read / write phases.
+        _client = httpx.Client(timeout=httpx.Timeout(60.0))
     return _client
 
 
@@ -147,10 +149,28 @@ def complete(
         reasoning_cfg["effort"] = reasoning_effort
     body["reasoning"] = reasoning_cfg
 
+    # Stream the response. Reasoning models (gpt-5 thinking, o1, Claude with
+    # extended thinking) commonly take minutes before emitting any non-streaming
+    # body bytes, which looks indistinguishable from a deadlock. Streaming gives
+    # us (a) SSE keepalive pings from OpenRouter (`: OPENROUTER PROCESSING`) so
+    # the per-read timeout doesn't trip spuriously during the thinking phase,
+    # and (b) token-by-token progress logs so a real hang is obvious.
+    body["stream"] = True
+
+    # Split timeouts so a stalled DNS/TLS handshake fails fast but a slow
+    # provider generation doesn't. `read` is "max idle between bytes" — with
+    # SSE keepalives every few seconds this is generously forgiving.
+    timeout = httpx.Timeout(
+        connect=15.0,
+        read=timeout_seconds,
+        write=30.0,
+        pool=30.0,
+    )
+
     body_bytes = len(json.dumps(body, default=str))
     logger.info(
-        "openrouter POST start model=%s messages=%d tools=%d "
-        "reasoning_effort=%s body_bytes=%d timeout=%.1fs",
+        "openrouter POST start (stream) model=%s messages=%d tools=%d "
+        "reasoning_effort=%s body_bytes=%d read_timeout=%.1fs",
         model,
         len(full_messages),
         len(tools) if tools else 0,
@@ -160,15 +180,7 @@ def complete(
     )
     t0 = time.monotonic()
     try:
-        resp = _http().post(
-            _OPENROUTER_URL,
-            json=body,
-            headers={
-                "Authorization": f"Bearer {_api_key()}",
-                "Content-Type": "application/json",
-            },
-            timeout=timeout_seconds,
-        )
+        data = _stream_chat_completion(body, timeout=timeout, model=model)
     except httpx.TimeoutException as e:
         logger.error(
             "openrouter POST timeout after %.2fs model=%s (%s: %s)",
@@ -188,13 +200,10 @@ def complete(
         raise
     elapsed = time.monotonic() - t0
     logger.info(
-        "openrouter POST done status=%d elapsed=%.2fs model=%s",
-        resp.status_code,
+        "openrouter POST done elapsed=%.2fs model=%s",
         elapsed,
         model,
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     choice = data["choices"][0]
     msg = choice.get("message", {})
@@ -250,6 +259,156 @@ def complete(
         reasoning=reasoning,
         raw=data,
     )
+
+
+def _stream_chat_completion(
+    body: dict, *, timeout: httpx.Timeout, model: str
+) -> dict:
+    """POST with `stream: true` and reassemble SSE deltas into a dict that
+    matches the non-streaming response shape the rest of `complete()` expects.
+
+    Handles OpenRouter-specific quirks:
+      - Keepalive SSE comments (`: OPENROUTER PROCESSING`) arrive every few
+        seconds while the upstream provider is thinking; we log them at DEBUG
+        and reset a "last progress" timer so a real stall is visible.
+      - Tool call fragments stream as `delta.tool_calls[i].function.arguments`
+        chunks that must be concatenated by `index` (not by id, which only
+        appears on the first fragment).
+      - Usage arrives in a final delta after `finish_reason`, or alongside it
+        on the last choice chunk.
+    """
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    reasoning_details: list[dict] = []
+    tool_calls_by_index: dict[int, dict] = {}
+    finish_reason: str = ""
+    usage: dict = {}
+    response_model: str = model
+    response_id: str = ""
+    chunk_count = 0
+    last_progress = time.monotonic()
+
+    with _http().stream(
+        "POST",
+        _OPENROUTER_URL,
+        json=body,
+        headers={
+            "Authorization": f"Bearer {_api_key()}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        timeout=timeout,
+    ) as resp:
+        logger.info(
+            "openrouter stream opened status=%d model=%s",
+            resp.status_code,
+            model,
+        )
+        if resp.status_code >= 400:
+            body_bytes = resp.read()
+            logger.error(
+                "openrouter stream error status=%d body=%s",
+                resp.status_code,
+                body_bytes[:2000].decode("utf-8", errors="replace"),
+            )
+            resp.raise_for_status()
+
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            if line.startswith(":"):
+                # SSE comment / keepalive. Reset progress timer so we don't
+                # log a "no progress" warning during legit reasoning phases.
+                logger.debug("openrouter keepalive: %s", line[:120])
+                last_progress = time.monotonic()
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                logger.warning("openrouter bad SSE payload: %r", payload[:200])
+                continue
+
+            chunk_count += 1
+            if chunk.get("id") and not response_id:
+                response_id = chunk["id"]
+            if chunk.get("model"):
+                response_model = chunk["model"]
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+
+                piece = delta.get("content")
+                if piece:
+                    content_parts.append(piece)
+
+                reasoning_piece = delta.get("reasoning")
+                if isinstance(reasoning_piece, str) and reasoning_piece:
+                    reasoning_parts.append(reasoning_piece)
+
+                details = delta.get("reasoning_details")
+                if isinstance(details, list):
+                    reasoning_details.extend(d for d in details if isinstance(d, dict))
+
+                for tc_delta in delta.get("tool_calls") or []:
+                    idx = tc_delta.get("index", 0)
+                    entry = tool_calls_by_index.setdefault(
+                        idx,
+                        {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    if tc_delta.get("id"):
+                        entry["id"] = tc_delta["id"]
+                    if tc_delta.get("type"):
+                        entry["type"] = tc_delta["type"]
+                    fn_delta = tc_delta.get("function") or {}
+                    if fn_delta.get("name"):
+                        entry["function"]["name"] = fn_delta["name"]
+                    if "arguments" in fn_delta:
+                        entry["function"]["arguments"] += fn_delta["arguments"] or ""
+
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+
+            now = time.monotonic()
+            if now - last_progress > 5.0:
+                logger.info(
+                    "openrouter streaming progress chunks=%d "
+                    "content_chars=%d reasoning_chars=%d tool_calls=%d",
+                    chunk_count,
+                    sum(len(p) for p in content_parts),
+                    sum(len(p) for p in reasoning_parts),
+                    len(tool_calls_by_index),
+                )
+                last_progress = now
+
+    tool_calls_list = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
+    message: dict[str, Any] = {"role": "assistant"}
+    message["content"] = "".join(content_parts) if content_parts else None
+    if tool_calls_list:
+        message["tool_calls"] = tool_calls_list
+    if reasoning_parts:
+        message["reasoning"] = "".join(reasoning_parts)
+    if reasoning_details:
+        message["reasoning_details"] = reasoning_details
+
+    return {
+        "id": response_id,
+        "model": response_model,
+        "choices": [
+            {"index": 0, "message": message, "finish_reason": finish_reason}
+        ],
+        "usage": usage,
+    }
 
 
 def _parse_reasoning(msg: dict) -> str | None:
