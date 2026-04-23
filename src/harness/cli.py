@@ -13,14 +13,17 @@ loaded from `.env` in the current working directory if present.
 Non-secret identifiers (platform URL, Turso org/group) have baked-in defaults
 below. Only the actual secrets must be provided via env.
 
+Required CLI args:
+    --bedrock-token               bedrock product API key (also settable via
+                                  $BEDROCK_TOKEN; CLI flag wins)
+
 Required env (secrets):
-    HARNESS_PLATFORM_TOKEN        bedrock product API key
     HARNESS_TURSO_PLATFORM_TOKEN  Turso platform API token (for DB provisioning)
     HARNESS_DATABASE_TOKEN        Turso group-scoped data token
     OPENROUTER_API_KEY
 
 Optional env (override defaults):
-    HARNESS_PLATFORM_URL          default: http://127.0.0.1:8000
+    BEDROCK_URL                   default: http://127.0.0.1:8000
     HARNESS_TURSO_ORG             default: bryanhoulton
     HARNESS_TURSO_GROUP           default: default
     MODEL                         override the agent's configured model
@@ -40,13 +43,12 @@ import httpx
 # Non-secret identifiers. Safe to commit; env overrides still win via
 # os.environ.setdefault below.
 DEFAULT_ENV: dict[str, str] = {
-    "HARNESS_PLATFORM_URL": "http://127.0.0.1:8000",
+    "BEDROCK_URL": "http://127.0.0.1:8000",
     "HARNESS_TURSO_ORG": "bryanhoulton",
     "HARNESS_TURSO_GROUP": "default",
 }
 
 REQUIRED_ENV = (
-    "HARNESS_PLATFORM_TOKEN",
     "HARNESS_TURSO_PLATFORM_TOKEN",
     "HARNESS_DATABASE_TOKEN",
     "OPENROUTER_API_KEY",
@@ -69,8 +71,8 @@ def _load_env() -> None:
 
 
 def _fetch_config(agent_id: str) -> dict:
-    base = os.environ["HARNESS_PLATFORM_URL"].rstrip("/")
-    token = os.environ["HARNESS_PLATFORM_TOKEN"]
+    base = os.environ["BEDROCK_URL"].rstrip("/")
+    token = os.environ["BEDROCK_TOKEN"]
     resp = httpx.get(
         f"{base}/api/cloud/agents/{agent_id}/harness-config/",
         headers={"Authorization": f"Bearer {token}"},
@@ -127,6 +129,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Run UUID. Defaults to a fresh uuid4.",
     )
+    parser.add_argument(
+        "--bedrock-token",
+        default=None,
+        help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.",
+    )
     args = parser.parse_args(argv)
 
     if not args.agent_id:
@@ -136,6 +143,13 @@ def main(argv: list[str] | None = None) -> int:
 
     for k, v in DEFAULT_ENV.items():
         os.environ.setdefault(k, v)
+
+    bedrock_token = args.bedrock_token or os.environ.get("BEDROCK_TOKEN")
+    if not bedrock_token:
+        parser.error("--bedrock-token is required (pass as flag or set $BEDROCK_TOKEN)")
+    # Propagate so downstream modules (tracer, runtime_api, external tools)
+    # can pick it up via the usual os.environ lookup.
+    os.environ["BEDROCK_TOKEN"] = bedrock_token
 
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
     if missing:

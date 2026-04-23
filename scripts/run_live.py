@@ -5,19 +5,21 @@ and runs. Traces flow to bedrock's /api/tracing/* endpoints; storage goes to
 Turso; external tool calls hit bedrock's /api/cloud/agents/{id}/tools/{name}/invoke/.
 
 Env (from .env):
-    HARNESS_PLATFORM_URL        (e.g. http://127.0.0.1:8000)
-    HARNESS_PLATFORM_TOKEN      (bedrock product API key)
+    BEDROCK_URL                 (e.g. http://127.0.0.1:8000)
+    BEDROCK_TOKEN               (bedrock product API key; usually passed on the
+                                 CLI but also honored from env for convenience)
     HARNESS_TURSO_ORG           (for agent DB storage)
     HARNESS_TURSO_PLATFORM_TOKEN
     HARNESS_DATABASE_TOKEN
     OPENROUTER_API_KEY
 
 Usage:
-    uv run python scripts/run_live.py <AGENT_UUID>
-    AGENT_ID=<uuid> uv run python scripts/run_live.py
+    uv run python scripts/run_live.py <AGENT_UUID> --bedrock-token <TOKEN>
+    AGENT_ID=<uuid> BEDROCK_TOKEN=<TOKEN> uv run python scripts/run_live.py
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -37,8 +39,8 @@ def banner(text: str) -> None:
 
 
 def fetch_config(agent_id: str) -> dict:
-    base = os.environ["HARNESS_PLATFORM_URL"].rstrip("/")
-    token = os.environ["HARNESS_PLATFORM_TOKEN"]
+    base = os.environ["BEDROCK_URL"].rstrip("/")
+    token = os.environ["BEDROCK_TOKEN"]
     r = httpx.get(
         f"{base}/api/cloud/agents/{agent_id}/harness-config/",
         headers={"Authorization": f"Bearer {token}"},
@@ -49,14 +51,24 @@ def fetch_config(agent_id: str) -> dict:
 
 
 def main() -> None:
-    agent_id = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("AGENT_ID")
+    parser = argparse.ArgumentParser(prog="run_live.py")
+    parser.add_argument("agent_id", nargs="?", default=os.environ.get("AGENT_ID"))
+    parser.add_argument(
+        "--bedrock-token",
+        default=os.environ.get("BEDROCK_TOKEN"),
+        help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.",
+    )
+    args = parser.parse_args()
+
+    agent_id = args.agent_id
     if not agent_id:
-        print("usage: run_live.py <AGENT_UUID>  (or set AGENT_ID=<uuid>)")
-        sys.exit(1)
+        parser.error("agent_id is required (positional or $AGENT_ID)")
+    if not args.bedrock_token:
+        parser.error("--bedrock-token is required (flag or $BEDROCK_TOKEN)")
+    os.environ["BEDROCK_TOKEN"] = args.bedrock_token
 
     for required in (
-        "HARNESS_PLATFORM_URL",
-        "HARNESS_PLATFORM_TOKEN",
+        "BEDROCK_URL",
         "HARNESS_TURSO_ORG",
         "HARNESS_TURSO_PLATFORM_TOKEN",
         "HARNESS_DATABASE_TOKEN",
@@ -114,8 +126,8 @@ def main() -> None:
     banner("DONE")
 
     # Pull the trace back from bedrock so we can confirm it landed.
-    base = os.environ["HARNESS_PLATFORM_URL"].rstrip("/")
-    token = os.environ["HARNESS_PLATFORM_TOKEN"]
+    base = os.environ["BEDROCK_URL"].rstrip("/")
+    token = os.environ["BEDROCK_TOKEN"]
     r = httpx.get(
         f"{base}/api/tracing/traces/",
         headers={"Authorization": f"Bearer {token}"},

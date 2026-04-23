@@ -4,7 +4,7 @@ Matches the platform's existing trace shape (two-tier model of `Trace` + `Span`,
 typed spans, separate input/output text fields, and standard metadata keys
 like `usage`, `llm_cost`, `model_breakdown`, `summaries_created`).
 
-Wire protocol (authed with HARNESS_PLATFORM_TOKEN):
+Wire protocol (authed with BEDROCK_TOKEN):
 
     POST   {PLATFORM}/api/tracing/traces/              -> create trace
       body:  {id, name, started_at, agent_id, metadata}
@@ -70,16 +70,16 @@ _client: httpx.Client | None = None
 def _platform_url() -> str | None:
     """Return the platform base URL or None if tracing is disabled.
 
-    Tracing is best-effort. When `HARNESS_PLATFORM_URL` is unset, all tracer
+    Tracing is best-effort. When `BEDROCK_URL` is unset, all tracer
     HTTP calls short-circuit. This is what lets unit tests that don't need a
     platform (e.g. the memory port) run without spinning up fake_platform.
     """
-    url = os.environ.get("HARNESS_PLATFORM_URL")
+    url = os.environ.get("BEDROCK_URL")
     return url.rstrip("/") if url else None
 
 
 def _auth_header() -> dict[str, str]:
-    token = os.environ.get("HARNESS_PLATFORM_TOKEN", "")
+    token = os.environ.get("BEDROCK_TOKEN", "")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 

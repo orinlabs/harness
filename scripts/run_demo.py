@@ -77,8 +77,8 @@ def main() -> None:
     print(f"[fake_platform] listening at {platform.url}")
 
     tmp = Path(tempfile.mkdtemp(prefix="harness_demo_"))
-    os.environ["HARNESS_PLATFORM_URL"] = platform.url
-    os.environ["HARNESS_PLATFORM_TOKEN"] = "demo-token"
+    os.environ["BEDROCK_URL"] = platform.url
+    os.environ["BEDROCK_TOKEN"] = "demo-token"
     os.environ["HARNESS_STORAGE_ROOT"] = str(tmp)
     print(f"[storage] sqlite files under {tmp}")
 

@@ -6,7 +6,7 @@ implementation — auth, proxying, and dispatching all live on the platform side
 
 Wire contract:
   POST {spec.url}
-  Headers: Authorization: Bearer $HARNESS_PLATFORM_TOKEN, Content-Type: application/json
+  Headers: Authorization: Bearer $BEDROCK_TOKEN, Content-Type: application/json
   Body:    {"args": {...}, "agent_id": "...", "run_id": "..."}
   200:     {"text": str, "images": [base64, ...] | null}
   non-2xx: surfaced verbatim to the model as ToolResult.text (JSON body -> JSON
@@ -39,7 +39,7 @@ def _http() -> httpx.Client:
 
 
 def _auth_header() -> dict[str, str]:
-    token = os.environ.get("HARNESS_PLATFORM_TOKEN", "")
+    token = os.environ.get("BEDROCK_TOKEN", "")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 

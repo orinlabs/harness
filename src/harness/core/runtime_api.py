@@ -17,16 +17,16 @@ _client: httpx.Client | None = None
 
 
 def _platform_url() -> str:
-    url = os.environ.get("HARNESS_PLATFORM_URL")
+    url = os.environ.get("BEDROCK_URL")
     if not url:
         raise RuntimeError(
-            "HARNESS_PLATFORM_URL is not set. Core clients need it to reach the infra platform."
+            "BEDROCK_URL is not set. Core clients need it to reach the infra platform."
         )
     return url.rstrip("/")
 
 
 def _auth_header() -> dict[str, str]:
-    token = os.environ.get("HARNESS_PLATFORM_TOKEN", "")
+    token = os.environ.get("BEDROCK_TOKEN", "")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 

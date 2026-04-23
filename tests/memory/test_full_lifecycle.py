@@ -33,8 +33,8 @@ def env(tmp_path, monkeypatch, openrouter_key):
 
     platform = FakePlatform()
     platform.start()
-    monkeypatch.setenv("HARNESS_PLATFORM_URL", platform.url)
-    monkeypatch.setenv("HARNESS_PLATFORM_TOKEN", "lifecycle-test")
+    monkeypatch.setenv("BEDROCK_URL", platform.url)
+    monkeypatch.setenv("BEDROCK_TOKEN", "lifecycle-test")
 
     from harness.core import llm, runtime_api, storage, tracer
 

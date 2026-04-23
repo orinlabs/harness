@@ -176,7 +176,7 @@ sequenceDiagram
 
 Wire format:
 
-- **Request:** `POST {spec.url}` with JSON body `{"args": {...}, "agent_id": "...", "run_id": "..."}` and headers `Authorization: Bearer $HARNESS_PLATFORM_TOKEN`, `Content-Type: application/json`.
+- **Request:** `POST {spec.url}` with JSON body `{"args": {...}, "agent_id": "...", "run_id": "..."}` and headers `Authorization: Bearer $BEDROCK_TOKEN`, `Content-Type: application/json`.
 - **Response:** `200` with JSON `{"text": "...", "images": ["<base64>", ...] | null}`.
 - **Non-2xx JSON error:** body is surfaced to the model verbatim — `ToolResult.text` is the JSON-stringified response body. This lets the model reason about and recover from real upstream errors.
 - **Non-2xx non-JSON error:** falls back to `"<status> <reason>: <text-truncated>"`.

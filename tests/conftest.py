@@ -21,8 +21,8 @@ for _var in (
     "HARNESS_TURSO_ORG",
     "HARNESS_TURSO_GROUP",
     "HARNESS_TURSO_PLATFORM_TOKEN",
-    "HARNESS_PLATFORM_URL",
-    "HARNESS_PLATFORM_TOKEN",
+    "BEDROCK_URL",
+    "BEDROCK_TOKEN",
 ):
     os.environ.pop(_var, None)
 
@@ -32,8 +32,8 @@ def fake_platform(monkeypatch):
     """Start a FakePlatform, wire env vars, reload core clients so they pick them up."""
     platform = FakePlatform()
     platform.start()
-    monkeypatch.setenv("HARNESS_PLATFORM_URL", platform.url)
-    monkeypatch.setenv("HARNESS_PLATFORM_TOKEN", "test-token")
+    monkeypatch.setenv("BEDROCK_URL", platform.url)
+    monkeypatch.setenv("BEDROCK_TOKEN", "test-token")
 
     from harness.core import runtime_api, tracer
 
