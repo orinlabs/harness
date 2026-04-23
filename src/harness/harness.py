@@ -123,14 +123,25 @@ class Harness:
                     default=str,
                 )[:20000]
             )
-            resp = llm.complete(
-                model=self.config.model,
-                system=system,
-                messages=messages,
-                tools=tools_schema,
-                tool_choice="required",
-                reasoning_effort=self.config.reasoning_effort,
-            )
+            try:
+                resp = llm.complete(
+                    model=self.config.model,
+                    system=system,
+                    messages=messages,
+                    tools=tools_schema,
+                    tool_choice="required",
+                    reasoning_effort=self.config.reasoning_effort,
+                )
+            except llm.OpenRouterError as e:
+                # Surface the upstream body in the span's output_text so the
+                # trace UI shows the rejection payload next to the request,
+                # not just as a stringified error on the span itself.
+                s.output(e.body)
+                s.set_metadata(
+                    openrouter_status=e.status_code,
+                    openrouter_error_body=e.body,
+                )
+                raise
             s.output(json.dumps(resp.raw, default=str)[:20000])
             s.set_metadata(llm_cost=resp.usage.to_llm_cost_dict())
         llm_ended_at = _now_iso()

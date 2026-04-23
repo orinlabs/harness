@@ -25,6 +25,24 @@ _client: httpx.Client | None = None
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+class OpenRouterError(RuntimeError):
+    """Non-2xx response from OpenRouter.
+
+    Carries the raw response body so the tracer's generic `f"{type(e).__name__}:
+    {e}"` error capture surfaces the JSON `{error: {message, code}}` payload
+    OpenRouter returns — which is usually the only place that explains *why*
+    a request 400'd (invalid model slug, schema rejected, quota, etc.).
+    """
+
+    def __init__(self, *, status_code: int, body: str, model: str):
+        self.status_code = status_code
+        self.body = body
+        self.model = model
+        super().__init__(
+            f"openrouter HTTP {status_code} for model {model}: {body}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Model slug translation
 # ---------------------------------------------------------------------------
@@ -367,12 +385,22 @@ def _stream_chat_completion(
         )
         if resp.status_code >= 400:
             body_bytes = resp.read()
+            body_text = body_bytes[:4000].decode("utf-8", errors="replace")
             logger.error(
                 "openrouter stream error status=%d body=%s",
                 resp.status_code,
-                body_bytes[:2000].decode("utf-8", errors="replace"),
+                body_text,
             )
-            resp.raise_for_status()
+            # Default httpx.HTTPStatusError only shows the URL + status, which
+            # drops the useful part — OpenRouter returns a JSON `{error: {...}}`
+            # body on 4xx/5xx explaining *why* (invalid model, quota, schema
+            # mismatch, etc.). Raise our own error so the span's error field
+            # (captured from `str(e)`) includes the body.
+            raise OpenRouterError(
+                status_code=resp.status_code,
+                body=body_text,
+                model=model,
+            )
 
         for line in resp.iter_lines():
             if not line:
