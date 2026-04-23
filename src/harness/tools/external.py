@@ -86,11 +86,20 @@ class ExternalTool:
                 timeout=self._spec.timeout_seconds,
             )
         except httpx.TimeoutException:
-            logger.warning("external tool %s timed out", self._spec.name)
+            logger.warning(
+                "external tool %s timed out calling %s",
+                self._spec.name,
+                self._spec.url,
+            )
             return ToolResult(text=f"timeout after {self._spec.timeout_seconds}s")
         except httpx.HTTPError as e:
-            logger.warning("external tool %s transport error: %s", self._spec.name, e)
-            return ToolResult(text=f"transport error: {e}")
+            logger.warning(
+                "external tool %s transport error calling %s: %s",
+                self._spec.name,
+                self._spec.url,
+                e,
+            )
+            return ToolResult(text=f"transport error calling {self._spec.url}: {e}")
 
         if 200 <= resp.status_code < 300:
             return self._parse_success(resp.json())
