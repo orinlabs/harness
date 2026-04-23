@@ -193,16 +193,18 @@ def main() -> None:
         f"\n  turns: {sum(1 for s in platform.spans_open.values() if s['name'].startswith('turn_'))}"
     )
     print(
-        f"  LLM calls: {sum(1 for s in platform.spans_open.values() if s['name'] == 'llm_call')}"
+        f"  LLM calls: {sum(1 for s in platform.spans_open.values() if s['span_type'] == 'llm')}"
     )
     print(
-        f"  tool calls: {sum(1 for s in platform.spans_open.values() if s['name'] == 'tool_call')}"
+        f"  tool calls: {sum(1 for s in platform.spans_open.values() if s['span_type'] == 'tool')}"
     )
 
     total_cost = 0.0
     for span_id, span in platform.spans_closed.items():
-        if platform.spans_open.get(span_id, {}).get("name") == "llm_call":
-            total_cost += span.get("metadata", {}).get("usage", {}).get("total_cost", 0.0)
+        if platform.spans_open.get(span_id, {}).get("span_type") == "llm":
+            total_cost += (
+                span.get("metadata", {}).get("llm_cost", {}).get("total_cost_usd", 0.0)
+            )
     print(f"  total cost: ${total_cost:.6f}")
 
     if platform.sleep_requests:

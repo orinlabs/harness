@@ -1,7 +1,8 @@
 """Runtime API client.
 
 Agent-scoped runtime endpoints on the infra platform. Currently just sleep:
-  - POST /agents/{agent_id}/sleep  { until: iso8601 | "indefinite", reason: str }
+  - POST /api/cloud/agents/{agent_id}/sleep/
+    body: { until: iso8601 | "indefinite", reason: str }
 
 Callers pass agent_id explicitly (it's always known at the call site).
 """
@@ -43,7 +44,7 @@ def sleep(agent_id: str, until: str, reason: str = "") -> dict[str, Any]:
     Returns the platform's JSON response body.
     """
     resp = _http().post(
-        f"{_platform_url()}/agents/{agent_id}/sleep",
+        f"{_platform_url()}/api/cloud/agents/{agent_id}/sleep/",
         json={"until": until, "reason": reason},
         headers=_auth_header(),
     )

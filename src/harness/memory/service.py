@@ -57,7 +57,13 @@ class MemoryService:
         *,
         ts_ns: int | None = None,
     ) -> None:
-        """Append OpenAI chat-format messages to the log and refresh summaries."""
+        """Append OpenAI chat-format messages to the log.
+
+        Does **not** trigger summarization; call `update_summaries()` separately
+        (the harness does it once per turn at the start). This keeps the call
+        graph simple and prevents N redundant summary passes per turn when a
+        turn logs N tool-result messages.
+        """
         assert storage.db is not None, "storage.load must be called before log_messages"
         if not messages:
             return
@@ -77,8 +83,6 @@ class MemoryService:
             "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
             rows,
         )
-
-        self.update_summaries()
 
     def update_summaries(self, *, current_time: datetime | None = None) -> SummarizerUsage:
         updater = SummaryUpdater(

@@ -47,16 +47,16 @@ def test_harness_runs_and_sleeps(harness_env):
     Harness(config, run_id="run-e2e-1").run()
 
     run_spans = [
-        s for s in harness_env.spans_open.values() if s["name"] == "run"
+        s for s in harness_env.spans_open.values() if s["name"] == "run_agent"
     ]
     turn_spans = [
         s for s in harness_env.spans_open.values() if s["name"].startswith("turn_")
     ]
     llm_spans = [
-        s for s in harness_env.spans_open.values() if s["name"] == "llm_call"
+        s for s in harness_env.spans_open.values() if s["span_type"] == "llm"
     ]
     tool_spans = [
-        s for s in harness_env.spans_open.values() if s["name"] == "tool_call"
+        s for s in harness_env.spans_open.values() if s["span_type"] == "tool"
     ]
 
     assert len(run_spans) == 1
@@ -64,22 +64,34 @@ def test_harness_runs_and_sleeps(harness_env):
     assert len(llm_spans) >= 1
     assert len(tool_spans) >= 1
 
+    assert len(harness_env.traces_open) == 1, "one run should produce exactly one trace"
+    trace_id = next(iter(harness_env.traces_open))
+    for s in harness_env.spans_open.values():
+        assert s["trace_id"] == trace_id
+
     run_span = run_spans[0]
+    assert run_span["span_type"] == "text"
     assert run_span["metadata"]["agent_id"] == "agent-e2e"
     assert run_span["metadata"]["run_id"] == "run-e2e-1"
 
     closed = {s_id: s for s_id, s in harness_env.spans_closed.items()}
     llm_closed = [closed[s["id"]] for s in llm_spans if s["id"] in closed]
     assert any(
-        c["metadata"].get("usage", {}).get("total_cost", 0) > 0 for c in llm_closed
-    ), f"no llm_call span reported cost: {[c['metadata'] for c in llm_closed]}"
+        c["metadata"].get("llm_cost", {}).get("total_cost_usd", 0) > 0 for c in llm_closed
+    ), f"no llm span reported llm_cost: {[c['metadata'] for c in llm_closed]}"
+
+    # The run_agent span closes with an aggregate `usage` dict that includes
+    # model_breakdown. Assert cost accumulated.
+    run_closed = closed[run_span["id"]]
+    assert run_closed["metadata"]["usage"]["total_cost_usd"] > 0
+    assert run_closed["metadata"]["usage"]["model_breakdown"], "model_breakdown empty"
 
     sleep_tool_spans = [
         closed[s["id"]]
         for s in tool_spans
-        if s["metadata"].get("tool_name") == "sleep" and s["id"] in closed
+        if s["name"] == "sleep" and s["id"] in closed
     ]
-    assert sleep_tool_spans, "no tool_call span for 'sleep'"
+    assert sleep_tool_spans, "no tool span named 'sleep'"
 
     assert len(harness_env.sleep_requests) == 1
     sr = harness_env.sleep_requests[0]

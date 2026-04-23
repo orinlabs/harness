@@ -87,9 +87,9 @@ def test_external_adapter_tool_end_to_end(harness_env):
     assert echo_posts[0].headers.get("Authorization") == "Bearer test-token"
 
     tool_spans = [
-        s for s in harness_env.spans_open.values() if s["name"] == "tool_call"
+        s for s in harness_env.spans_open.values() if s["span_type"] == "tool"
     ]
-    echo_spans = [s for s in tool_spans if s["metadata"].get("tool_name") == "echo"]
+    echo_spans = [s for s in tool_spans if s["name"] == "echo"]
     assert len(echo_spans) == 1
 
     assert len(harness_env.sleep_requests) == 1

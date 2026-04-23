@@ -103,6 +103,7 @@ def test_one_minute_summaries_generated_for_completed_buckets(memory_env):
         ],
         ts_ns=two_min_ago,
     )
+    m.update_summaries()
 
     rows = memory_env.db.execute(
         "SELECT date, hour, minute, summary FROM one_minute_summaries"
@@ -138,6 +139,7 @@ def test_build_llm_inputs_renders_summary_block(memory_env):
         ],
         ts_ns=long_ago,
     )
+    m.update_summaries()
 
     system, _ = m.build_llm_inputs("base sys")
 

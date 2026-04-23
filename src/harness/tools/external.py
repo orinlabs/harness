@@ -64,7 +64,18 @@ class ExternalTool:
         return ToolSchema(self._spec.name, self._spec.description, self._spec.parameters)
 
     def call(self, args: dict, ctx: RunContext) -> ToolResult:
-        body = {"args": args, "agent_id": ctx.agent_id, "run_id": ctx.run_id}
+        # Include tracing context so the adapter runtime can parent its own
+        # tool span under our active harness tree rather than creating a
+        # sibling trace at the root.
+        from harness.core.tracer import get_current_span_id, get_current_trace_id
+
+        body = {
+            "args": args,
+            "agent_id": ctx.agent_id,
+            "run_id": ctx.run_id,
+            "trace_id": get_current_trace_id(),
+            "parent_span_id": get_current_span_id(),
+        }
         headers = {"Content-Type": "application/json", **_auth_header()}
 
         try:

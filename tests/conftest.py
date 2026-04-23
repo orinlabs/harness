@@ -11,6 +11,21 @@ from tests.fake_platform import FakePlatform
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+# Belt-and-suspenders: `.env` is the production config (real Turso creds, real
+# platform URL). Tests must *never* accidentally talk to those services, so we
+# unset the relevant vars globally here. Individual tests that genuinely want
+# remote Turso or a live platform re-set them via `monkeypatch` or fixtures.
+for _var in (
+    "HARNESS_DATABASE_URL",
+    "HARNESS_DATABASE_TOKEN",
+    "HARNESS_TURSO_ORG",
+    "HARNESS_TURSO_GROUP",
+    "HARNESS_TURSO_PLATFORM_TOKEN",
+    "HARNESS_PLATFORM_URL",
+    "HARNESS_PLATFORM_TOKEN",
+):
+    os.environ.pop(_var, None)
+
 
 @pytest.fixture
 def fake_platform(monkeypatch):

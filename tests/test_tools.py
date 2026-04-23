@@ -36,10 +36,13 @@ def test_external_tool_posts_and_returns_text(fake_platform):
     ]
     assert len(posts) == 1
     req = posts[0]
+    # trace_id/parent_span_id are None when not inside a tracer span context.
     assert req.body == {
         "args": {"x": "hi"},
         "agent_id": "agent-1",
         "run_id": "run-1",
+        "trace_id": None,
+        "parent_span_id": None,
     }
     assert req.headers.get("Authorization") == "Bearer test-token"
     assert req.headers.get("Content-Type") == "application/json"

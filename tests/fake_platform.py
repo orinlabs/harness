@@ -5,10 +5,13 @@ and real error paths. Only the implementation on this side is fake; the wire
 protocol is identical to what the production platform will serve.
 
 Endpoints:
-  POST   /traces/spans               record span start
-  PATCH  /traces/spans/{id}          record span end (+ metadata)
-  POST   /agents/{agent_id}/sleep    record sleep request
-  POST   /fake_tools/{name}          dispatch to a test-registered tool handler
+  POST   /api/tracing/traces/                  record trace open
+  PATCH  /api/tracing/traces/{id}/             record trace close (+ metadata)
+  POST   /api/tracing/spans/                   record span open
+  PATCH  /api/tracing/spans/{id}/              record span close (+ metadata)
+  POST   /api/cloud/agents/{agent_id}/sleep/   record sleep request
+  POST   /fake_tools/{name}                    dispatch to a test-registered
+                                                tool handler
 
 Tests use `FakePlatform` as a context manager or via the `fake_platform` pytest
 fixture. Call `.record` to inspect received requests, and `.register_tool` to
@@ -57,10 +60,20 @@ class FakePlatform:
     _server: HTTPServer | None = None
     _thread: threading.Thread | None = None
     requests: list[RecordedRequest] = field(default_factory=list)
+    traces_open: dict[str, dict] = field(default_factory=dict)
+    traces_closed: dict[str, dict] = field(default_factory=dict)
     spans_open: dict[str, dict] = field(default_factory=dict)
     spans_closed: dict[str, dict] = field(default_factory=dict)
     sleep_requests: list[dict] = field(default_factory=list)
     tool_handlers: dict[str, ToolHandler] = field(default_factory=dict)
+
+    # Convenience views
+    def spans_by_name(self, name: str) -> list[dict]:
+        """Return all opened spans with the given name."""
+        return [s for s in self.spans_open.values() if s["name"] == name]
+
+    def closed_span(self, span_id: str) -> dict | None:
+        return self.spans_closed.get(span_id)
 
     @property
     def url(self) -> str:
@@ -141,13 +154,23 @@ def _make_handler(platform: FakePlatform):
             body = self._read_json()
             self._record(body)
 
-            if self.path == "/traces/spans":
+            if self.path == "/api/tracing/traces/":
+                platform.traces_open[body["id"]] = body
+                self._write(200, {"ok": True})
+                return
+
+            if self.path == "/api/tracing/spans/":
                 platform.spans_open[body["id"]] = body
                 self._write(200, {"ok": True})
                 return
 
-            if self.path.startswith("/agents/") and self.path.endswith("/sleep"):
-                agent_id = self.path.split("/")[2]
+            if (
+                self.path.startswith("/api/cloud/agents/")
+                and self.path.endswith("/sleep/")
+            ):
+                agent_id = self.path[
+                    len("/api/cloud/agents/"):-len("/sleep/")
+                ]
                 platform.sleep_requests.append({"agent_id": agent_id, **(body or {})})
                 self._write(200, {"ok": True})
                 return
@@ -181,8 +204,22 @@ def _make_handler(platform: FakePlatform):
             body = self._read_json()
             self._record(body)
 
-            if self.path.startswith("/traces/spans/"):
-                span_id = self.path[len("/traces/spans/"):]
+            if (
+                self.path.startswith("/api/tracing/traces/")
+                and self.path.endswith("/")
+                and self.path.count("/") == 5
+            ):
+                trace_id = self.path[len("/api/tracing/traces/"):-1]
+                platform.traces_closed[trace_id] = body
+                self._write(200, {"ok": True})
+                return
+
+            if (
+                self.path.startswith("/api/tracing/spans/")
+                and self.path.endswith("/")
+                and self.path.count("/") == 5
+            ):
+                span_id = self.path[len("/api/tracing/spans/"):-1]
                 platform.spans_closed[span_id] = body
                 self._write(200, {"ok": True})
                 return

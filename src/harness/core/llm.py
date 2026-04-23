@@ -46,6 +46,41 @@ class Usage:
     completion_tokens: int
     total_tokens: int
     total_cost: float  # USD; 0.0 if OpenRouter didn't return a cost
+    model: str = ""
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0  # populated only for thinking models (o1/gpt-5/claude-thinking)
+    llm_calls: int = 1
+
+    def to_dict(self) -> dict:
+        """Full usage dict, suitable for `turn_N` / run-level `usage` metadata."""
+        return {
+            "input_tokens": self.prompt_tokens,
+            "output_tokens": self.completion_tokens,
+            "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "total_tokens": self.total_tokens,
+            "model": self.model,
+            "cost_usd": self.total_cost,
+            "total_cost_usd": self.total_cost,
+            "llm_calls": self.llm_calls,
+            "cache_hit_rate": (
+                self.cached_tokens / self.prompt_tokens if self.prompt_tokens > 0 else 0.0
+            ),
+        }
+
+    def to_llm_cost_dict(self) -> dict:
+        """Compact per-call cost dict, suitable for LLM-span `llm_cost` metadata."""
+        return {
+            "model": self.model,
+            "input_tokens": self.prompt_tokens,
+            "output_tokens": self.completion_tokens,
+            "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "total_cost_usd": self.total_cost,
+            "cache_hit_rate": (
+                self.cached_tokens / self.prompt_tokens if self.prompt_tokens > 0 else 0.0
+            ),
+        }
 
 
 @dataclass
@@ -61,7 +96,8 @@ class LLMResponse:
     tool_calls: list[ToolCall]
     finish_reason: str
     usage: Usage
-    raw: dict = field(repr=False)
+    reasoning: str | None = None
+    raw: dict = field(repr=False, default_factory=dict)
 
 
 def complete(
@@ -102,8 +138,13 @@ def complete(
         body["tools"] = tools
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
+    # Always request plain-text reasoning summaries. OpenAI reasoning models
+    # (o1, gpt-5) encrypt raw reasoning by default; `summary: "auto"` opts
+    # into a human-readable summary. No-op on non-reasoning models.
+    reasoning_cfg: dict[str, Any] = {"summary": "auto"}
     if reasoning_effort:
-        body["reasoning"] = {"effort": reasoning_effort}
+        reasoning_cfg["effort"] = reasoning_effort
+    body["reasoning"] = reasoning_cfg
 
     resp = _http().post(
         _OPENROUTER_URL,
@@ -121,6 +162,7 @@ def complete(
     msg = choice.get("message", {})
     text = msg.get("content") or ""
     finish_reason = choice.get("finish_reason") or ""
+    reasoning = _parse_reasoning(msg)
 
     tool_calls: list[ToolCall] = []
     for tc in msg.get("tool_calls") or []:
@@ -136,11 +178,18 @@ def complete(
         )
 
     usage_data = data.get("usage") or {}
+    completion_details = usage_data.get("completion_tokens_details") or {}
     usage = Usage(
         prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
         completion_tokens=int(usage_data.get("completion_tokens") or 0),
         total_tokens=int(usage_data.get("total_tokens") or 0),
         total_cost=float(usage_data.get("cost") or 0.0),
+        cached_tokens=int(
+            (usage_data.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        ),
+        reasoning_tokens=int(completion_details.get("reasoning_tokens") or 0),
+        model=str(data.get("model") or model),
+        llm_calls=1,
     )
 
     return LLMResponse(
@@ -148,5 +197,38 @@ def complete(
         tool_calls=tool_calls,
         finish_reason=finish_reason,
         usage=usage,
+        reasoning=reasoning,
         raw=data,
     )
+
+
+def _parse_reasoning(msg: dict) -> str | None:
+    """Extract plain-text reasoning from an OpenRouter chat/completions message.
+
+    Two shapes show up in practice:
+      - `message.reasoning`: a top-level string (Anthropic, some Gemini, and
+        OpenAI when the reasoning isn't encrypted).
+      - `message.reasoning_details`: a list of structured blocks; summaries
+        carry the plain text even when the raw reasoning is encrypted
+        (OpenAI o1/gpt-5 with `summary: "auto"`).
+
+    Returns None when we only got encrypted content.
+    """
+    direct = msg.get("reasoning")
+    if isinstance(direct, str) and direct.strip():
+        return direct
+
+    details = msg.get("reasoning_details") or []
+    summaries: list[str] = []
+    for d in details:
+        if not isinstance(d, dict):
+            continue
+        # Plain-text variants
+        for key in ("summary", "text", "content"):
+            val = d.get(key)
+            if isinstance(val, str) and val.strip() and val.strip() != "[redacted]":
+                summaries.append(val)
+                break
+    if summaries:
+        return "\n\n".join(summaries)
+    return None

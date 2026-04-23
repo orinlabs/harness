@@ -16,9 +16,16 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from harness.core import llm, storage
+from harness.core.tracer import SpanType, emit_completed_span
 from harness.memory.bucketing import hour_start, last_completed_1m_end
 from harness.memory.marks import force_timezone, week_start_sunday
 from harness.memory.types import PERIOD_META, PeriodType
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone as _tz
+
+    return datetime.now(tz=_tz.utc).isoformat()
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +77,45 @@ class SummaryUpdater:
             current_time = datetime.now().astimezone()
         self.total_usage = SummarizerUsage()
 
+        started_at = _now_iso()
         updated_1m = self._update_one_minute_summaries(current_time)
         updated_5m = self._update_five_minute_summaries(current_time)
         updated_hour = self._update_hourly_summaries(current_time)
         updated_day = self._update_daily_summaries(current_time)
         updated_week = self._update_weekly_summaries(current_time)
         updated_month = self._update_monthly_summaries(current_time)
+        ended_at = _now_iso()
+
+        summaries_created = {
+            "one_minute": len(updated_1m),
+            "five_minute": len(updated_5m),
+            "hourly": len(updated_hour),
+            "daily": len(updated_day),
+            "weekly": len(updated_week),
+            "monthly": len(updated_month),
+        }
+        total_created = sum(summaries_created.values())
+
+        # Only emit a trace span when real work happened — skips the noisy
+        # empty memory_summarization spans that otherwise appear on every
+        # turn before any completed bucket exists.
+        if total_created > 0:
+            emit_completed_span(
+                "memory_summarization",
+                span_type=SpanType.TEXT,
+                started_at=started_at,
+                ended_at=ended_at,
+                metadata={
+                    "summaries_created": summaries_created,
+                    "usage": {
+                        "input_tokens": self.total_usage.input_tokens,
+                        "output_tokens": self.total_usage.output_tokens,
+                        "total_cost_usd": self.total_usage.total_cost,
+                        "llm_calls": self.total_usage.llm_calls,
+                        "model": self.model,
+                    },
+                },
+            )
 
         return UpdateAllResult(
             one_minute_created=len(updated_1m),

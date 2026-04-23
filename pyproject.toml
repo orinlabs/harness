@@ -5,7 +5,9 @@ description = "Agent harness. Runnable agent loop with memory, tools, and OpenRo
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+    "libsql-experimental>=0.0.55",
     "pydantic>=2.7",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
@@ -25,10 +27,12 @@ packages = ["src/harness"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Tiered memory tests live under tests/memory/ and aren't part of the default
-# fast run. Invoke them explicitly with:
+# tests/memory/       — tiered-memory tests (expensive LLM calls)
+# tests/integration/  — live Turso tests (hit real Turso org, opt-in)
+# Invoke explicitly:
 #   pytest tests/memory -o "addopts="
-addopts = "-v --tb=short --ignore=tests/memory"
+#   RUN_LIVE_TURSO=1 pytest tests/integration -o "addopts="
+addopts = "-v --tb=short --ignore=tests/memory --ignore=tests/integration"
 timeout = 120
 
 [tool.ruff]
