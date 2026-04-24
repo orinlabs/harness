@@ -1,23 +1,19 @@
 """Console entry point for the harness.
 
-Installed as the `harness` script via `[project.scripts]`. After `uv sync` (or
-`uv pip install -e .`), both of these work:
+Two subcommands:
 
-    uv run harness <AGENT_UUID>
-    python -m harness <AGENT_UUID>
+    harness agent [AGENT_ID] [options]    # Run a single agent run.
+    harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
-The CLI fetches the agent's harness-config from the bedrock platform, builds an
-`AgentConfig`, and runs a single `Harness` run to completion. Environment is
-loaded from `.env` in the current working directory if present.
+The `agent` path is the production-adjacent path. The `eval` path is for
+offline evaluation against the in-process fake adapters (imports are
+deferred into the `eval` branch so cold-start of `harness agent` never
+pays the price of pulling `harness.evals` / `harness.evals.fakes`).
 
-Non-secret identifiers (platform URL, Turso org/group) have baked-in defaults
-below. Only the actual secrets must be provided via env.
+Environment is loaded from `.env` in cwd if present. Non-secret
+identifiers (platform URL, Turso org/group) have baked-in defaults.
 
-Required CLI args:
-    --bedrock-token               bedrock product API key (also settable via
-                                  $BEDROCK_TOKEN; CLI flag wins)
-
-Required env (secrets):
+Required env (secrets) common to both subcommands:
     HARNESS_TURSO_PLATFORM_TOKEN  Turso platform API token (for DB provisioning)
     HARNESS_DATABASE_TOKEN        Turso group-scoped data token
     OPENROUTER_API_KEY
@@ -26,9 +22,9 @@ Optional env (override defaults):
     BEDROCK_URL                   default: http://127.0.0.1:8000
     HARNESS_TURSO_ORG             default: bryanhoulton
     HARNESS_TURSO_GROUP           default: default
-    MODEL                         override the agent's configured model
+    MODEL                         override the agent's configured model (agent, existing id)
     REASONING_EFFORT              override reasoning_effort (low|medium|high)
-    LOG_LEVEL                     default: DEBUG (DEBUG|INFO|WARNING|ERROR)
+    LOG_LEVEL                     default: DEBUG
 """
 from __future__ import annotations
 
@@ -37,18 +33,16 @@ import atexit
 import logging
 import os
 import signal
+import subprocess
 import sys
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 
-# Non-secret identifiers. Safe to commit; env overrides still win via
-# os.environ.setdefault below.
 DEFAULT_ENV: dict[str, str] = {
     "BEDROCK_URL": "http://127.0.0.1:8000",
     "HARNESS_TURSO_ORG": "bryanhoulton",
@@ -62,14 +56,12 @@ REQUIRED_ENV = (
 )
 
 
-def _configure_logging(level: str) -> None:
-    """Configure root logging for the CLI process.
+# ---------------------------------------------------------------------------
+# Process-lifecycle helpers (shared by both subcommands)
+# ---------------------------------------------------------------------------
 
-    Writes to stdout (not stderr) so the live harness trace — turns, LLM calls,
-    tool calls — interleaves with ordinary process output and is easy to pipe
-    into `tee` / `grep`. Uses `force=True` so this wins even if some transitive
-    import (e.g. httpx, libsql) called `basicConfig` first.
-    """
+
+def _configure_logging(level: str) -> None:
     numeric = getattr(logging, level.upper(), None)
     if not isinstance(numeric, int):
         numeric = logging.INFO
@@ -83,15 +75,10 @@ def _configure_logging(level: str) -> None:
     )
     logging.basicConfig(level=numeric, handlers=[handler], force=True)
 
-    # Third-party libraries are chatty at DEBUG; keep them at INFO unless the
-    # user explicitly asked for DEBUG on the root.
     if numeric > logging.DEBUG:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    # Ensure stdout is line-buffered so each log record flushes immediately —
-    # critical when the process hangs mid-LLM-call and we need to see the last
-    # log that made it out.
     try:
         sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
     except (AttributeError, OSError):
@@ -99,40 +86,17 @@ def _configure_logging(level: str) -> None:
 
 
 def _install_shutdown_handlers() -> None:
-    """Make force-stops close open traces/spans on the platform.
-
-    The platform kills the harness subprocess with SIGTERM when the agent
-    flips to sleeping mid-run. Python's default SIGTERM handler just exits
-    without unwinding — `finally` blocks in `tracer.span()` never run, so the
-    trace stays open forever on the platform side.
-
-    We install two layers:
-
-    1. SIGTERM / SIGHUP -> raise KeyboardInterrupt from the handler. This
-       unwinds the stack, lets every `with text_span(...)` / `with llm_span(...)`
-       run its `finally`, and closes spans normally with an `error` field.
-
-    2. atexit -> force-close anything still in the tracer's open-span/trace
-       registry. Covers the edge case where the interpreter is shutting down
-       before a `with` block has had a chance to fully unwind (e.g. a second
-       signal arrives, or the process is exiting via `os._exit` somewhere).
-    """
     from harness.core import tracer
 
     def _handler(signum, _frame):
         sig_name = signal.Signals(signum).name
         logger.warning("received %s, closing open traces and exiting", sig_name)
-        # KeyboardInterrupt is a BaseException, which `tracer.span()`'s
-        # `except BaseException` catches, records as the span error, then
-        # re-raises so it bubbles up through the whole stack.
         raise KeyboardInterrupt(sig_name)
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
             signal.signal(sig, _handler)
         except (ValueError, OSError) as e:
-            # SIGHUP doesn't exist on Windows; signal.signal also fails if
-            # we're not on the main thread. Best-effort is fine.
             logger.debug("could not install handler for %s: %s", sig, e)
 
     def _atexit_close() -> None:
@@ -145,11 +109,6 @@ def _install_shutdown_handlers() -> None:
 
 
 def _load_env() -> None:
-    """Load .env from cwd if `python-dotenv` is available. Silent no-op otherwise.
-
-    Kept optional so the CLI still works in production subprocesses (bedrock
-    spawns us with env already populated and no dotenv installed).
-    """
     try:
         from dotenv import load_dotenv
     except ImportError:
@@ -161,25 +120,99 @@ def _load_env() -> None:
         load_dotenv(env_path)
 
 
-def _fetch_config(agent_id: str) -> dict:
-    base = os.environ["BEDROCK_URL"].rstrip("/")
-    token = os.environ["BEDROCK_TOKEN"]
-    url = f"{base}/api/cloud/agents/{agent_id}/harness-config/"
+# ---------------------------------------------------------------------------
+# Shared: bedrock URL/token + env checks + git stamping
+# ---------------------------------------------------------------------------
+
+
+def _resolve_bedrock_url(args) -> str:
+    """Precedence: --bedrock-url > --local > $BEDROCK_URL > default."""
+    if getattr(args, "bedrock_url", None):
+        return args.bedrock_url
+    if getattr(args, "local", False):
+        return "http://127.0.0.1:8000"
+    return os.environ.get("BEDROCK_URL") or DEFAULT_ENV["BEDROCK_URL"]
+
+
+def _resolve_bedrock_token(args) -> str | None:
+    return getattr(args, "bedrock_token", None) or os.environ.get("BEDROCK_TOKEN")
+
+
+def _ensure_secrets_env(parser: argparse.ArgumentParser) -> None:
+    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    if missing:
+        logger.error("missing required env: %s", ", ".join(missing))
+        print(f"missing required env: {', '.join(missing)}", file=sys.stderr)
+        parser.exit(2)
+
+
+def _git_branch() -> str:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _git_sha() -> str:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip()[:40] or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _resolve_product(bedrock_url: str, bedrock_token: str, explicit: str | None) -> str:
+    """Resolve product UUID for auto-created agents.
+
+    1. `--product` flag wins.
+    2. Else GET /api/products/products/ -- if exactly one visible, use it.
+    3. Else raise.
+    """
+    if explicit:
+        return explicit
+    url = f"{bedrock_url.rstrip('/')}/api/products/products/"
+    resp = httpx.get(url, headers={"Authorization": f"Bearer {bedrock_token}"}, timeout=10.0)
+    resp.raise_for_status()
+    products = resp.json()
+    if isinstance(products, dict) and "results" in products:
+        products = products["results"]
+    if not isinstance(products, list) or not products:
+        raise SystemExit("no products visible to this API key")
+    if len(products) > 1:
+        raise SystemExit("multiple products visible, pass --product <uuid>")
+    return products[0]["id"]
+
+
+# ---------------------------------------------------------------------------
+# Config-building for `harness agent` (existing id path)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_config(bedrock_url: str, bedrock_token: str, agent_id: str) -> dict:
+    url = f"{bedrock_url.rstrip('/')}/api/cloud/agents/{agent_id}/harness-config/"
     logger.info("fetching harness config from %s", url)
-    resp = httpx.get(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=10.0,
-    )
+    resp = httpx.get(url, headers={"Authorization": f"Bearer {bedrock_token}"}, timeout=10.0)
     resp.raise_for_status()
     return resp.json()
 
 
-def _build_config(cfg: dict) -> "AgentConfig":  # noqa: F821
+def _build_config_from_harness_config(cfg: dict, *, model_override: str | None = None,
+                                      reasoning_override: str | None = None):
     from harness import AdapterConfig, AgentConfig, ExternalToolSpec
 
-    model = os.environ.get("MODEL") or cfg["model"]
-    reasoning_effort = os.environ.get("REASONING_EFFORT") or cfg.get("reasoning_effort")
+    model = model_override or os.environ.get("MODEL") or cfg["model"]
+    reasoning_effort = (
+        reasoning_override
+        or os.environ.get("REASONING_EFFORT")
+        or cfg.get("reasoning_effort")
+    )
 
     return AgentConfig(
         id=cfg["id"],
@@ -206,86 +239,179 @@ def _build_config(cfg: dict) -> "AgentConfig":  # noqa: F821
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="harness",
-        description="Run a harness against a live bedrock agent.",
+def _create_dev_agent(
+    bedrock_url: str,
+    bedrock_token: str,
+    *,
+    product_id: str,
+    model: str,
+    system_prompt: str | None,
+    template: str | None,
+    branch: str,
+    sha: str,
+) -> dict:
+    body = {
+        "name": f"dev-{uuid.uuid4().hex[:8]}",
+        "purpose": "dev",
+        "product": product_id,
+        "model": model,
+        "tags": [f"git-ref:{branch}", f"git-sha:{sha}"],
+    }
+    if system_prompt:
+        body["system_prompt"] = system_prompt
+    if template:
+        # Server-side template support is Phase 2. For now pass it through so
+        # any future serializer can accept it, and warn loudly.
+        logger.warning(
+            "# TODO(Phase 2): template not yet implemented server-side; "
+            "ignoring --template=%s", template,
+        )
+    url = f"{bedrock_url.rstrip('/')}/api/cloud/agents/"
+    resp = httpx.post(
+        url,
+        json=body,
+        headers={"Authorization": f"Bearer {bedrock_token}"},
+        timeout=15.0,
     )
-    parser.add_argument(
-        "agent_id",
-        nargs="?",
-        default=os.environ.get("AGENT_ID"),
-        help="Agent UUID. Defaults to $AGENT_ID.",
-    )
-    parser.add_argument(
-        "--run-id",
-        default=None,
-        help="Run UUID. Defaults to a fresh uuid4.",
-    )
-    parser.add_argument(
-        "--bedrock-token",
-        default=None,
-        help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.",
-    )
-    parser.add_argument(
-        "--log-level",
-        default=os.environ.get("LOG_LEVEL", "DEBUG"),
-        help="Log level: DEBUG|INFO|WARNING|ERROR. Defaults to $LOG_LEVEL or DEBUG.",
-    )
-    args = parser.parse_args(argv)
+    if resp.status_code >= 400:
+        print(f"create agent failed: {resp.status_code} {resp.text}", file=sys.stderr)
+        resp.raise_for_status()
+    return resp.json()
 
-    _configure_logging(args.log_level)
-    _install_shutdown_handlers()
 
-    if not args.agent_id:
-        parser.error("agent_id is required (pass as arg or set $AGENT_ID)")
+# ---------------------------------------------------------------------------
+# Subcommand: agent
+# ---------------------------------------------------------------------------
 
+
+def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
     _load_env()
-
     for k, v in DEFAULT_ENV.items():
         os.environ.setdefault(k, v)
 
-    bedrock_token = args.bedrock_token or os.environ.get("BEDROCK_TOKEN")
+    bedrock_url = _resolve_bedrock_url(args)
+    os.environ["BEDROCK_URL"] = bedrock_url
+
+    bedrock_token = _resolve_bedrock_token(args)
     if not bedrock_token:
         parser.error("--bedrock-token is required (pass as flag or set $BEDROCK_TOKEN)")
-    # Propagate so downstream modules (tracer, runtime_api, external tools)
-    # can pick it up via the usual os.environ lookup.
     os.environ["BEDROCK_TOKEN"] = bedrock_token
 
-    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
-    if missing:
-        logger.error("missing required env: %s", ", ".join(missing))
-        print(f"missing required env: {', '.join(missing)}", file=sys.stderr)
-        return 2
+    _ensure_secrets_env(parser)
 
-    cfg = _fetch_config(args.agent_id)
-    config = _build_config(cfg)
+    agent_id = args.agent_id
+    if agent_id:
+        cfg = _fetch_config(bedrock_url, bedrock_token, agent_id)
+        config = _build_config_from_harness_config(
+            cfg,
+            model_override=args.model,
+            reasoning_override=args.reasoning_effort,
+        )
+    else:
+        product_id = _resolve_product(bedrock_url, bedrock_token, args.product)
+        model = args.model or "claude-haiku-4-5"
+        created = _create_dev_agent(
+            bedrock_url,
+            bedrock_token,
+            product_id=product_id,
+            model=model,
+            system_prompt=args.system_prompt,
+            template=args.template,
+            branch=_git_branch(),
+            sha=_git_sha(),
+        )
+        agent_id = created["id"]
+        print(f"created dev agent: {agent_id}", file=sys.stderr)
+        # Fetch the harness-config view so we get the product's default
+        # adapters wired into this agent (same shape as existing-id path).
+        cfg = _fetch_config(bedrock_url, bedrock_token, agent_id)
+        config = _build_config_from_harness_config(
+            cfg,
+            model_override=args.model,
+            reasoning_override=args.reasoning_effort,
+        )
+
     logger.info(
         "built agent config: id=%s model=%s adapters=%d",
-        config.id,
-        config.model,
-        len(config.adapters),
+        config.id, config.model, len(config.adapters),
     )
 
     from harness import Harness
 
     run_id = args.run_id or str(uuid.uuid4())
-    logger.info("starting harness run agent=%s run=%s", args.agent_id, run_id)
+    logger.info("starting harness run agent=%s run=%s", agent_id, run_id)
     try:
         Harness(config, run_id=run_id).run()
     except KeyboardInterrupt:
-        # SIGTERM/SIGHUP/Ctrl-C. `tracer.span()`'s finally blocks have already
-        # closed open spans+trace with an `error` field as they unwound; we
-        # just log and exit non-zero so the platform sees the interruption.
-        logger.warning(
-            "harness run interrupted agent=%s run=%s", args.agent_id, run_id
-        )
+        logger.warning("harness run interrupted agent=%s run=%s", agent_id, run_id)
         return 130
     except Exception:
-        logger.exception("harness run failed agent=%s run=%s", args.agent_id, run_id)
+        logger.exception("harness run failed agent=%s run=%s", agent_id, run_id)
         raise
-    logger.info("harness run complete agent=%s run=%s", args.agent_id, run_id)
+    logger.info("harness run complete agent=%s run=%s", agent_id, run_id)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Argparse + entrypoint
+# ---------------------------------------------------------------------------
+
+
+def _add_common_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--bedrock-url", default=None,
+                   help="Override $BEDROCK_URL (CLI wins).")
+    p.add_argument("--local", action="store_true",
+                   help="Sugar for --bedrock-url http://127.0.0.1:8000.")
+    p.add_argument("--bedrock-token", default=None,
+                   help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.")
+    p.add_argument("--log-level",
+                   default=os.environ.get("LOG_LEVEL", "DEBUG"),
+                   help="Log level: DEBUG|INFO|WARNING|ERROR.")
+    p.add_argument("--model", default=None, help="Override the model.")
+    p.add_argument("--reasoning-effort", default=None,
+                   help="Override reasoning effort.")
+    p.add_argument("--template", default=None,
+                   help="Template uuid-or-name (forward-compat; Phase 2).")
+    p.add_argument("--product", default=None,
+                   help="Product UUID for auto-created agents. If omitted the "
+                        "single product visible to the API key is used.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="harness",
+        description="Run a harness agent run or a scenario eval.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    agent_p = subparsers.add_parser("agent", help="Run a single agent run.")
+    agent_p.add_argument("agent_id", nargs="?", default=os.environ.get("AGENT_ID"),
+                         help="Agent UUID. Omit to auto-create a dev agent.")
+    agent_p.add_argument("--run-id", default=None,
+                         help="Run UUID. Defaults to a fresh uuid4.")
+    agent_p.add_argument("--system-prompt", default=None,
+                         help="System prompt override (dev auto-create only).")
+    _add_common_flags(agent_p)
+
+    eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
+    eval_p.add_argument("scenario",
+                        help="Scenario name (matches Simulation.name).")
+    _add_common_flags(eval_p)
+
+    args = parser.parse_args(argv)
+
+    _configure_logging(args.log_level)
+    _install_shutdown_handlers()
+
+    if args.command == "agent":
+        return _cmd_agent(args, agent_p)
+    if args.command == "eval":
+        # Lazy import — `harness.evals` must not be pulled on the agent path.
+        from harness.evals.cli_entry import run as _cmd_eval
+
+        return _cmd_eval(args, eval_p)
+    parser.error(f"unknown command: {args.command}")
+    return 2
 
 
 if __name__ == "__main__":
