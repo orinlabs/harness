@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from harness.core.tracer import SpanType, emit_completed_span, text_span
+from harness.core.tracer import SpanType, emit_completed_span
 
 from .base import ScheduledEvent, ScheduledEventType, Simulation
 from .clock import SimulatedClock, simulated_clock_context
@@ -264,35 +264,10 @@ class SimulationRunner:
                 )
                 set_simulation(sim)
 
-                # Open one top-level eval trace so every child agent-run and
-                # checkpoint nests under it. Without this the harness tracer
-                # opens a fresh top-level trace per `Harness(...).run()`
-                # invocation, and `emit_completed_span` for checkpoints opens
-                # a standalone trace each — which floods the platform's trace
-                # list with orphan rows and makes the eval run unreadable.
-                with text_span(
-                    f"eval:{sim_cls.name}",
-                    agent_id=agent_id,
-                    metadata={
-                        "scenario": sim_cls.name,
-                        "scenario_hash": content_hash,
-                        "git_sha": run.git_sha,
-                        "agent_id": agent_id,
-                        "duration_days": sim_cls.duration_days,
-                        "eval_mode": sim_cls.eval_mode,
-                    },
-                ) as eval_span:
-                    try:
-                        self._execute_timeline(sim, run, clock, sim_start)
-                    finally:
-                        set_simulation(None)
-                        eval_span.set_metadata(
-                            checkpoints_passed=sum(
-                                1 for r in self.checkpoint_results if r.get("passed")
-                            ),
-                            checkpoints_total=len(self.checkpoint_results),
-                            wall_time_seconds=wall_time.monotonic() - wall_start,
-                        )
+                try:
+                    self._execute_timeline(sim, run, clock, sim_start)
+                finally:
+                    set_simulation(None)
 
             run.status = "awaiting_review"
             logger.info(
@@ -501,6 +476,7 @@ class SimulationRunner:
             span_type=SpanType.CHECKPOINT,
             started_at=cp_iso,
             ended_at=cp_iso,
+            agent_id=run.agent_id,
             metadata={
                 "passed": passed,
                 "description": description,

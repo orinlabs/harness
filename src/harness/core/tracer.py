@@ -328,6 +328,7 @@ def emit_completed_span(
     output: str | None = None,
     metadata: dict[str, Any] | None = None,
     error: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """Emit a span that represents work already completed.
 
@@ -338,7 +339,9 @@ def emit_completed_span(
 
     If no trace is active when this is called, a trace is created and closed
     around this single span (to preserve the invariant that every span
-    belongs to a trace).
+    belongs to a trace). When `agent_id` is supplied, it's attached to that
+    standalone trace so the span is discoverable under the agent in the
+    platform UI rather than appearing as an orphan.
     """
     span_id = str(uuid.uuid4())
     metadata = metadata or {}
@@ -352,7 +355,7 @@ def emit_completed_span(
             trace_id=trace_id,
             name=name,
             started_at=started_at,
-            agent_id=None,
+            agent_id=agent_id,
         )
 
     parent_id = _current_parent_span_id.get()
@@ -382,7 +385,7 @@ def emit_completed_span(
         _close_trace(
             trace_id=trace_id,
             name=name,
-            agent_id=None,
+            agent_id=agent_id,
             ended_at=ended_at,
             error=error,
             metadata=dict(metadata),
