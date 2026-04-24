@@ -4,6 +4,156 @@ A runnable agent harness designed for fast iteration without requiring changes t
 
 Harness is always paired with a **cloud infrastructure platform** that owns deployment and durable state. Every run — local or deployed — streams its logs, traces, and eval results to that platform, so local dev and production share one source of truth.
 
+## Local usage
+
+The repo has two main local workflows:
+
+1. A self-contained demo + test loop that uses the fake platform and local sqlite.
+2. Real harness runs and evals that still talk to Bedrock, OpenRouter, and Turso.
+
+### Install dependencies
+
+```bash
+uv sync --dev
+```
+
+The CLI auto-loads `.env` from the current working directory if it exists.
+
+### Environment
+
+For the self-contained demo, you only need:
+
+```bash
+OPENROUTER_API_KEY=...
+```
+
+For `harness agent` and `harness eval`, set:
+
+```bash
+OPENROUTER_API_KEY=...
+BEDROCK_TOKEN=...
+HARNESS_TURSO_PLATFORM_TOKEN=...
+HARNESS_DATABASE_TOKEN=...
+
+# Optional overrides
+BEDROCK_URL=http://127.0.0.1:8000
+HARNESS_TURSO_ORG=bryanhoulton
+HARNESS_TURSO_GROUP=default
+```
+
+Notes:
+
+- `BEDROCK_URL` defaults to `http://127.0.0.1:8000`.
+- The CLI requires real Bedrock/Turso/OpenRouter credentials even for evals.
+- The demo script does not need Turso; it writes sqlite files under a temp directory.
+
+### Fastest local check
+
+Run the demo if you want one end-to-end harness run without depending on Bedrock or Turso:
+
+```bash
+uv run python scripts/run_demo.py
+```
+
+What it does:
+
+- Starts `tests/fake_platform.py` in-process.
+- Registers fake weather + SMS tools.
+- Uses local sqlite storage.
+- Makes real OpenRouter calls.
+
+### Run tests
+
+Default test suite:
+
+```bash
+uv run pytest
+```
+
+Tiered-memory tests are excluded from the default suite because they make heavier live LLM calls:
+
+```bash
+uv run pytest tests/memory -o "addopts="
+```
+
+Live Turso integration tests are opt-in:
+
+```bash
+RUN_LIVE_TURSO=1 uv run pytest tests/integration -o "addopts="
+```
+
+Important testing behavior:
+
+- LLM tests use real OpenRouter calls.
+- `OPENROUTER_API_KEY` missing is a hard failure, not a skip.
+- The normal test suite clears Bedrock/Turso env so tests do not accidentally hit real services.
+
+### Run a real harness agent
+
+Run an existing Bedrock agent:
+
+```bash
+uv run harness agent <AGENT_UUID> --bedrock-token "$BEDROCK_TOKEN"
+```
+
+Or auto-create a dev agent for the single visible product:
+
+```bash
+uv run harness agent --bedrock-token "$BEDROCK_TOKEN"
+```
+
+Useful flags:
+
+- `--local` to force `BEDROCK_URL=http://127.0.0.1:8000`
+- `--product <uuid>` when your API key can see multiple products
+- `--model <slug>` to override the configured model
+- `--reasoning-effort low|medium|high`
+- `--system-prompt "..."` when auto-creating a dev agent
+
+There is also a lower-level live-run helper if you already have an agent id and want a more explicit script entrypoint:
+
+```bash
+uv run python scripts/run_live.py <AGENT_UUID> --bedrock-token "$BEDROCK_TOKEN"
+```
+
+### Run evals
+
+The quickest eval is:
+
+```bash
+uv run harness eval smoke --bedrock-token "$BEDROCK_TOKEN"
+```
+
+Example with an explicit model override:
+
+```bash
+uv run harness eval group-lunch-memory --bedrock-token "$BEDROCK_TOKEN" --model claude-haiku-4-5
+```
+
+How evals work locally:
+
+- They use in-process fake adapters for email, SMS, contacts, and computer actions.
+- They still create a real eval agent in Bedrock.
+- They still use OpenRouter for model calls and Turso/libSQL for storage.
+- Results are summarized to stdout and the CLI prints the Bedrock agent URL at the end.
+
+Available scenario names right now:
+
+- `smoke`
+- `group-lunch-fresh`
+- `group-lunch-memory`
+- `multi-stakeholder-scheduling`
+- `preference-channel-fidelity`
+- `blue-red-shoes-light`
+- `blue-red-shoes-medium`
+- `blue-red-shoes-heavy`
+- `curl-wget-light`
+- `curl-wget-heavy`
+- `draft-before-send-heavy`
+- `thursday-no-meetings-heavy`
+- `vegetarian-restaurant-heavy`
+- `vending-bench`
+
 ## Architecture
 
 ```mermaid
@@ -221,15 +371,9 @@ Bucket boundary math (including DST and week-of-year edge cases) lives in `memor
 
 ## Testing
 
-- **Real OpenRouter calls** for anything LLM-related. Cheap model (e.g. `openai/gpt-4o-mini`). Fails loudly if `OPENROUTER_API_KEY` is missing — never skipped.
-- **Real SQLite** against a `tmp_path` fixture. No in-memory shortcuts except when measuring import time.
-- **Platform endpoints** are faked via `tests/fake_platform.py` — a real `http.server` on a free port implementing the same contract the infra will. Harness code makes real HTTP calls with real JSON serialization and real error paths. Only the server-side implementation is swapped.
+- **Real OpenRouter calls** for anything LLM-related. Use a cheap model when possible. Missing `OPENROUTER_API_KEY` is a hard failure, never a skip.
+- **Real sqlite** against `tmp_path` in the default test path. No in-memory shortcuts except where the test is explicitly about import/runtime behavior.
+- **Platform endpoints** are faked via `tests/fake_platform.py`, which runs a real `http.server` on a free port so Harness still makes real HTTP requests with real serialization and error handling.
 
-Run the suite:
-
-```bash
-uv run pytest                              # main tests (fast)
-uv run pytest tests/memory -o "addopts="   # tiered memory tests
-uv run python scripts/run_demo.py          # end-to-end demo
-```
+See the quickstart section above for the exact commands for the default suite, memory suite, integration suite, and end-to-end demo.
 
