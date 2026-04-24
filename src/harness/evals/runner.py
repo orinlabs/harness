@@ -102,11 +102,11 @@ class EvalRunRecord:
 
 
 def _emit(kind: str, payload: dict) -> None:
-    """Structured stdout line representing a row that used to go to the DB.
+    """Structured stdout line for local eval runs.
 
-    TODO(T7): replace with `httpx.post(BEDROCK_URL + "/api/tracing/spans/",
-    json={"span_type": <kind>, ...})`. Until then these lines are the
-    observability story for eval runs.
+    The durable artifact for cloud eval runs is the HarnessRun trace stream
+    posted from ``harness.core``; these stdout lines exist so a developer
+    running the eval locally still gets a readable timeline.
     """
     print(f"[eval-trace] {kind} {json.dumps(payload, default=str)}")
 
@@ -147,9 +147,6 @@ class SimulationRunner:
         wall_start = wall_time.monotonic()
         sim_cls = self.simulation_cls
 
-        # TODO(T7): resolve `self._override_template_id` via an HTTP lookup to
-        # Bedrock's template endpoint (replacing bedrock's
-        # `products.Product.objects.get(id=...)`). For now we just echo it.
         if self._override_template_id:
             print(f"[sim] Using template override: {self._override_template_id}")
 
@@ -168,13 +165,14 @@ class SimulationRunner:
 
         sim_cls.ensure_tools()
 
-        # TODO(T9): apply feature flag overrides.
+        # Feature-flag overrides are currently logged only; the harness core
+        # does not yet apply them to the running agent.
         merged_feature_flags = {**sim_cls.feature_flags, **self._override_feature_flags}
         if merged_feature_flags:
             logger.info("Ignoring feature flags for now: %s", merged_feature_flags)
 
         content_hash = _simulation_hash(sim_cls)
-        # TODO(T7): POST to /api/evals/scenarios/ to upsert the scenario row.
+        # stdout for local eval runs; HarnessRun trace stream is the durable artifact.
         _emit(
             "scenario",
             {
@@ -210,7 +208,7 @@ class SimulationRunner:
             git_sha=_get_git_sha(),
         )
         self._run = run
-        # TODO(T7): POST to /api/evals/runs/ to create the run row.
+        # stdout for local eval runs; HarnessRun trace stream is the durable artifact.
         _emit(
             "run_started",
             {
@@ -387,10 +385,6 @@ class SimulationRunner:
                 preview = content_str[:100]
                 print(f"[sim] MESSAGE from {sched.actor} via {channel}: {preview}")
 
-                # TODO(T6/T7): inject_inbound_* currently raise
-                # NotImplementedError. Once fakes land they'll drop the
-                # message into the fake SMS/email channel and push a
-                # user-role entry into harness memory.
                 if channel == "sms":
                     sim.inject_inbound_sms(user_agent, content_str)
                 elif channel == "email":
@@ -626,7 +620,7 @@ class SimulationRunner:
     ):
         from .clock import _original_now
 
-        # TODO(T7): POST to /api/tracing/spans/ (span_type="eval_event").
+        # stdout for local eval runs; HarnessRun trace stream is the durable artifact.
         _emit(
             "event",
             {
@@ -697,7 +691,7 @@ class SimulationRunner:
         run.completed_at_wall = datetime.now(tz=UTC)
         if wall_seconds is not None:
             run.total_wall_time_seconds = wall_seconds
-        # TODO(T7): PATCH /api/evals/runs/<id>/ with the final status.
+        # stdout for local eval runs; HarnessRun trace stream is the durable artifact.
         _emit(
             "run_completed",
             {
@@ -709,7 +703,3 @@ class SimulationRunner:
             },
         )
 
-    def mark_failed(self):
-        if self._run:
-            self._run.status = "failed"
-            self._cleanup(self._run)
