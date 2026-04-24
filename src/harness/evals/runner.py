@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from harness.core.tracer import SpanType, emit_completed_span
+from harness.core.tracer import SpanType, emit_completed_span, text_span
 
 from .base import ScheduledEvent, ScheduledEventType, Simulation
 from .clock import SimulatedClock, simulated_clock_context
@@ -256,12 +256,6 @@ class SimulationRunner:
 
         try:
             with simulated_clock_context(sim_start) as clock:
-                # TODO(T6): `data_store` will be a real fake environment
-                # (SimulatedDataStore analogue) injected by the T6 fake
-                # adapters. Passing None here means scenarios that call
-                # `self.data_store.inject_environment_event(...)` during an
-                # actual run will hit an AttributeError — this is expected
-                # until T6 lands; import-cleanliness is the goal here.
                 sim = sim_cls(
                     agent_id=agent_id,
                     clock=clock,
@@ -270,13 +264,35 @@ class SimulationRunner:
                 )
                 set_simulation(sim)
 
-                try:
-                    # TODO(T6): wrap the body below with
-                    # `patch_external_clients(data_store, sim)` so outbound
-                    # SMS/email/etc. invoke `sim.on_outbound_*` callbacks.
-                    self._execute_timeline(sim, run, clock, sim_start)
-                finally:
-                    set_simulation(None)
+                # Open one top-level eval trace so every child agent-run and
+                # checkpoint nests under it. Without this the harness tracer
+                # opens a fresh top-level trace per `Harness(...).run()`
+                # invocation, and `emit_completed_span` for checkpoints opens
+                # a standalone trace each — which floods the platform's trace
+                # list with orphan rows and makes the eval run unreadable.
+                with text_span(
+                    f"eval:{sim_cls.name}",
+                    agent_id=agent_id,
+                    metadata={
+                        "scenario": sim_cls.name,
+                        "scenario_hash": content_hash,
+                        "git_sha": run.git_sha,
+                        "agent_id": agent_id,
+                        "duration_days": sim_cls.duration_days,
+                        "eval_mode": sim_cls.eval_mode,
+                    },
+                ) as eval_span:
+                    try:
+                        self._execute_timeline(sim, run, clock, sim_start)
+                    finally:
+                        set_simulation(None)
+                        eval_span.set_metadata(
+                            checkpoints_passed=sum(
+                                1 for r in self.checkpoint_results if r.get("passed")
+                            ),
+                            checkpoints_total=len(self.checkpoint_results),
+                            wall_time_seconds=wall_time.monotonic() - wall_start,
+                        )
 
             run.status = "awaiting_review"
             logger.info(
