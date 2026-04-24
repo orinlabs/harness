@@ -39,6 +39,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
+from harness.core.tracer import SpanType, emit_completed_span
+
 from .base import ScheduledEvent, ScheduledEventType, Simulation
 from .clock import SimulatedClock, simulated_clock_context
 from .context import set_simulation
@@ -117,6 +119,7 @@ class SimulationRunner:
         simulation_cls: type[Simulation],
         *,
         agent_id: str | None = None,
+        agent_config=None,
         override_model: str | None = None,
         # Bedrock's `override_product_id` is replaced with `override_template_id`
         # — T7 will do the HTTP lookup to resolve it into a template snapshot.
@@ -126,11 +129,17 @@ class SimulationRunner:
     ):
         self.simulation_cls = simulation_cls
         self._agent_id = agent_id
+        # Pre-built harness.config.AgentConfig. When provided the runner
+        # actually wakes the agent between events via `Harness(...).run()`;
+        # when None the runner just walks the timeline without driving the
+        # agent loop (useful for scenario-shape unit tests).
+        self._agent_config = agent_config
         self._override_model = override_model
         self._override_template_id = override_template_id
         self._override_feature_flags = override_feature_flags or {}
         self._override_reasoning_effort = override_reasoning_effort
         self._run: EvalRunRecord | None = None
+        self.checkpoint_results: list[dict] = []
 
     def execute(self) -> EvalRunRecord:
         import uuid
@@ -232,6 +241,18 @@ class SimulationRunner:
 
         if ms and ms.entries:
             self._seed_memory(agent_id, ms.entries, sim_start)
+
+        # Ensure the fake-adapter tables exist in this agent's sqlite DB
+        # before anyone (scenario, fake tool) tries to touch them.
+        if self._agent_config is not None:
+            from harness.core import storage
+            from harness.evals.fakes.base import apply_migrations
+
+            storage.load(agent_id)
+            apply_migrations()
+            # Commit DDL/INSERTs into applied_migrations before Harness.run()
+            # opens a fresh connection to the same remote db.
+            storage.flush()
 
         try:
             with simulated_clock_context(sim_start) as clock:
@@ -456,14 +477,41 @@ class SimulationRunner:
         assertions_total = 1
         assertion_results = [{"passed": passed, "description": description}]
 
-        # TODO(T7): POST to /api/tracing/spans/ with span_type="checkpoint".
+        # Emit a span of type=checkpoint so the bedrock side (T5) can
+        # aggregate checkpoint pass rates via the existing Span rollup.
+        cp_iso = clock.now().isoformat()
+        emit_completed_span(
+            name=sched.checkpoint_name,
+            span_type=SpanType.CHECKPOINT,
+            started_at=cp_iso,
+            ended_at=cp_iso,
+            metadata={
+                "passed": passed,
+                "description": description,
+                "simulated_time": cp_iso,
+                "scenario": run.scenario_name,
+                "agent_id": run.agent_id,
+                "assertions": assertion_results,
+                "assertions_passed": assertions_passed,
+                "assertions_total": assertions_total,
+                "cumulative_cost_usd": str(total_cost),
+                "cumulative_wall_seconds": total_wall_seconds,
+            },
+        )
+        self.checkpoint_results.append(
+            {
+                "name": sched.checkpoint_name,
+                "passed": passed,
+                "description": description,
+            }
+        )
         _emit(
             "checkpoint",
             {
                 "run_scenario": run.scenario_name,
                 "run_agent_id": run.agent_id,
                 "name": sched.checkpoint_name,
-                "simulated_time": clock.now().isoformat(),
+                "simulated_time": cp_iso,
                 "description": description,
                 "assertion_results": assertion_results,
                 "assertions_passed": assertions_passed,
@@ -498,10 +546,48 @@ class SimulationRunner:
     # ------------------------------------------------------------------
 
     def _run_agent_to_completion(self, sim: Simulation):
-        # TODO(T6/T7): wire this to the harness agent runtime (`harness.harness`
-        # / `harness.core.runtime_api`). Until the fake adapters land there's
-        # no I/O surface to drive an agent run against, so this is a no-op.
-        logger.debug("Skipping agent run for sim %s (T6/T7 wiring pending)", sim.name)
+        """Drive one Harness run against the eval agent.
+
+        T7: when `agent_config` is set on the runner, actually invoke
+        `Harness(config, run_id).run()` between events. The fake adapters'
+        tool handlers write into the per-agent sqlite DB synchronously,
+        so when we re-open storage afterwards we can scan for new outbound
+        messages and call `sim.process_new_outbound()` to queue user
+        replies. No agent_config -> no-op (scenario-shape tests).
+        """
+        if self._agent_config is None:
+            logger.debug(
+                "Skipping agent run for sim %s (no agent_config on runner)",
+                sim.name,
+            )
+            return
+
+        import uuid as _uuid
+
+        from harness.core import storage
+        from harness.harness import Harness
+
+        run_id = str(_uuid.uuid4())
+        try:
+            Harness(self._agent_config, run_id=run_id).run()
+        except Exception:
+            logger.exception(
+                "Harness run failed during sim %s; continuing timeline", sim.name
+            )
+
+        # Harness.run() closed storage in its own `finally`. Re-open so
+        # the fakes can be queried for new outbound messages and so any
+        # subsequent inject_inbound_* calls on this sim have a live db.
+        # Harness already committed its own writes via storage.flush()
+        # before closing, so the outbound rows the fakes persisted during
+        # the run are visible on the reopened connection.
+        storage.load(sim.agent_id)
+
+        tally = sim.process_new_outbound()
+        if tally["emails"] or tally["sms"]:
+            logger.info(
+                "processed outbound: emails=%d sms=%d", tally["emails"], tally["sms"]
+            )
 
     def _process_pending_replies(
         self,

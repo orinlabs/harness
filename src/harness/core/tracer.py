@@ -48,6 +48,7 @@ class SpanType(str, Enum):
     LLM = "llm"
     FUNCTION = "function"
     AUDIO = "audio"
+    CHECKPOINT = "checkpoint"
 
 
 # ---------------------------------------------------------------------------

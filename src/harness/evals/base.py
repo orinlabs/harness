@@ -227,6 +227,8 @@ class Simulation(metaclass=SimulationMeta):
         self._trace_events: list[dict] = []
         self._checkpoint_trace_events: list[dict] = []
         self._pending_checkpoint_reset = False
+        self._processed_outbound_email_ids: set[str] = set()
+        self._processed_outbound_sms_ids: set[str] = set()
 
     # Backwards-compat alias: bedrock scenarios touched `self.agent` (a Django
     # model) for `self.agent.id`-style reads. They now get a string agent id.
@@ -372,17 +374,159 @@ class Simulation(metaclass=SimulationMeta):
     # call these at runtime during an eval run; this task only guarantees the
     # signatures parse so scenario files import cleanly.
 
+    # Side-effect impls filled in at T7: drop inbound into the fake channel
+    # and log a user-role entry into harness memory so the next turn's
+    # build_llm_inputs() sees it.
+
     def inject_inbound_sms(self, user_agent: "UserAgent", content: str):
-        # TODO(T6/T7): wire to fake SMS channel + harness MemoryService.
-        raise NotImplementedError("wired up in T6/T7")
+        from harness.core import storage
+        from harness.evals.fakes import sms as sms_fake
+        from harness.evals.fakes.base import apply_migrations
+
+        # Ensure the fake tables exist -- storage may have just been
+        # reopened after a Harness.run() cycle which called storage.close().
+        storage.load(self.agent_id)
+        apply_migrations()
+        sent_at = self.clock.now().isoformat()
+        sms_fake.inject_inbound(
+            contact_phone=user_agent.phone or "+10000000000",
+            body=content,
+            sent_at=sent_at,
+        )
+        # Log as a user-role entry keyed by channel so the agent sees it
+        # on the next turn even without calling list_conversations.
+        self.memory_service.log_messages(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        f"[inbound SMS from {user_agent.name} "
+                        f"({user_agent.phone})]: {content}"
+                    ),
+                }
+            ]
+        )
+        self.create_notification(
+            title=f"SMS from {user_agent.name}",
+            body=content,
+            priority="high",
+        )
+        # Commit so the subsequent Harness.run() -- which opens a fresh
+        # storage connection -- sees the persisted rows. Remote libsql
+        # connections don't autocommit writes.
+        storage.flush()
 
     def inject_inbound_email(self, user_agent: "UserAgent", content: str):
-        # TODO(T6/T7): wire to fake email inbox + harness MemoryService.
-        raise NotImplementedError("wired up in T6/T7")
+        from harness.core import storage
+        from harness.evals.fakes import email as email_fake
+        from harness.evals.fakes.base import apply_migrations
+
+        storage.load(self.agent_id)
+        apply_migrations()
+        sent_at = self.clock.now().isoformat()
+        subject_line = content.splitlines()[0][:60] if content else "(no subject)"
+        email_fake.inject_inbound(
+            thread_id=None,
+            from_email=user_agent.email or f"{user_agent.id}@example.com",
+            to_email="agent@eval.test",
+            subject=subject_line,
+            body=content,
+            sent_at=sent_at,
+        )
+        self.memory_service.log_messages(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        f"[inbound email from {user_agent.name} "
+                        f"<{user_agent.email}>] {subject_line}\n\n{content}"
+                    ),
+                }
+            ]
+        )
+        self.create_notification(
+            title=f"Email from {user_agent.name}: {subject_line}",
+            body=content[:400],
+            priority="high",
+        )
+        storage.flush()
 
     # ------------------------------------------------------------------
-    # Outbound callbacks (invoked by fake clients in T6)
+    # Outbound processing (called by the runner after each agent wake)
     # ------------------------------------------------------------------
+    #
+    # In the harness-edition eval flow, outbound tool calls (send_email /
+    # send_sms) are persisted synchronously by the fake adapters during
+    # the Harness run. The Simulation needs to inspect those new rows
+    # *after* the agent finishes so it can synthesize UserAgent replies
+    # and queue them via `_pending_user_replies`. These IDs live on the
+    # sim instance so we don't re-process the same message twice.
+
+    def process_new_outbound(self):
+        """Scan for new outbound fake-adapter messages, invoke on_outbound_*.
+
+        Returns a tally dict -- the runner logs it.
+        """
+        from harness.core import storage
+        from harness.evals.fakes.base import apply_migrations
+
+        storage.load(self.agent_id)
+        apply_migrations()
+
+        import json as _json
+
+        db = storage.db
+        if db is None:
+            return {"emails": 0, "sms": 0}
+
+        emails_seen = 0
+        sms_seen = 0
+
+        # Emails
+        try:
+            rows = db.execute(
+                "SELECT id, to_addrs, subject, body FROM fake_email_message "
+                "WHERE direction = 'outbound' ORDER BY sent_at ASC"
+            ).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            msg_id = row["id"]
+            if msg_id in self._processed_outbound_email_ids:
+                continue
+            self._processed_outbound_email_ids.add(msg_id)
+            try:
+                to_addrs = _json.loads(row["to_addrs"]) or []
+            except Exception:
+                to_addrs = []
+            self.on_outbound_email(
+                to=to_addrs,
+                subject=row["subject"] or "",
+                body=row["body"] or "",
+            )
+            emails_seen += 1
+
+        # SMS
+        try:
+            rows = db.execute(
+                "SELECT id, contact_phone, body FROM fake_sms_message "
+                "WHERE direction = 'outbound' ORDER BY sent_at ASC"
+            ).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            msg_id = row["id"]
+            if msg_id in self._processed_outbound_sms_ids:
+                continue
+            self._processed_outbound_sms_ids.add(msg_id)
+            self.on_outbound_sms(
+                to=row["contact_phone"] or "",
+                body=row["body"] or "",
+                sid=msg_id,
+            )
+            sms_seen += 1
+
+        return {"emails": emails_seen, "sms": sms_seen}
 
     def on_outbound_sms(self, to: str, body: str, sid: str):
         print(f"[sim] >>> AGENT SMS to {to}: {body[:200]}")
@@ -410,8 +554,16 @@ class Simulation(metaclass=SimulationMeta):
     # ------------------------------------------------------------------
 
     def create_notification(self, title: str, body: str = "", priority: str = "high"):
-        # TODO(T6/T7): wire to fake notifications channel. For now we just log
-        # so scenarios that call this during an eval run don't crash.
+        """Log a notification to stdout.
+
+        The fake adapter set does not currently ship a `fake_notification`
+        table -- scenarios that want a persisted notification feed should
+        extend the fakes in a follow-up task. For now we just echo to
+        stdout so scenarios calling this don't crash. We deliberately do
+        NOT attempt a speculative INSERT against a non-existent table
+        because that would poison the active libsql transaction and
+        nuke any prior-in-this-connection writes on commit.
+        """
         print(f"[sim] NOTIFICATION ({priority}) {title}: {body[:200]}")
 
     # ------------------------------------------------------------------
