@@ -5,6 +5,7 @@ Two subcommands:
     harness agent [AGENT_ID] [options]    # Run a single agent run.
     harness delete-agent AGENT_ID         # Delete agent-owned harness storage.
     harness reset-memory AGENT_ID         # Reset agent memory storage.
+    harness import-bedrock-memory AGENT_ID --input payload.json
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
 The `agent` path is the production-adjacent path. The `eval` path is for
@@ -404,6 +405,26 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _cmd_import_bedrock_memory(args, parser: argparse.ArgumentParser) -> int:
+    _load_env()
+
+    from harness.memory.legacy_bedrock_import import import_legacy_bedrock_memory
+
+    try:
+        counts = import_legacy_bedrock_memory(args.agent_id, args.input)
+    except Exception as e:
+        logger.exception("legacy Bedrock memory import failed: id=%s", args.agent_id)
+        parser.exit(1, f"import Bedrock memory failed: {e}\n")
+
+    print(
+        "imported Bedrock memory: "
+        f"id={args.agent_id} "
+        + " ".join(f"{key}={value}" for key, value in counts.as_dict().items()),
+        file=sys.stderr,
+    )
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argparse + entrypoint
 # ---------------------------------------------------------------------------
@@ -463,6 +484,20 @@ def main(argv: list[str] | None = None) -> int:
                          default=os.environ.get("LOG_LEVEL", "DEBUG"),
                          help="Log level: DEBUG|INFO|WARNING|ERROR.")
 
+    import_memory_p = subparsers.add_parser(
+        "import-bedrock-memory",
+        help="Import one agent's legacy Bedrock memory export.",
+    )
+    import_memory_p.add_argument("agent_id", help="Agent UUID to import memory for.")
+    import_memory_p.add_argument(
+        "--input",
+        required=True,
+        help="Path to a JSON payload exported by the Bedrock migration.",
+    )
+    import_memory_p.add_argument("--log-level",
+                                 default=os.environ.get("LOG_LEVEL", "DEBUG"),
+                                 help="Log level: DEBUG|INFO|WARNING|ERROR.")
+
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario",
                         help="Scenario name (matches Simulation.name).")
@@ -479,6 +514,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_delete_agent(args, delete_p)
     if args.command == "reset-memory":
         return _cmd_reset_memory(args, reset_p)
+    if args.command == "import-bedrock-memory":
+        return _cmd_import_bedrock_memory(args, import_memory_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval
