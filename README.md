@@ -70,6 +70,15 @@ uv run harness delete-agent <AGENT_UUID>
 This deletes all of the agent's side effects in the world. Bedrock calls this
 once when deleting an agent.
 
+Reset an agent's memory:
+
+```bash
+uv run harness reset-memory <AGENT_UUID>
+```
+
+Bedrock calls this when an agent's memory should be wiped. The next run starts
+from empty memory.
+
 ## Use With Remote Bedrock
 
 Point the CLI at the remote Bedrock URL.

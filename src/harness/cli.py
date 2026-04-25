@@ -4,6 +4,7 @@ Two subcommands:
 
     harness agent [AGENT_ID] [options]    # Run a single agent run.
     harness delete-agent AGENT_ID         # Delete agent-owned harness storage.
+    harness reset-memory AGENT_ID         # Reset agent memory storage.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
 The `agent` path is the production-adjacent path. The `eval` path is for
@@ -378,6 +379,31 @@ def _cmd_delete_agent(args, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
+    _load_env()
+
+    from harness.core import storage
+
+    try:
+        result = storage.reset_agent_memory(
+            args.agent_id,
+            require_remote=bool(os.environ.get("HARNESS_TURSO_ORG")),
+        )
+    except RuntimeError as e:
+        parser.exit(1, f"reset memory failed: {e}\n")
+
+    logger.info(
+        "reset agent memory: id=%s local=%s remote=%s",
+        args.agent_id, result["local"], result["remote"],
+    )
+    print(
+        "reset agent memory: "
+        f"id={args.agent_id} local={result['local']} remote={result['remote']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argparse + entrypoint
 # ---------------------------------------------------------------------------
@@ -428,6 +454,15 @@ def main(argv: list[str] | None = None) -> int:
                           default=os.environ.get("LOG_LEVEL", "DEBUG"),
                           help="Log level: DEBUG|INFO|WARNING|ERROR.")
 
+    reset_p = subparsers.add_parser(
+        "reset-memory",
+        help="Reset memory storage for an agent.",
+    )
+    reset_p.add_argument("agent_id", help="Agent UUID to reset memory for.")
+    reset_p.add_argument("--log-level",
+                         default=os.environ.get("LOG_LEVEL", "DEBUG"),
+                         help="Log level: DEBUG|INFO|WARNING|ERROR.")
+
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario",
                         help="Scenario name (matches Simulation.name).")
@@ -442,6 +477,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_agent(args, agent_p)
     if args.command == "delete-agent":
         return _cmd_delete_agent(args, delete_p)
+    if args.command == "reset-memory":
+        return _cmd_reset_memory(args, reset_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval

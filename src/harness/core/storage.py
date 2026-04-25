@@ -112,6 +112,14 @@ def delete_agent_storage(agent_id: str, *, require_remote: bool = False) -> dict
     }
 
 
+def reset_agent_memory(agent_id: str, *, require_remote: bool = False) -> dict[str, bool]:
+    """Reset an agent's memory so the next run starts from an empty DB."""
+    return {
+        "local": delete_local_agent_db(agent_id),
+        "remote": delete_agent_db(agent_id, require_config=require_remote),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Local sqlite backend (default)
 # ---------------------------------------------------------------------------
@@ -245,7 +253,9 @@ def delete_agent_db(agent_id: str, *, require_config: bool = False) -> bool:
         )
     except httpx.HTTPError as e:
         if require_config:
-            raise RuntimeError(f"Turso Platform API unreachable while deleting {name!r}: {e}") from e
+            raise RuntimeError(
+                f"Turso Platform API unreachable while deleting {name!r}: {e}"
+            ) from e
         logger.warning("storage: DELETE %s failed: %s", name, e)
         return False
     if resp.status_code in (200, 204, 404):

@@ -182,3 +182,28 @@ def test_delete_agent_db_requires_turso_env_when_requested(storage_env, monkeypa
 
     with pytest.raises(RuntimeError, match="HARNESS_TURSO_ORG"):
         storage.delete_agent_db("agent-delete", require_config=True)
+
+
+def test_reset_agent_memory_discards_existing_local_memory(storage_env, custom_migrations):
+    storage = storage_env
+    conn = storage.load("agent-reset")
+    conn.execute(
+        "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+        ("m1", 1, "user", "{}"),
+    )
+    conn.execute(
+        "INSERT INTO daily_summaries "
+        "(id, date, summary, message_count, created_at_ns) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("d1", "2026-04-24", "remembered", 1, 1),
+    )
+    storage.flush()
+
+    result = storage.reset_agent_memory("agent-reset")
+    assert result == {"local": True, "remote": False}
+
+    conn = storage.load("agent-reset")
+    assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 0
+    assert conn.execute("SELECT COUNT(*) AS c FROM daily_summaries").fetchone()["c"] == 0
+    applied = [r["name"] for r in conn.execute("SELECT name FROM applied_migrations")]
+    assert applied == ["0001_initial"]
