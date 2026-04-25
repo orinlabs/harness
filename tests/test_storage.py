@@ -151,3 +151,34 @@ def test_per_agent_isolation(storage_env, custom_migrations):
     conn_b = storage.load("agent-B")
     count = conn_b.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"]
     assert count == 0, "agent-B must not see agent-A's messages"
+
+
+def test_delete_local_agent_db_removes_sqlite_and_sidecars(storage_env, custom_migrations):
+    storage = storage_env
+    conn = storage.load("agent-delete")
+    conn.execute(
+        "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+        ("m1", 1, "user", "{}"),
+    )
+    storage.flush()
+
+    db_path = storage._db_path("agent-delete")
+    sidecars = [Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
+    for path in sidecars:
+        path.touch(exist_ok=True)
+
+    assert db_path.exists()
+    assert storage.delete_local_agent_db("agent-delete") is True
+
+    assert storage.db is None
+    assert not db_path.exists()
+    assert all(not path.exists() for path in sidecars)
+
+
+def test_delete_agent_db_requires_turso_env_when_requested(storage_env, monkeypatch):
+    storage = storage_env
+    monkeypatch.delenv("HARNESS_TURSO_ORG", raising=False)
+    monkeypatch.delenv("HARNESS_TURSO_PLATFORM_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeError, match="HARNESS_TURSO_ORG"):
+        storage.delete_agent_db("agent-delete", require_config=True)

@@ -24,7 +24,7 @@ HARNESS_TURSO_PLATFORM_TOKEN=...
 HARNESS_DATABASE_TOKEN=...
 
 # Usually optional
-HARNESS_TURSO_ORG=bryanhoulton
+HARNESS_TURSO_ORG=<your-turso-org>
 HARNESS_TURSO_GROUP=default
 BEDROCK_URL=http://127.0.0.1:8000
 ```
@@ -33,7 +33,6 @@ Notes:
 
 - `BEDROCK_TOKEN` is a Bedrock product API key.
 - `BEDROCK_URL` defaults to `http://127.0.0.1:8000`.
-- `HARNESS_TURSO_ORG` defaults to `bryanhoulton` in the CLI.
 - Missing API keys fail loudly. Tests and evals do not silently skip live calls.
 
 ## Use With Local Bedrock
@@ -61,6 +60,15 @@ uv run harness agent <AGENT_UUID> --local --model claude-haiku-4-5
 uv run harness agent <AGENT_UUID> --local --reasoning-effort medium
 uv run harness agent <AGENT_UUID> --local --run-id <RUN_UUID>
 ```
+
+Spin down an agent:
+
+```bash
+uv run harness delete-agent <AGENT_UUID>
+```
+
+This deletes all of the agent's side effects in the world. Bedrock calls this
+once when deleting an agent.
 
 ## Use With Remote Bedrock
 

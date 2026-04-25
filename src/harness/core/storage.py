@@ -99,6 +99,19 @@ def close() -> None:
     _loaded_agent_id = None
 
 
+def delete_agent_storage(agent_id: str, *, require_remote: bool = False) -> dict[str, bool]:
+    """Delete all harness-owned storage for an agent.
+
+    This is the production deletion hook Bedrock calls when an agent is being
+    deleted. Local sqlite files are always removed; the Turso database is
+    removed when Turso env is configured.
+    """
+    return {
+        "local": delete_local_agent_db(agent_id),
+        "remote": delete_agent_db(agent_id, require_config=require_remote),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Local sqlite backend (default)
 # ---------------------------------------------------------------------------
@@ -122,6 +135,24 @@ def _open_local(agent_id: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def delete_local_agent_db(agent_id: str) -> bool:
+    """Delete the local sqlite database and WAL sidecars for `agent_id`."""
+    if _loaded_agent_id == agent_id:
+        close()
+
+    path = _db_path(agent_id)
+    deleted = False
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            candidate.unlink()
+            deleted = True
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            raise RuntimeError(f"Could not delete local storage file {candidate}: {e}") from e
+    return deleted
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +210,7 @@ def _build_db_url(*, safe_id: str, url_template: str | None, org: str | None) ->
     )
 
 
-def delete_agent_db(agent_id: str) -> None:
+def delete_agent_db(agent_id: str, *, require_config: bool = False) -> bool:
     """Delete the Turso database for `agent_id` via the Platform API.
 
     No-op if the DB doesn't exist (404). Used by integration tests to tear
@@ -189,7 +220,20 @@ def delete_agent_db(agent_id: str) -> None:
     org = os.environ.get("HARNESS_TURSO_ORG")
     token = os.environ.get("HARNESS_TURSO_PLATFORM_TOKEN")
     if not (org and token):
-        return
+        if require_config:
+            missing = [
+                name
+                for name, value in (
+                    ("HARNESS_TURSO_ORG", org),
+                    ("HARNESS_TURSO_PLATFORM_TOKEN", token),
+                )
+                if not value
+            ]
+            raise RuntimeError(
+                "Cannot delete remote agent storage; missing "
+                f"{', '.join(missing)}."
+            )
+        return False
 
     name = f"agent-{_sanitize(agent_id)}"
     url = f"https://api.turso.tech/v1/organizations/{org}/databases/{name}"
@@ -200,13 +244,21 @@ def delete_agent_db(agent_id: str) -> None:
             timeout=30.0,
         )
     except httpx.HTTPError as e:
+        if require_config:
+            raise RuntimeError(f"Turso Platform API unreachable while deleting {name!r}: {e}") from e
         logger.warning("storage: DELETE %s failed: %s", name, e)
-        return
+        return False
     if resp.status_code in (200, 204, 404):
-        return
+        return True
+    if require_config:
+        raise RuntimeError(
+            f"Turso Platform API rejected deletion for {name!r}: "
+            f"{resp.status_code} {resp.text!r}"
+        )
     logger.warning(
         "storage: DELETE %s rejected: %s %s", name, resp.status_code, resp.text
     )
+    return False
 
 
 def _ensure_turso_db(*, org: str, group: str, name: str, token: str) -> None:

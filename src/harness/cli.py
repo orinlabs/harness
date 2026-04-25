@@ -3,6 +3,7 @@
 Two subcommands:
 
     harness agent [AGENT_ID] [options]    # Run a single agent run.
+    harness delete-agent AGENT_ID         # Delete agent-owned harness storage.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
 The `agent` path is the production-adjacent path. The `eval` path is for
@@ -352,6 +353,31 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _cmd_delete_agent(args, parser: argparse.ArgumentParser) -> int:
+    _load_env()
+
+    from harness.core import storage
+
+    try:
+        result = storage.delete_agent_storage(
+            args.agent_id,
+            require_remote=bool(os.environ.get("HARNESS_TURSO_ORG")),
+        )
+    except RuntimeError as e:
+        parser.exit(1, f"delete agent failed: {e}\n")
+
+    logger.info(
+        "deleted agent storage: id=%s local=%s remote=%s",
+        args.agent_id, result["local"], result["remote"],
+    )
+    print(
+        "deleted agent storage: "
+        f"id={args.agent_id} local={result['local']} remote={result['remote']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argparse + entrypoint
 # ---------------------------------------------------------------------------
@@ -393,6 +419,15 @@ def main(argv: list[str] | None = None) -> int:
                          help="System prompt override (dev auto-create only).")
     _add_common_flags(agent_p)
 
+    delete_p = subparsers.add_parser(
+        "delete-agent",
+        help="Delete harness-owned storage for an agent.",
+    )
+    delete_p.add_argument("agent_id", help="Agent UUID to delete storage for.")
+    delete_p.add_argument("--log-level",
+                          default=os.environ.get("LOG_LEVEL", "DEBUG"),
+                          help="Log level: DEBUG|INFO|WARNING|ERROR.")
+
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario",
                         help="Scenario name (matches Simulation.name).")
@@ -405,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "agent":
         return _cmd_agent(args, agent_p)
+    if args.command == "delete-agent":
+        return _cmd_delete_agent(args, delete_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval
