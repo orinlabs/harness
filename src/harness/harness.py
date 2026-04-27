@@ -43,7 +43,11 @@ class Harness:
         self.config = config
         self.ctx = RunContext(agent_id=config.id, run_id=run_id)
         self.tool_map: dict[str, Tool] = build_tool_map(config.adapters)
-        self.memory = MemoryService(agent_id=config.id, model=config.model)
+        self.memory = MemoryService(
+            agent_id=config.id,
+            model=config.model,
+            summarizer_v2=getattr(config, "summarizer_v2", False),
+        )
         # Per-run accumulator: totals (summed) + per-model breakdown (for the
         # run_agent span's final `usage.model_breakdown`).
         self._run_usage: dict[str, int | float] = {
@@ -60,6 +64,7 @@ class Harness:
     def run(self) -> None:
         set_agent_id(self.config.id)
         storage.load(self.config.id)
+        interrupted = False
         try:
             with text_span(
                 "run_agent",
@@ -76,6 +81,23 @@ class Harness:
                         with text_span(f"turn_{turn}") as turn_span:
                             if not self._step(turn_span):
                                 return
+                except BaseException as exc:  # noqa: BLE001
+                    # SystemExit (SIGTERM from bedrock's /stop or a
+                    # supersede), KeyboardInterrupt, and anything else
+                    # that isn't Exception. Flag the run so the finally
+                    # block can skip the end-of-run summarization (we
+                    # don't want to stretch shutdown with an LLM call)
+                    # and let the signal propagate. The outer finally
+                    # still flushes storage so messages written before
+                    # the interrupt are durable.
+                    interrupted = True
+                    logger.warning(
+                        "run_agent interrupted by %s (agent=%s, run=%s)",
+                        type(exc).__name__,
+                        self.config.id,
+                        self.ctx.run_id,
+                    )
+                    raise
                 finally:
                     run_span.set_metadata(
                         usage={
@@ -91,16 +113,40 @@ class Harness:
                         }
                     )
         finally:
+            # v2 defers all summarization to end-of-run so the summary
+            # describes completed actions, not in-flight state. Skipped
+            # on the interrupted path -- SIGTERM should propagate
+            # without being stretched by an LLM call, and the
+            # bedrock-side wake_agents drain is the backstop for state
+            # the agent left pending. Wrapped in try so a summarization
+            # failure can never block the storage flush below.
+            if self.memory.summarizer_v2 and not interrupted:
+                try:
+                    self.memory.update_summaries()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "End-of-run summarization failed for agent %s "
+                        "(run=%s) -- storage will still flush",
+                        self.config.id,
+                        self.ctx.run_id,
+                    )
             storage.flush()
             storage.close()
 
     def _step(self, turn_span) -> bool:
         """Run one turn. Return False if the loop should stop."""
         logger.info("turn %d start (run=%s)", self.ctx.turn, self.ctx.run_id)
-        # Roll up any completed buckets into higher-tier summaries exactly once
-        # per turn, before building the LLM inputs. Skipped internally (no
-        # trace span emitted) when nothing is pending.
-        self.memory.update_summaries()
+        # V1 rolls up any completed buckets into higher-tier summaries
+        # exactly once per turn, before building the LLM inputs. Skipped
+        # internally (no trace span emitted) when nothing is pending.
+        #
+        # V2 defers all summarization to end-of-run (see Harness.run's
+        # finally block). Rationale: mid-run state ("I am waiting for
+        # Mike's photo") routinely became a stale summary that a future
+        # run read as current state. End-of-run is the first moment
+        # where what happened is a stable fact.
+        if not self.memory.summarizer_v2:
+            self.memory.update_summaries()
 
         system, messages = self.memory.build_llm_inputs(self.config.system_prompt)
         tools_schema = [t.schema.to_openai() for t in self.tool_map.values()]
