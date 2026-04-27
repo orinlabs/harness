@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,15 @@ SUMMARY_TABLES = (
     "weekly_summaries",
     "monthly_summaries",
 )
+
+# Multi-row INSERT batch size. The legacy per-row ``executemany()`` pattern
+# fanned out one round-trip per row against remote libSQL (Turso), which made
+# large-agent imports take tens of minutes over WAN latency. Packing many
+# tuples into one ``INSERT ... VALUES (...), (...), ...`` statement collapses
+# each batch into a single wire round-trip. 500 rows × the widest schema
+# (7 columns) = 3500 parameters, safely under SQLite/libSQL's 32766 bound-
+# parameter cap (see SQLITE_MAX_VARIABLE_NUMBER on modern builds).
+BULK_INSERT_BATCH_ROWS = 500
 
 
 @dataclass(frozen=True)
@@ -84,13 +94,77 @@ def _read_payload(payload_path: str | Path) -> dict[str, Any]:
     return payload
 
 
+def _bulk_upsert(
+    conn,
+    *,
+    table: str,
+    columns: Sequence[str],
+    rows: Iterable[Sequence[Any]],
+    batch_size: int = BULK_INSERT_BATCH_ROWS,
+) -> int:
+    """Upsert ``rows`` into ``table`` using chunked multi-row VALUES statements.
+
+    Every chunk is executed as a single SQL statement, which maps to exactly
+    one wire round-trip on remote libSQL / Turso backends. This is materially
+    faster than the per-row ``executemany()`` path the legacy code used when
+    the connection is not local.
+
+    Returns the total number of rows inserted across all batches.
+    """
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    col_list = ", ".join(columns)
+    row_placeholder = "(" + ", ".join(["?"] * len(columns)) + ")"
+
+    total = 0
+    batch: list[Sequence[Any]] = []
+    for row in rows:
+        if len(row) != len(columns):
+            raise ValueError(
+                f"row length {len(row)} does not match column count {len(columns)} "
+                f"for table {table!r}"
+            )
+        batch.append(row)
+        if len(batch) >= batch_size:
+            _flush_batch(conn, table=table, col_list=col_list,
+                         row_placeholder=row_placeholder, batch=batch)
+            total += len(batch)
+            batch = []
+
+    if batch:
+        _flush_batch(conn, table=table, col_list=col_list,
+                     row_placeholder=row_placeholder, batch=batch)
+        total += len(batch)
+
+    return total
+
+
+def _flush_batch(
+    conn,
+    *,
+    table: str,
+    col_list: str,
+    row_placeholder: str,
+    batch: list[Sequence[Any]],
+) -> None:
+    values_clause = ", ".join([row_placeholder] * len(batch))
+    sql = (
+        f"INSERT OR REPLACE INTO {table} ({col_list}) "
+        f"VALUES {values_clause}"
+    )
+    flat_params: list[Any] = []
+    for row in batch:
+        flat_params.extend(row)
+    conn.execute(sql, flat_params)
+
+
 def _import_messages(conn, rows: list[dict[str, Any]]) -> int:
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO messages (id, ts_ns, role, content_json)
-        VALUES (?, ?, ?, ?)
-        """,
-        [
+    return _bulk_upsert(
+        conn,
+        table="messages",
+        columns=("id", "ts_ns", "role", "content_json"),
+        rows=(
             (
                 str(row["id"]),
                 int(row["ts_ns"]),
@@ -98,43 +172,34 @@ def _import_messages(conn, rows: list[dict[str, Any]]) -> int:
                 json.dumps(row["content"], separators=(",", ":")),
             )
             for row in rows
-        ],
+        ),
     )
-    return len(rows)
 
 
 def _import_one_minute(conn, rows: list[dict[str, Any]]) -> int:
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO one_minute_summaries
-        (id, date, hour, minute, summary, message_count, created_at_ns)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        [_dhm_values(row) for row in rows],
+    return _bulk_upsert(
+        conn,
+        table="one_minute_summaries",
+        columns=("id", "date", "hour", "minute", "summary", "message_count", "created_at_ns"),
+        rows=(_dhm_values(row) for row in rows),
     )
-    return len(rows)
 
 
 def _import_five_minute(conn, rows: list[dict[str, Any]]) -> int:
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO five_minute_summaries
-        (id, date, hour, minute, summary, message_count, created_at_ns)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        [_dhm_values(row) for row in rows],
+    return _bulk_upsert(
+        conn,
+        table="five_minute_summaries",
+        columns=("id", "date", "hour", "minute", "summary", "message_count", "created_at_ns"),
+        rows=(_dhm_values(row) for row in rows),
     )
-    return len(rows)
 
 
 def _import_hourly(conn, rows: list[dict[str, Any]]) -> int:
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO hourly_summaries
-        (id, date, hour, summary, message_count, created_at_ns)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        [
+    return _bulk_upsert(
+        conn,
+        table="hourly_summaries",
+        columns=("id", "date", "hour", "summary", "message_count", "created_at_ns"),
+        rows=(
             (
                 str(row["id"]),
                 str(row["date"]),
@@ -144,31 +209,25 @@ def _import_hourly(conn, rows: list[dict[str, Any]]) -> int:
                 int(row["created_at_ns"]),
             )
             for row in rows
-        ],
+        ),
     )
-    return len(rows)
 
 
 def _import_daily(conn, rows: list[dict[str, Any]]) -> int:
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO daily_summaries
-        (id, date, summary, message_count, created_at_ns)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        [_date_values(row) for row in rows],
+    return _bulk_upsert(
+        conn,
+        table="daily_summaries",
+        columns=("id", "date", "summary", "message_count", "created_at_ns"),
+        rows=(_date_values(row) for row in rows),
     )
-    return len(rows)
 
 
 def _import_weekly(conn, rows: list[dict[str, Any]]) -> int:
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO weekly_summaries
-        (id, week_start_date, summary, message_count, created_at_ns)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        [
+    return _bulk_upsert(
+        conn,
+        table="weekly_summaries",
+        columns=("id", "week_start_date", "summary", "message_count", "created_at_ns"),
+        rows=(
             (
                 str(row["id"]),
                 str(row["week_start_date"]),
@@ -177,19 +236,16 @@ def _import_weekly(conn, rows: list[dict[str, Any]]) -> int:
                 int(row["created_at_ns"]),
             )
             for row in rows
-        ],
+        ),
     )
-    return len(rows)
 
 
 def _import_monthly(conn, rows: list[dict[str, Any]]) -> int:
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO monthly_summaries
-        (id, year, month, summary, message_count, created_at_ns)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        [
+    return _bulk_upsert(
+        conn,
+        table="monthly_summaries",
+        columns=("id", "year", "month", "summary", "message_count", "created_at_ns"),
+        rows=(
             (
                 str(row["id"]),
                 int(row["year"]),
@@ -199,9 +255,8 @@ def _import_monthly(conn, rows: list[dict[str, Any]]) -> int:
                 int(row["created_at_ns"]),
             )
             for row in rows
-        ],
+        ),
     )
-    return len(rows)
 
 
 def _dhm_values(row: dict[str, Any]) -> tuple[Any, ...]:
