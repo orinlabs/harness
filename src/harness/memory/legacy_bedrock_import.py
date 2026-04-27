@@ -153,10 +153,12 @@ def _flush_batch(
         f"INSERT OR REPLACE INTO {table} ({col_list}) "
         f"VALUES {values_clause}"
     )
+    # libsql_experimental only accepts tuples for ``parameters``; sqlite3
+    # accepts any sequence. Normalise to tuple for backend portability.
     flat_params: list[Any] = []
     for row in batch:
         flat_params.extend(row)
-    conn.execute(sql, flat_params)
+    conn.execute(sql, tuple(flat_params))
 
 
 def _import_messages(conn, rows: list[dict[str, Any]]) -> int:

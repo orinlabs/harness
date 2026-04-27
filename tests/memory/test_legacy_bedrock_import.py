@@ -204,6 +204,49 @@ def test_import_legacy_bedrock_memory_batches_across_chunk_boundary(
         storage_module.close()
 
 
+def test_bulk_upsert_passes_tuple_params_to_execute():
+    """libsql_experimental (Turso) only accepts tuples for ``parameters``.
+
+    sqlite3 happily accepts any sequence, so a regression back to ``list``
+    would pass every test that exercises the real storage layer — and then
+    blow up at deploy time against remote libSQL with
+    ``TypeError: 'list' object cannot be converted to 'PyTuple'``.
+
+    This guards the contract at the ``conn.execute`` boundary directly.
+    """
+    from harness.memory.legacy_bedrock_import import _bulk_upsert
+
+    captured: list[tuple[str, object]] = []
+
+    class _RecordingConn:
+        def execute(self, sql, parameters=None):
+            # The real production backend raises TypeError on non-tuple
+            # parameters, so model that here.
+            if parameters is not None and not isinstance(parameters, tuple):
+                raise TypeError(
+                    "argument 'parameters': "
+                    f"{type(parameters).__name__!r} object cannot be converted to 'PyTuple'"
+                )
+            captured.append((sql, parameters))
+
+    rows = [(f"id-{i}", i, "x") for i in range(3)]
+    total = _bulk_upsert(
+        _RecordingConn(),
+        table="t",
+        columns=("id", "n", "s"),
+        rows=rows,
+        batch_size=2,
+    )
+    assert total == 3
+    # 3 rows with batch_size=2 → one full + one tail = 2 batches = 2 calls.
+    assert len(captured) == 2
+    assert all(isinstance(params, tuple) for _, params in captured)
+    # Full batch: 2 rows × 3 cols = 6 params.
+    assert len(captured[0][1]) == 6
+    # Tail batch: 1 row × 3 cols = 3 params.
+    assert len(captured[1][1]) == 3
+
+
 def test_import_legacy_bedrock_memory_is_idempotent(tmp_path, monkeypatch):
     """Re-running the same import must not duplicate rows.
 
