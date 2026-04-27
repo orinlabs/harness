@@ -51,3 +51,9 @@ class AgentConfig:
     system_prompt: str
     adapters: list[AdapterConfig] = field(default_factory=list)
     reasoning_effort: str | None = None
+    # When True, ``MemoryService`` defers all summarization to end-of-run
+    # and uses the past-tense-only prompt variant. Off by default so
+    # existing agents keep the original 1m -> 5m -> hourly -> ... cascade
+    # and mid-run summary triggers. Plumbed from the platform's agent
+    # config (e.g. the ``summarizer_v2`` feature flag in bedrock).
+    summarizer_v2: bool = False

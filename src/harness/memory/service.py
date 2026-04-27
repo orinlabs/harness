@@ -40,12 +40,22 @@ class MemoryService:
         model: str = "openai/gpt-4o-mini",
         timezone_name: str = "UTC",
         recent_limit: int = RECENT_MESSAGE_LIMIT,
+        summarizer_v2: bool = False,
     ):
         self.agent_id = agent_id
         self.model = model
         self.timezone_name = timezone_name
         self._recent_limit = recent_limit
+        # ``summarizer_v2`` flips the summarizer to the hourly-only,
+        # end-of-run, past-tense variant. See SummaryUpdater for the
+        # behavioral differences. Plumbed from AgentConfig via Harness.
+        self._v2 = summarizer_v2
         self._builder = MemoryContextBuilder(timezone=timezone_name)
+
+    @property
+    def summarizer_v2(self) -> bool:
+        """Whether this service is operating under the v2 summarizer flag."""
+        return self._v2
 
     # ------------------------------------------------------------------
     # Writes
@@ -88,6 +98,7 @@ class MemoryService:
         updater = SummaryUpdater(
             timezone_name=self.timezone_name,
             model=self.model,
+            v2=self._v2,
         )
         result = updater.update_all(current_time)
         return result.llm_usage

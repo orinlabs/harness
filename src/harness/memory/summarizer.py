@@ -65,11 +65,29 @@ def _dt_to_ns(dt: datetime) -> int:
 class SummaryUpdater:
     """Run sync summarisation across all six tiers in order:
     1m -> 5m -> hourly -> daily -> weekly -> monthly.
+
+    When ``v2=True``, the cascade is flattened: no 1m / 5m tiers (raw
+    messages fill that window), summarization is deferred to end-of-run
+    by the caller (Harness), and the summarization prompt is constrained
+    to past-tense actions only -- no "waiting for X" / "pending Y"
+    state-describing phrasing that stale summaries were turning into
+    current-state assertions on the next run.
+
+    The v2 cascade still produces hourly, daily, weekly, monthly summaries;
+    it only changes where they are computed from (raw messages instead of
+    pre-aggregated 5m summaries) and what the prompt allows them to say.
     """
 
-    def __init__(self, timezone_name: str = "UTC", model: str = "openai/gpt-4o-mini"):
+    def __init__(
+        self,
+        timezone_name: str = "UTC",
+        model: str = "openai/gpt-4o-mini",
+        *,
+        v2: bool = False,
+    ):
         self.timezone_name = timezone_name
         self.model = model
+        self.v2 = v2
         self.total_usage = SummarizerUsage()
 
     def update_all(self, current_time: datetime | None = None) -> UpdateAllResult:
@@ -78,8 +96,18 @@ class SummaryUpdater:
         self.total_usage = SummarizerUsage()
 
         started_at = _now_iso()
-        updated_1m = self._update_one_minute_summaries(current_time)
-        updated_5m = self._update_five_minute_summaries(current_time)
+        if self.v2:
+            # v2 skips the 1m and 5m tiers entirely: raw messages fill
+            # that window. Hourly summaries are built directly from
+            # messages by ``_update_hourly_summaries`` when v2 is on
+            # (see the v2 branch inside that method for the
+            # raw-messages-source path). The remaining tiers roll up
+            # off completed hourly summaries as usual.
+            updated_1m: list = []
+            updated_5m: list = []
+        else:
+            updated_1m = self._update_one_minute_summaries(current_time)
+            updated_5m = self._update_five_minute_summaries(current_time)
         updated_hour = self._update_hourly_summaries(current_time)
         updated_day = self._update_daily_summaries(current_time)
         updated_week = self._update_weekly_summaries(current_time)
