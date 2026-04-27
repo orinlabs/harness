@@ -28,6 +28,17 @@ SUMMARY_TABLES = (
 # parameter cap (see SQLITE_MAX_VARIABLE_NUMBER on modern builds).
 BULK_INSERT_BATCH_ROWS = 500
 
+# Upper bound on the approximate serialized size of one multi-row VALUES
+# batch. Hrana (libSQL's HTTP protocol) goes through Turso's Fly.io edge,
+# which rejects requests above a few MB with ``status=404 Not Found, body=
+# {"error":"stream not found: ..."}``. Legacy Bedrock messages in particular
+# can reach 1+ MB per row (large tool-call payloads), so we must cap by
+# bytes in addition to row count — packing 500 messages into one request
+# could easily exceed 10 MB. 1 MB leaves comfortable headroom under the
+# edge limit while still collapsing thousands of small rows into one
+# round-trip.
+BULK_INSERT_BATCH_MAX_BYTES = 1_000_000
+
 
 @dataclass(frozen=True)
 class ImportCounts:
@@ -101,6 +112,7 @@ def _bulk_upsert(
     columns: Sequence[str],
     rows: Iterable[Sequence[Any]],
     batch_size: int = BULK_INSERT_BATCH_ROWS,
+    max_batch_bytes: int = BULK_INSERT_BATCH_MAX_BYTES,
 ) -> int:
     """Upsert ``rows`` into ``table`` using chunked multi-row VALUES statements.
 
@@ -109,34 +121,81 @@ def _bulk_upsert(
     faster than the per-row ``executemany()`` path the legacy code used when
     the connection is not local.
 
+    Batches are capped by **both** ``batch_size`` (row count, to stay under
+    SQLite's bound-parameter cap) **and** ``max_batch_bytes`` (approximate
+    serialized payload size, to stay under Turso's per-request size limit).
+    Whichever bound hits first triggers a flush. A single oversized row
+    still goes in a batch-of-one — we cannot split a row — so very large
+    individual rows still flow through, just at one-per-request.
+
     Returns the total number of rows inserted across all batches.
     """
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if max_batch_bytes <= 0:
+        raise ValueError(f"max_batch_bytes must be positive, got {max_batch_bytes}")
 
     col_list = ", ".join(columns)
     row_placeholder = "(" + ", ".join(["?"] * len(columns)) + ")"
 
     total = 0
     batch: list[Sequence[Any]] = []
+    batch_bytes = 0
+
+    def flush() -> int:
+        nonlocal batch, batch_bytes
+        if not batch:
+            return 0
+        flushed = len(batch)
+        _flush_batch(conn, table=table, col_list=col_list,
+                     row_placeholder=row_placeholder, batch=batch)
+        batch = []
+        batch_bytes = 0
+        return flushed
+
     for row in rows:
         if len(row) != len(columns):
             raise ValueError(
                 f"row length {len(row)} does not match column count {len(columns)} "
                 f"for table {table!r}"
             )
+        row_bytes = _estimate_row_bytes(row)
+
+        # Flush before appending when adding this row would push us over
+        # the byte cap — unless the batch is empty, in which case we let
+        # the single oversize row go through on its own.
+        if batch and batch_bytes + row_bytes > max_batch_bytes:
+            total += flush()
+
         batch.append(row)
-        if len(batch) >= batch_size:
-            _flush_batch(conn, table=table, col_list=col_list,
-                         row_placeholder=row_placeholder, batch=batch)
-            total += len(batch)
-            batch = []
+        batch_bytes += row_bytes
 
-    if batch:
-        _flush_batch(conn, table=table, col_list=col_list,
-                     row_placeholder=row_placeholder, batch=batch)
-        total += len(batch)
+        if len(batch) >= batch_size or batch_bytes >= max_batch_bytes:
+            total += flush()
 
+    total += flush()
+    return total
+
+
+def _estimate_row_bytes(row: Sequence[Any]) -> int:
+    """Rough upper bound on the serialized size of one row in the wire payload.
+
+    We don't need to match libSQL's exact on-wire encoding — we just need a
+    stable, conservative estimate so the byte-capped batcher doesn't run
+    away in either direction. ``len(str(value))`` captures the string and
+    JSON-blob cases (the dominant contributors) plus reasonable bounds for
+    numeric columns.
+    """
+    total = 0
+    for value in row:
+        if value is None:
+            continue
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            total += len(value)
+        elif isinstance(value, str):
+            total += len(value.encode("utf-8"))
+        else:
+            total += len(str(value))
     return total
 
 

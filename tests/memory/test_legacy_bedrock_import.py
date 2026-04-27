@@ -204,6 +204,85 @@ def test_import_legacy_bedrock_memory_batches_across_chunk_boundary(
         storage_module.close()
 
 
+def test_bulk_upsert_flushes_when_byte_cap_reached_before_row_cap():
+    """Large individual rows must flush before hitting the row-count cap.
+
+    Turso / Fly.io edge rejects requests above a few MB with
+    ``stream not found``. A single heavy Bedrock message can be >1 MB
+    (large tool-call payloads), so packing 500 of those into one request
+    would blow past the edge limit long before hitting ``batch_size``. The
+    byte-aware batcher must flush early on a byte trigger.
+    """
+    from harness.memory.legacy_bedrock_import import _bulk_upsert
+
+    flush_calls: list[int] = []
+
+    class _RecordingConn:
+        def execute(self, sql, parameters=None):
+            # parameters is flat across all rows in the batch; divide by
+            # column count to recover rows-per-batch.
+            assert isinstance(parameters, tuple)
+            flush_calls.append(len(parameters) // 2)
+
+    # Each row is ~600 bytes of string. With batch_size=1000 we'd never
+    # flush on row-count. With max_batch_bytes=1500 a flush must fire
+    # roughly every 2-3 rows.
+    big_blob = "x" * 600
+    rows = [(f"id-{i}", big_blob) for i in range(10)]
+    total = _bulk_upsert(
+        _RecordingConn(),
+        table="t",
+        columns=("id", "blob"),
+        rows=rows,
+        batch_size=1000,
+        max_batch_bytes=1500,
+    )
+    assert total == 10
+    # All 10 rows delivered, but split into multiple batches driven by
+    # bytes, not rows.
+    assert sum(flush_calls) == 10
+    assert len(flush_calls) >= 4, (
+        f"expected byte-cap to force multiple flushes, got {flush_calls}"
+    )
+    # No single batch exceeds ~3 rows (3 × 600 = 1800 > 1500, triggers flush).
+    assert max(flush_calls) <= 3
+
+
+def test_bulk_upsert_admits_single_oversize_row_alone():
+    """One row bigger than max_batch_bytes must still be delivered.
+
+    A row can't be split across batches. The batcher must let an oversize
+    row flush in a batch-of-one rather than hang or loop.
+    """
+    from harness.memory.legacy_bedrock_import import _bulk_upsert
+
+    flush_sizes: list[int] = []
+
+    class _RecordingConn:
+        def execute(self, sql, parameters=None):
+            assert isinstance(parameters, tuple)
+            flush_sizes.append(len(parameters) // 2)
+
+    # One huge row + a couple small rows.
+    rows = [
+        ("huge", "y" * 5000),
+        ("small-1", "a"),
+        ("small-2", "b"),
+    ]
+    total = _bulk_upsert(
+        _RecordingConn(),
+        table="t",
+        columns=("id", "blob"),
+        rows=rows,
+        batch_size=1000,
+        max_batch_bytes=1000,
+    )
+    assert total == 3
+    # Huge row flushes alone; the two small rows can share a batch.
+    assert flush_sizes[0] == 1  # oversize row solo
+    assert sum(flush_sizes) == 3
+
+
 def test_bulk_upsert_passes_tuple_params_to_execute():
     """libsql_experimental (Turso) only accepts tuples for ``parameters``.
 
