@@ -156,6 +156,12 @@ class Harness:
             self.memory.update_summaries()
 
         system, messages = self.memory.build_llm_inputs(self.config.system_prompt)
+        logger.info(
+            "turn %d: self.tool_map has %d tool(s) before schema build: %s",
+            self.ctx.turn,
+            len(self.tool_map),
+            sorted(self.tool_map.keys()),
+        )
         tools_schema = [t.schema.to_openai() for t in self.tool_map.values()]
         logger.info(
             "turn %d built inputs: system_chars=%d messages=%d tools=%d",
@@ -164,6 +170,16 @@ class Harness:
             len(messages),
             len(tools_schema),
         )
+        # Defense: tool_map was populated at init but the schema list came
+        # out empty. Refuse to call OpenRouter -- an empty `tools` list with
+        # no tool_choice forces the model to plain-chat and the harness loop
+        # happily re-calls forever, burning money. Fail loudly instead.
+        if self.tool_map and not tools_schema:
+            raise RuntimeError(
+                f"tools_schema is empty despite tool_map having "
+                f"{len(self.tool_map)} tool(s); refusing to call LLM. "
+                f"tool_map keys={sorted(self.tool_map.keys())}"
+            )
 
         llm_started_at = _now_iso()
         with llm_span(

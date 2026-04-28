@@ -206,6 +206,21 @@ def complete(
     # un-namespaced form. No-op for OpenAI/Google/etc. slugs.
     model = _translate_model(model)
 
+    logger.info(
+        "openrouter complete() received: model=%s messages=%d tools=%s "
+        "tool_choice=%s reasoning_effort=%s",
+        model,
+        len(messages),
+        "None" if tools is None else f"len={len(tools)}",
+        tool_choice,
+        reasoning_effort or "-",
+    )
+    if tools:
+        tool_names = [
+            ((t.get("function") or {}).get("name") or "?") for t in tools
+        ]
+        logger.info("openrouter complete() tool names: %s", tool_names)
+
     full_messages: list[dict] = []
     if system:
         full_messages.append({"role": "system", "content": system})
