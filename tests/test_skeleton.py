@@ -33,7 +33,7 @@ def test_config_construction_no_io(monkeypatch):
 
     monkeypatch.setattr(socket, "socket", forbid_socket)
 
-    from harness import AdapterConfig, AgentConfig, ExternalToolSpec
+    from harness import AgentConfig, ExternalToolSpec
 
     tool = ExternalToolSpec(
         name="echo",
@@ -41,15 +41,14 @@ def test_config_construction_no_io(monkeypatch):
         parameters={"type": "object", "properties": {}},
         url="http://example.com/echo",
     )
-    adapter = AdapterConfig(name="test", description="test adapter", tools=[tool])
     config = AgentConfig(
         id="agent-1",
         model="openai/gpt-4o-mini",
         system_prompt="hello",
-        adapters=[adapter],
+        tools=[tool],
     )
     assert config.id == "agent-1"
-    assert config.adapters[0].tools[0].url == "http://example.com/echo"
+    assert config.tools[0].url == "http://example.com/echo"
 
 
 def test_core_subpackage_not_imported_by_default():

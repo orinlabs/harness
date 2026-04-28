@@ -29,3 +29,8 @@ class RunContext:
     # list_notifications to refuse sleep while attention items are pending.
     # Typed as Any to avoid a context <-> tools import cycle.
     tool_map: dict[str, Any] = field(default_factory=dict)
+    # Populated by Harness.__init__ from the injected (or autoconfigured)
+    # ``AgentRuntime``. Built-in tools that need platform-scoped operations
+    # (currently just SleepTool) invoke them through here. Typed as Any to
+    # avoid a context <-> core/runtime import cycle at dataclass-decoration time.
+    runtime: Any = None

@@ -1,29 +1,34 @@
 """`harness eval` subcommand entrypoint.
 
-Placed in `harness.evals.cli_entry` so that the top-level `harness.cli`
-module can defer importing `harness.evals` (and its eval-only dependencies
+Placed in ``harness.evals.cli_entry`` so that the top-level ``harness.cli``
+module can defer importing ``harness.evals`` (and its eval-only dependencies
 like the simulation runner / fake adapters) until the user actually asks
 for the eval path.
+
+Evals run standalone by default: the scenario's fake adapters live in-process
+and span-sink/agent-runtime come from ``autoconfigure()``. When
+``BEDROCK_URL`` + ``BEDROCK_TOKEN`` are set, spans flow to Bedrock (via
+``BedrockTraceSink``) -- but we don't create a Bedrock agent row, so the
+spans are visible under whatever agent_id we synthesize locally. Users who
+want a dedicated Bedrock eval agent should create one via the Bedrock API
+and pass its id via ``AGENT_ID`` env (TODO).
 """
 from __future__ import annotations
 
 import argparse
 import importlib
 import logging
+import os
 import pkgutil
-import subprocess
 import sys
 import uuid
 
-import httpx
-
 from harness.cli import (
     DEFAULT_ENV,
+    _apply_bedrock_env,
+    _bedrock_configured,
     _ensure_secrets_env,
     _load_env,
-    _resolve_bedrock_token,
-    _resolve_bedrock_url,
-    _resolve_product,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,14 +40,14 @@ logger = logging.getLogger(__name__)
 
 
 def _discover_simulation_classes():
-    """Walk `harness.evals.scenarios` and return all Simulation subclasses.
+    """Walk ``harness.evals.scenarios`` and return all Simulation subclasses.
 
     Returns a list of (module_name, class) tuples. Modules that fail to
     import are logged and skipped so one broken scenario doesn't take the
     whole runner down.
     """
-    from harness.evals.base import Simulation
     from harness.evals import scenarios as scenarios_pkg
+    from harness.evals.base import Simulation
 
     out: list[tuple[str, type[Simulation]]] = []
     for mod_info in pkgutil.walk_packages(
@@ -76,96 +81,21 @@ def _find_scenario(name: str):
 
 
 # ---------------------------------------------------------------------------
-# Agent creation for evals
-# ---------------------------------------------------------------------------
-
-
-def _git_branch() -> str:
-    try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return r.stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
-
-
-def _git_sha() -> str:
-    try:
-        r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return r.stdout.strip()[:40] or "unknown"
-    except Exception:
-        return "unknown"
-
-
-def _create_eval_agent(
-    bedrock_url: str,
-    bedrock_token: str,
-    *,
-    scenario_name: str,
-    product_id: str,
-    model: str,
-    system_prompt: str,
-    template: str | None,
-) -> dict:
-    body = {
-        "name": f"eval-{scenario_name}",
-        "purpose": "eval",
-        "product": product_id,
-        "model": model,
-        "system_prompt": system_prompt or "",
-        "tags": [
-            f"scenario:{scenario_name}",
-            f"git-ref:{_git_branch()}",
-            f"git-sha:{_git_sha()}",
-        ],
-    }
-    if template:
-        logger.warning(
-            "# TODO(Phase 2): template not yet implemented server-side; "
-            "ignoring --template=%s", template,
-        )
-    url = f"{bedrock_url.rstrip('/')}/api/cloud/agents/"
-    resp = httpx.post(
-        url,
-        json=body,
-        headers={"Authorization": f"Bearer {bedrock_token}"},
-        timeout=15.0,
-    )
-    if resp.status_code >= 400:
-        print(f"create eval agent failed: {resp.status_code} {resp.text}", file=sys.stderr)
-        resp.raise_for_status()
-    return resp.json()
-
-
-# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
 
 def run(args, parser: argparse.ArgumentParser) -> int:
     _load_env()
-    import os
 
     for k, v in DEFAULT_ENV.items():
         os.environ.setdefault(k, v)
 
-    bedrock_url = _resolve_bedrock_url(args)
-    os.environ["BEDROCK_URL"] = bedrock_url
-    bedrock_token = _resolve_bedrock_token(args)
-    if not bedrock_token:
-        parser.error("--bedrock-token is required (pass as flag or set $BEDROCK_TOKEN)")
-    os.environ["BEDROCK_TOKEN"] = bedrock_token
+    _apply_bedrock_env(args)
     _ensure_secrets_env(parser)
 
     scenario_cls = _find_scenario(args.scenario)
     logger.info("found scenario %s from %s", scenario_cls.name, scenario_cls.__module__)
-
-    product_id = _resolve_product(bedrock_url, bedrock_token, args.product)
 
     model = (
         args.model
@@ -179,21 +109,13 @@ def run(args, parser: argparse.ArgumentParser) -> int:
         or None
     )
 
-    agent = _create_eval_agent(
-        bedrock_url,
-        bedrock_token,
-        scenario_name=scenario_cls.name,
-        product_id=product_id,
-        model=model,
-        system_prompt=system_prompt,
-        template=args.template,
-    )
-    agent_id = agent["id"]
-    print(f"created eval agent: {agent_id}", file=sys.stderr)
+    # No Bedrock agent row is created. Spans flow to Bedrock via the
+    # autoconfigured trace sink when the env is set; the agent_id below is
+    # local and synthesized.
+    agent_id = f"eval-{scenario_cls.name}-{uuid.uuid4().hex[:8]}"
+    print(f"eval agent id: {agent_id}", file=sys.stderr)
 
-    # Build AgentConfig with every fake adapter wired in. Scenarios can
-    # opt-in/out per-adapter later via AgentOverrides.adapters; for now
-    # we always attach all four so every tool surface is available.
+    # Build AgentConfig with every fake adapter wired in.
     from harness.config import AgentConfig
     from harness.evals.fakes import (
         FakeComputerAdapter,
@@ -207,11 +129,11 @@ def run(args, parser: argparse.ArgumentParser) -> int:
         model=model,
         system_prompt=system_prompt,
         reasoning_effort=reasoning_effort,
-        adapters=[
-            FakeEmailAdapter.make_adapter_config(),
-            FakeSMSAdapter.make_adapter_config(),
-            FakeContactsAdapter.make_adapter_config(),
-            FakeComputerAdapter.make_adapter_config(),
+        tools=[
+            *FakeEmailAdapter.make_tools(),
+            *FakeSMSAdapter.make_tools(),
+            *FakeContactsAdapter.make_tools(),
+            *FakeComputerAdapter.make_tools(),
         ],
     )
 
@@ -227,15 +149,18 @@ def run(args, parser: argparse.ArgumentParser) -> int:
         logger.exception("eval failed")
         raise
 
-    # Summarise checkpoint results.
     passed = sum(1 for cp in runner.checkpoint_results if cp["passed"])
     total = len(runner.checkpoint_results)
     print(
         f"eval complete: {passed}/{total} checkpoints passed",
         file=sys.stderr,
     )
-    print(f"View agent: {bedrock_url.rstrip('/')}/agents/{agent_id}", file=sys.stderr)
+    if _bedrock_configured():
+        base = os.environ["BEDROCK_URL"].rstrip("/")
+        print(
+            f"View traces: {base}/admin/tracing/trace/ (filter by agent_id={agent_id})",
+            file=sys.stderr,
+        )
 
     _ = result
-    _ = uuid  # reserved for future run_id plumbing
     return 0 if total > 0 and passed == total else (1 if total > 0 else 0)

@@ -12,17 +12,17 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .base import Simulation
 
-_active_simulation: contextvars.ContextVar["Simulation | None"] = contextvars.ContextVar(
+_active_simulation: contextvars.ContextVar[Simulation | None] = contextvars.ContextVar(
     "active_simulation", default=None
 )
 
 
-def get_simulation() -> "Simulation":
+def get_simulation() -> Simulation:
     sim = _active_simulation.get()
     if sim is None:
         raise RuntimeError("No active simulation in this context")
     return sim
 
 
-def set_simulation(sim: "Simulation | None") -> None:
+def set_simulation(sim: Simulation | None) -> None:
     _active_simulation.set(sim)

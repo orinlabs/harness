@@ -141,7 +141,8 @@ def generate_memory_seeds(
             parsed = GeneratedMemories.model_validate_json(response.text)
         except Exception as exc:
             raise ValueError(
-                f"Memory-seed model did not return a tool call or valid JSON (model={instruction.model})"
+                "Memory-seed model did not return a tool call or valid JSON "
+                f"(model={instruction.model})"
             ) from exc
     else:
         call = response.tool_calls[0]

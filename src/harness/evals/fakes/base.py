@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from harness.core import storage
@@ -71,7 +71,7 @@ def apply_migrations() -> None:
 
 def now_iso() -> str:
     """Return the current time as an ISO-8601 UTC string (``...Z``)."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def new_id(prefix: str) -> str:

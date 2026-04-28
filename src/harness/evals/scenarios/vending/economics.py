@@ -169,7 +169,7 @@ def _llm_generate(
 
     items = json.loads(text[start:end])
     results: list[ProductEconomics] = []
-    for item, pid in zip(items, ids):
+    for item, pid in zip(items, ids, strict=False):
         results.append(
             ProductEconomics(
                 product_id=pid,
@@ -188,7 +188,7 @@ def _fallback_economics(names: list[str], ids: list[str]) -> list[ProductEconomi
         "large": (2.50, 1.2, 1.2),
     }
     results = []
-    for name, pid in zip(names, ids):
+    for name, pid in zip(names, ids, strict=False):
         base_price, base_sales, elasticity = defaults.get("small", (1.50, 2.0, 1.5))
         results.append(
             ProductEconomics(

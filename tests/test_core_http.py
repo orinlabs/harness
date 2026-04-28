@@ -1,4 +1,9 @@
-"""tracer + runtime_api HTTP integration (real HTTP to fake_platform)."""
+"""tracer + Bedrock runtime HTTP integration (real HTTP to fake_platform).
+
+These tests exercise the BedrockTraceSink + BedrockAgentRuntime via the
+public tracer API. fake_platform sets BEDROCK_URL / BEDROCK_TOKEN at its
+URL, so the tracer's autoconfig selects the Bedrock-backed sink.
+"""
 from __future__ import annotations
 
 
@@ -239,10 +244,12 @@ def test_tracer_normal_close_removes_from_registry(fake_platform):
     assert closed_trace["error"] == ""
 
 
-def test_runtime_api_sleep(fake_platform):
-    from harness.core import runtime_api
+def test_bedrock_agent_runtime_sleep(fake_platform):
+    from harness.cloud.bedrock import BedrockAgentRuntime
 
-    runtime_api.sleep("agent-7", until="2099-01-01T00:00:00Z", reason="testing")
+    BedrockAgentRuntime().sleep(
+        "agent-7", until="2099-01-01T00:00:00Z", reason="testing"
+    )
 
     assert len(fake_platform.sleep_requests) == 1
     sr = fake_platform.sleep_requests[0]

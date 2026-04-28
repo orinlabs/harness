@@ -1,32 +1,31 @@
 """Built-in sleep tool.
 
-Calling this tool tells the infra platform to put the agent to sleep. The
-harness process exits cleanly after the current turn. On wake, infra spins
-up a new process with the same agent_id and a new run_id.
+Delegates to ``ctx.runtime.sleep(...)`` (an ``AgentRuntime``). In standalone
+mode the runtime is a no-op and the harness process exits cleanly after the
+current turn. In Bedrock mode the runtime POSTs to the platform, which then
+SIGTERMs this process and re-spawns a fresh one at wake time.
 
 Before actually sleeping we ask the agent's own ``list_notifications`` tool
 (if one is registered) whether there are any pending notifications. If so,
 we refuse to sleep and hand the notification list back to the model -- the
-agent should address / clear each item before going idle. This mirrors the
-pre-harness bedrock SleepTool's urgent-notification gate, but implemented
-as a cross-tool call so the harness doesn't need its own notifications API
-client.
+agent should address / clear each item before going idle. This is
+implemented as a cross-tool call so the harness doesn't need its own
+notifications API client.
 """
 from __future__ import annotations
 
 import logging
 
 from harness.context import RunContext
-from harness.core import runtime_api
 from harness.tools.base import ToolResult, ToolSchema
 
 logger = logging.getLogger(__name__)
 
 _LIST_NOTIFICATIONS_TOOL = "list_notifications"
-# The ``list_notifications`` handler (bedrock-side) returns exactly this
-# sentence when there are no active, uncleared notifications. We match on
-# a substring so minor punctuation drift ("You have no pending
-# notifications" vs "... notifications.") still reads as "empty inbox".
+# The ``list_notifications`` handler returns exactly this sentence when there
+# are no active, uncleared notifications. We match on a substring so minor
+# punctuation drift ("You have no pending notifications" vs "...
+# notifications.") still reads as "empty inbox".
 _EMPTY_MARKER = "no pending notifications"
 
 
@@ -78,7 +77,21 @@ class SleepTool:
                 )
             )
 
-        runtime_api.sleep(ctx.agent_id, until=until, reason=reason)
+        if ctx.runtime is None:
+            # Defensive: Harness always wires a runtime onto ctx. A missing
+            # runtime means the caller built a RunContext by hand for a test
+            # and forgot to attach one. Fall back to "request sleep, no
+            # platform side effect" so the model's state machine still
+            # behaves -- tests that care about the network call inject an
+            # AgentRuntime explicitly.
+            logger.warning(
+                "SleepTool called without ctx.runtime; treating as local no-op "
+                "(agent=%s, until=%s)",
+                ctx.agent_id,
+                until,
+            )
+        else:
+            ctx.runtime.sleep(ctx.agent_id, until=until, reason=reason)
         ctx.sleep_requested = True
         return ToolResult(text=f"Sleeping until {until}.")
 

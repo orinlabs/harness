@@ -1,37 +1,34 @@
 """Console entry point for the harness.
 
-Two subcommands:
+Subcommands:
 
-    harness agent [AGENT_ID] [options]    # Run a single agent run.
+    harness agent [AGENT_ID_OR_NAME] [options]
+                                          # Run a single agent run. Resolves
+                                          # local ./agents/<name>.yaml first;
+                                          # falls back to Bedrock's harness-
+                                          # config/ endpoint when the env has
+                                          # BEDROCK_URL + BEDROCK_TOKEN set.
+                                          # Auto-creates a dev agent on
+                                          # Bedrock when no id is provided.
     harness delete-agent AGENT_ID [--purge]
                                           # Archive (default) or fully purge
                                           # agent-owned harness storage.
-    harness reset-memory AGENT_ID         # Reset agent memory storage (keeps
-                                          # the Daytona sandbox around).
+    harness reset-memory AGENT_ID         # Reset agent memory storage.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
-The `agent` path is the production-adjacent path. The `eval` path is for
-offline evaluation against the in-process fake adapters (imports are
-deferred into the `eval` branch so cold-start of `harness agent` never
-pays the price of pulling `harness.evals` / `harness.evals.fakes`).
-
-Environment is loaded from `.env` in cwd if present. Non-secret identifiers
-(platform URL) have baked-in defaults.
-
-Required env (secrets) common to both subcommands:
-    DAYTONA_API_KEY       Daytona API key. Harness provisions one sandbox per
-                          agent (labeled `harness.agent_id=<id>`) and keeps
-                          that agent's sqlite DB inside it.
+Environment is loaded from `.env` in cwd if present. Required secrets:
     OPENROUTER_API_KEY
 
-Optional env (override defaults):
-    BEDROCK_URL                       default: http://127.0.0.1:8000
-    DAYTONA_API_URL                   default: https://app.daytona.io/api
-    DAYTONA_TARGET                    SDK default region if unset
-    HARNESS_DAYTONA_AUTO_STOP_MINUTES passed as `auto_stop_interval`
-    MODEL                             override the agent's configured model
-    REASONING_EFFORT                  override reasoning_effort (low|medium|high)
-    LOG_LEVEL                         default: INFO
+Optional:
+    DAYTONA_API_KEY       per-agent Daytona sandbox (falls back to local sqlite)
+    DAYTONA_API_URL       default: https://app.daytona.io/api
+    DAYTONA_TARGET        SDK default region if unset
+    HARNESS_DAYTONA_AUTO_STOP_MINUTES  passed as auto_stop_interval
+    MODEL                 override the agent's configured model
+    REASONING_EFFORT      override reasoning_effort (low|medium|high)
+    LOG_LEVEL             default: INFO
+    BEDROCK_URL           enables Bedrock lookup + tracing to Bedrock
+    BEDROCK_TOKEN         bedrock product API key
 """
 from __future__ import annotations
 
@@ -45,17 +42,12 @@ import sys
 import uuid
 from pathlib import Path
 
-import httpx
-
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_ENV: dict[str, str] = {
-    "BEDROCK_URL": "http://127.0.0.1:8000",
-}
+DEFAULT_ENV: dict[str, str] = {}
 
 REQUIRED_ENV = (
-    "DAYTONA_API_KEY",
     "OPENROUTER_API_KEY",
 )
 
@@ -125,21 +117,45 @@ def _load_env() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Shared: bedrock URL/token + env checks + git stamping
+# Shared: Bedrock URL/token resolution + env checks + git stamping
 # ---------------------------------------------------------------------------
 
 
-def _resolve_bedrock_url(args) -> str:
-    """Precedence: --bedrock-url > --local > $BEDROCK_URL > default."""
+def _resolve_bedrock_url(args) -> str | None:
+    """Precedence: ``--bedrock-url`` > ``--local`` > ``$BEDROCK_URL`` > None.
+
+    Returns None when no Bedrock URL is configured anywhere. Callers treat
+    that as "standalone mode; don't fall back to Bedrock".
+    """
     if getattr(args, "bedrock_url", None):
         return args.bedrock_url
     if getattr(args, "local", False):
         return "http://127.0.0.1:8000"
-    return os.environ.get("BEDROCK_URL") or DEFAULT_ENV["BEDROCK_URL"]
+    return os.environ.get("BEDROCK_URL") or None
 
 
 def _resolve_bedrock_token(args) -> str | None:
     return getattr(args, "bedrock_token", None) or os.environ.get("BEDROCK_TOKEN")
+
+
+def _apply_bedrock_env(args) -> tuple[str | None, str | None]:
+    """Normalize --bedrock-url/--bedrock-token/--local onto env for downstream.
+
+    Returns ``(url, token)``; either may be None (standalone mode). The
+    tracer / Bedrock clients read these off env, so we export whatever we
+    resolved onto the process env before any sink or runtime is built.
+    """
+    url = _resolve_bedrock_url(args)
+    token = _resolve_bedrock_token(args)
+    if url:
+        os.environ["BEDROCK_URL"] = url
+    if token:
+        os.environ["BEDROCK_TOKEN"] = token
+    return url, token
+
+
+def _bedrock_configured() -> bool:
+    return bool(os.environ.get("BEDROCK_URL") and os.environ.get("BEDROCK_TOKEN"))
 
 
 def _ensure_secrets_env(parser: argparse.ArgumentParser) -> None:
@@ -172,115 +188,92 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def _resolve_product(bedrock_url: str, bedrock_token: str, explicit: str | None) -> str:
-    """Resolve product UUID for auto-created agents.
+# ---------------------------------------------------------------------------
+# Config resolution for `harness agent`
+# ---------------------------------------------------------------------------
 
-    1. `--product` flag wins.
-    2. Else GET /api/products/products/ -- if exactly one visible, use it.
-    3. Else raise.
+
+def _resolve_agent_config(args, parser: argparse.ArgumentParser):
+    """Resolve ``args.agent_id`` into an ``AgentConfig``.
+
+    1. If ``agent_id`` is given and ``./agents/<agent_id>.{yaml,yml,json}``
+       exists, load it locally (standalone).
+    2. Else if Bedrock env is set, fetch the harness-config from Bedrock.
+    3. Else error.
+
+    When ``agent_id`` is None, we auto-create a dev agent on Bedrock
+    (requires env). Standalone auto-create would need somewhere to put the
+    resulting YAML; unsupported for now.
     """
-    if explicit:
-        return explicit
-    url = f"{bedrock_url.rstrip('/')}/api/products/products/"
-    resp = httpx.get(url, headers={"Authorization": f"Bearer {bedrock_token}"}, timeout=10.0)
-    resp.raise_for_status()
-    products = resp.json()
-    if isinstance(products, dict) and "results" in products:
-        products = products["results"]
-    if not isinstance(products, list) or not products:
-        raise SystemExit("no products visible to this API key")
-    if len(products) > 1:
-        raise SystemExit("multiple products visible, pass --product <uuid>")
-    return products[0]["id"]
+    from harness.config_loader import load_agent_config_by_name
 
+    agent_id: str | None = args.agent_id
 
-# ---------------------------------------------------------------------------
-# Config-building for `harness agent` (existing id path)
-# ---------------------------------------------------------------------------
+    if agent_id:
+        try:
+            cfg = load_agent_config_by_name(agent_id)
+        except FileNotFoundError as e:
+            if not _bedrock_configured():
+                parser.exit(
+                    1,
+                    f"{e}\n(No BEDROCK_URL + BEDROCK_TOKEN in env, so can't "
+                    "fall back to the platform.)\n",
+                )
+            from harness.cloud.bedrock import fetch_harness_config
 
-
-def _fetch_config(bedrock_url: str, bedrock_token: str, agent_id: str) -> dict:
-    url = f"{bedrock_url.rstrip('/')}/api/cloud/agents/{agent_id}/harness-config/"
-    logger.info("fetching harness config from %s", url)
-    resp = httpx.get(url, headers={"Authorization": f"Bearer {bedrock_token}"}, timeout=10.0)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _build_config_from_harness_config(cfg: dict, *, model_override: str | None = None,
-                                      reasoning_override: str | None = None):
-    from harness import AdapterConfig, AgentConfig, ExternalToolSpec
-
-    model = model_override or os.environ.get("MODEL") or cfg["model"]
-    reasoning_effort = (
-        reasoning_override
-        or os.environ.get("REASONING_EFFORT")
-        or cfg.get("reasoning_effort")
-    )
-
-    return AgentConfig(
-        id=cfg["id"],
-        model=model,
-        system_prompt=cfg["system_prompt"],
-        reasoning_effort=reasoning_effort,
-        adapters=[
-            AdapterConfig(
-                name=a["name"],
-                description=a["description"],
-                tools=[
-                    ExternalToolSpec(
-                        name=t["name"],
-                        description=t["description"],
-                        parameters=t["parameters"],
-                        url=t["url"],
-                        timeout_seconds=t.get("timeout_seconds", 60.0),
-                    )
-                    for t in a["tools"]
-                ],
+            cfg = fetch_harness_config(
+                agent_id,
+                model_override=args.model,
+                reasoning_override=args.reasoning_effort,
             )
-            for a in cfg.get("adapters", [])
-        ],
-    )
+        else:
+            # Apply CLI overrides to the locally-loaded config.
+            if args.model or args.reasoning_effort:
+                cfg = _apply_runtime_overrides(
+                    cfg,
+                    model_override=args.model,
+                    reasoning_override=args.reasoning_effort,
+                )
+        return cfg, agent_id
 
-
-def _create_dev_agent(
-    bedrock_url: str,
-    bedrock_token: str,
-    *,
-    product_id: str,
-    model: str,
-    system_prompt: str | None,
-    template: str | None,
-    branch: str,
-    sha: str,
-) -> dict:
-    body = {
-        "name": f"dev-{uuid.uuid4().hex[:8]}",
-        "purpose": "dev",
-        "product": product_id,
-        "model": model,
-        "tags": [f"git-ref:{branch}", f"git-sha:{sha}"],
-    }
-    if system_prompt:
-        body["system_prompt"] = system_prompt
-    if template:
-        # Server-side template support is Phase 2. For now pass it through so
-        # any future serializer can accept it, and warn loudly.
-        logger.warning(
-            "# TODO(Phase 2): template not yet implemented server-side; "
-            "ignoring --template=%s", template,
+    # No id: auto-create on Bedrock.
+    if not _bedrock_configured():
+        parser.exit(
+            2,
+            "agent_id is required in standalone mode. Pass an id that matches "
+            "./agents/<name>.yaml, or set BEDROCK_URL + BEDROCK_TOKEN to "
+            "auto-create a dev agent on the platform.\n",
         )
-    url = f"{bedrock_url.rstrip('/')}/api/cloud/agents/"
-    resp = httpx.post(
-        url,
-        json=body,
-        headers={"Authorization": f"Bearer {bedrock_token}"},
-        timeout=15.0,
+    from harness.cloud.bedrock import create_dev_agent, fetch_harness_config, resolve_product
+
+    product_id = resolve_product(args.product)
+    model = args.model or "claude-haiku-4-5"
+    created = create_dev_agent(
+        product_id=product_id,
+        model=model,
+        system_prompt=args.system_prompt,
+        template=args.template,
+        branch=_git_branch(),
+        sha=_git_sha(),
     )
-    if resp.status_code >= 400:
-        print(f"create agent failed: {resp.status_code} {resp.text}", file=sys.stderr)
-        resp.raise_for_status()
-    return resp.json()
+    agent_id = created["id"]
+    print(f"created dev agent: {agent_id}", file=sys.stderr)
+    cfg = fetch_harness_config(
+        agent_id,
+        model_override=args.model,
+        reasoning_override=args.reasoning_effort,
+    )
+    return cfg, agent_id
+
+
+def _apply_runtime_overrides(cfg, *, model_override, reasoning_override):
+    from dataclasses import replace
+
+    return replace(
+        cfg,
+        model=model_override or cfg.model,
+        reasoning_effort=reasoning_override or cfg.reasoning_effort,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -293,63 +286,16 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
     for k, v in DEFAULT_ENV.items():
         os.environ.setdefault(k, v)
 
-    bedrock_url = _resolve_bedrock_url(args)
-    os.environ["BEDROCK_URL"] = bedrock_url
-
-    bedrock_token = _resolve_bedrock_token(args)
-    if not bedrock_token:
-        parser.error("--bedrock-token is required (pass as flag or set $BEDROCK_TOKEN)")
-    os.environ["BEDROCK_TOKEN"] = bedrock_token
-
+    _apply_bedrock_env(args)
     _ensure_secrets_env(parser)
 
-    agent_id = args.agent_id
-    if agent_id:
-        cfg = _fetch_config(bedrock_url, bedrock_token, agent_id)
-        config = _build_config_from_harness_config(
-            cfg,
-            model_override=args.model,
-            reasoning_override=args.reasoning_effort,
-        )
-    else:
-        product_id = _resolve_product(bedrock_url, bedrock_token, args.product)
-        model = args.model or "claude-haiku-4-5"
-        created = _create_dev_agent(
-            bedrock_url,
-            bedrock_token,
-            product_id=product_id,
-            model=model,
-            system_prompt=args.system_prompt,
-            template=args.template,
-            branch=_git_branch(),
-            sha=_git_sha(),
-        )
-        agent_id = created["id"]
-        print(f"created dev agent: {agent_id}", file=sys.stderr)
-        # Fetch the harness-config view so we get the product's default
-        # adapters wired into this agent (same shape as existing-id path).
-        cfg = _fetch_config(bedrock_url, bedrock_token, agent_id)
-        config = _build_config_from_harness_config(
-            cfg,
-            model_override=args.model,
-            reasoning_override=args.reasoning_effort,
-        )
+    config, agent_id = _resolve_agent_config(args, parser)
 
+    tool_names = [getattr(t, "name", "<unnamed>") for t in config.tools]
     logger.info(
-        "built agent config: id=%s model=%s adapters=%d",
-        config.id, config.model, len(config.adapters),
-    )
-    for adapter in config.adapters:
-        tool_names = [getattr(t, "name", "<unnamed>") for t in adapter.tools]
-        logger.info(
-            "built agent config: adapter=%r has %d tool(s): %s",
-            adapter.name, len(adapter.tools), tool_names,
-        )
-    total_tools = sum(len(a.tools) for a in config.adapters)
-    logger.info(
-        "built agent config: %d total tool(s) across %d adapter(s) "
+        "built agent config: id=%s model=%s tools=%d (%s) "
         "(built-ins added separately)",
-        total_tools, len(config.adapters),
+        config.id, config.model, len(config.tools), tool_names,
     )
 
     from harness import Harness
@@ -452,13 +398,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    agent_p = subparsers.add_parser("agent", help="Run a single agent run.")
-    agent_p.add_argument("agent_id", nargs="?", default=os.environ.get("AGENT_ID"),
-                         help="Agent UUID. Omit to auto-create a dev agent.")
+    agent_p = subparsers.add_parser(
+        "agent",
+        help="Run a single agent run.",
+        description=(
+            "Run an agent. AGENT_ID_OR_NAME resolves to ./agents/<name>.yaml "
+            "first; falls back to Bedrock's harness-config endpoint when "
+            "BEDROCK_URL + BEDROCK_TOKEN are set. Omit the arg to auto-create "
+            "a dev agent on Bedrock (requires env)."
+        ),
+    )
+    agent_p.add_argument(
+        "agent_id", nargs="?", default=os.environ.get("AGENT_ID"),
+        help="Agent UUID or local config name. Omit to auto-create a dev "
+             "agent on Bedrock.",
+    )
     agent_p.add_argument("--run-id", default=None,
                          help="Run UUID. Defaults to a fresh uuid4.")
     agent_p.add_argument("--system-prompt", default=None,
-                         help="System prompt override (dev auto-create only).")
+                         help="System prompt override (Bedrock dev auto-create only).")
     _add_common_flags(agent_p)
 
     delete_p = subparsers.add_parser(

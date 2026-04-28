@@ -14,10 +14,11 @@ events.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from .types import AgentOverrides, MemorySeed, UserDefinition
 
@@ -207,9 +208,9 @@ class Simulation(metaclass=SimulationMeta):
     def __init__(
         self,
         agent_id: str,
-        clock: "SimulatedClock",
+        clock: SimulatedClock,
         data_store=None,
-        user_agents: "dict[str, UserAgent] | None" = None,
+        user_agents: dict[str, UserAgent] | None = None,
     ):
         # In bedrock the first arg was a Django Agent model. In the harness
         # the agent is just a UUID string that indexes into the per-agent
@@ -223,7 +224,7 @@ class Simulation(metaclass=SimulationMeta):
         self.data_store = data_store
         self.user_agents = user_agents or {}
         self._memory_service = None
-        self._pending_user_replies: list[tuple["UserAgent", str, str]] = []
+        self._pending_user_replies: list[tuple[UserAgent, str, str]] = []
         self._trace_events: list[dict] = []
         self._checkpoint_trace_events: list[dict] = []
         self._pending_checkpoint_reset = False
@@ -378,7 +379,7 @@ class Simulation(metaclass=SimulationMeta):
     # and log a user-role entry into harness memory so the next turn's
     # build_llm_inputs() sees it.
 
-    def inject_inbound_sms(self, user_agent: "UserAgent", content: str):
+    def inject_inbound_sms(self, user_agent: UserAgent, content: str):
         from harness.core import storage
         from harness.evals.fakes import sms as sms_fake
         from harness.evals.fakes.base import apply_migrations
@@ -415,7 +416,7 @@ class Simulation(metaclass=SimulationMeta):
         # storage connection -- sees the persisted rows.
         storage.flush()
 
-    def inject_inbound_email(self, user_agent: "UserAgent", content: str):
+    def inject_inbound_email(self, user_agent: UserAgent, content: str):
         from harness.core import storage
         from harness.evals.fakes import email as email_fake
         from harness.evals.fakes.base import apply_migrations

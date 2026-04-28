@@ -7,8 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from harness.config import AdapterConfig
-from harness.tools.base import ToolResult, ToolSchema
+from harness.tools.base import Tool, ToolResult, ToolSchema
 
 from .base import new_id, now_iso, require_db
 
@@ -47,7 +46,7 @@ class CreateContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         name = args.get("name")
         if not name:
             return ToolResult(text="Error: name is required.")
@@ -91,7 +90,7 @@ class GetContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         cid = args.get("contact_id")
         if not cid:
             return ToolResult(text="Error: contact_id is required.")
@@ -137,7 +136,7 @@ class ListContactsTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         db = require_db()
         limit = min(int(args.get("limit") or 50), 100)
         search = args.get("search") or ""
@@ -197,7 +196,7 @@ class UpdateContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         cid = args.get("contact_id")
         if not cid:
             return ToolResult(text="Error: contact_id is required.")
@@ -244,7 +243,7 @@ class DeleteContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         cid = args.get("contact_id")
         if not cid:
             return ToolResult(text="Error: contact_id is required.")
@@ -278,9 +277,5 @@ class FakeContactsAdapter:
     ]
 
     @classmethod
-    def make_adapter_config(cls) -> AdapterConfig:
-        return AdapterConfig(
-            name=cls.name,
-            description=cls.description,
-            tools=[T() for T in cls.TOOLS],
-        )
+    def make_tools(cls) -> list[Tool]:
+        return [T() for T in cls.TOOLS]

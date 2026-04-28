@@ -8,26 +8,32 @@ from __future__ import annotations
 
 import pytest
 
-from harness.config import AdapterConfig, AgentConfig, ExternalToolSpec
+from harness.config import AgentConfig, ExternalToolSpec
 from harness.core import storage
 from harness.evals.fakes import (
     FakeComputerAdapter,
     FakeContactsAdapter,
     FakeEmailAdapter,
     FakeSMSAdapter,
-    contacts as contacts_fake,
+)
+from harness.evals.fakes import (
     email as email_fake,
+)
+from harness.evals.fakes import (
     sms as sms_fake,
 )
 from harness.evals.fakes.base import apply_migrations
+
+
+def _by_name(tools: list) -> dict:
+    return {t.name: t for t in tools}
 
 
 @pytest.fixture
 def agent_db(tmp_path, monkeypatch):
     """Open a real sqlite DB under tmp_path, run fake-adapter migrations.
 
-    Test-local: mirrors the eval runner's pre-scenario setup (T7 will do
-    this for real).
+    Test-local: mirrors the eval runner's pre-scenario setup.
     """
     monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
     storage.load("test-agent-fakes")
@@ -55,8 +61,7 @@ def test_email_list_and_get_thread_after_inject(agent_db):
     )
     assert msg_id.startswith("sim_inmsg_")
 
-    cfg = FakeEmailAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeEmailAdapter.make_tools())
 
     list_result = by_name["list_threads"].call({}, ctx=None)
     assert "Hi" in list_result.text
@@ -76,8 +81,7 @@ def test_email_list_and_get_thread_after_inject(agent_db):
 
 
 def test_email_send_creates_thread(agent_db):
-    cfg = FakeEmailAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeEmailAdapter.make_tools())
 
     send_result = by_name["send_email"].call(
         {"to": ["bob@example.com"], "subject": "Question", "body": "Are you free?"},
@@ -109,8 +113,7 @@ def test_email_reply_and_search(agent_db):
         body="Shipping tomorrow.",
         sent_at="2026-04-23T10:00:00Z",
     )
-    cfg = FakeEmailAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeEmailAdapter.make_tools())
 
     search_result = by_name["search_emails"].call({"query": "Shipping"}, ctx=None)
     assert "Project update" in search_result.text
@@ -135,8 +138,7 @@ def test_email_reply_and_search(agent_db):
 
 
 def test_email_inbox_info_and_empty_list(agent_db):
-    cfg = FakeEmailAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeEmailAdapter.make_tools())
 
     info_result = by_name["get_inbox_info"].call({}, ctx=None)
     assert "agent@eval.test" in info_result.text
@@ -152,8 +154,7 @@ def test_email_inbox_info_and_empty_list(agent_db):
 
 def test_sms_roundtrip(agent_db):
     sms_fake.inject_inbound("+15551234567", "yo", sent_at="2026-04-23T10:00:00Z")
-    cfg = FakeSMSAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeSMSAdapter.make_tools())
 
     list_result = by_name["list_conversations"].call({}, ctx=None)
     assert "+15551234567" in list_result.text
@@ -166,8 +167,7 @@ def test_sms_roundtrip(agent_db):
 
 
 def test_sms_send_persists_outbound(agent_db):
-    cfg = FakeSMSAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeSMSAdapter.make_tools())
 
     result = by_name["send_sms"].call(
         {"phone": "+15559999999", "body": "on my way"}, ctx=None
@@ -183,8 +183,7 @@ def test_sms_send_persists_outbound(agent_db):
 
 
 def test_sms_empty_state(agent_db):
-    cfg = FakeSMSAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeSMSAdapter.make_tools())
     assert "No SMS conversations" in by_name["list_conversations"].call({}, ctx=None).text
 
 
@@ -194,8 +193,7 @@ def test_sms_empty_state(agent_db):
 
 
 def test_contacts_full_crud(agent_db):
-    cfg = FakeContactsAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeContactsAdapter.make_tools())
 
     create_result = by_name["create_contact"].call(
         {"name": "Jamie", "email": "jamie@example.com", "phone": "+15550001111"},
@@ -235,8 +233,7 @@ def test_contacts_full_crud(agent_db):
 
 
 def test_contacts_missing_id(agent_db):
-    cfg = FakeContactsAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeContactsAdapter.make_tools())
     result = by_name["get_contact"].call({"contact_id": "missing"}, ctx=None)
     assert "not found" in result.text.lower()
 
@@ -257,8 +254,7 @@ class _StubCtx:
 
 
 def test_computer_write_read_roundtrip(agent_db):
-    cfg = FakeComputerAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeComputerAdapter.make_tools())
     ctx = _StubCtx(agent_db)
 
     write_result = by_name["computer_write_file"].call(
@@ -271,8 +267,7 @@ def test_computer_write_read_roundtrip(agent_db):
 
 
 def test_computer_list_and_exec(agent_db):
-    cfg = FakeComputerAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeComputerAdapter.make_tools())
     ctx = _StubCtx(agent_db)
 
     by_name["computer_write_file"].call(
@@ -294,8 +289,7 @@ def test_computer_list_and_exec(agent_db):
 
 
 def test_computer_sandbox_escape_blocked(agent_db):
-    cfg = FakeComputerAdapter.make_adapter_config()
-    by_name = {t.name: t for t in cfg.tools}
+    by_name = _by_name(FakeComputerAdapter.make_tools())
     ctx = _StubCtx(agent_db)
 
     # Relative traversal must not escape the tmpdir.
@@ -313,24 +307,18 @@ def test_computer_sandbox_escape_blocked(agent_db):
 def test_build_tool_map_with_fakes_and_external_mix(agent_db):
     from harness.tools.registry import build_tool_map
 
-    external_adapter = AdapterConfig(
-        name="Remote",
-        description="fake HTTP-backed adapter",
-        tools=[
-            ExternalToolSpec(
-                name="remote_op",
-                description="remote op",
-                parameters={"type": "object", "properties": {}},
-                url="https://example.invalid/remote",
-            )
-        ],
+    remote_spec = ExternalToolSpec(
+        name="remote_op",
+        description="remote op",
+        parameters={"type": "object", "properties": {}},
+        url="https://example.invalid/remote",
     )
 
     tm = build_tool_map(
         [
-            FakeEmailAdapter.make_adapter_config(),
-            FakeContactsAdapter.make_adapter_config(),
-            external_adapter,
+            *FakeEmailAdapter.make_tools(),
+            *FakeContactsAdapter.make_tools(),
+            remote_spec,
         ]
     )
     # Email, contacts, remote, plus the builtin sleep.
@@ -340,13 +328,12 @@ def test_build_tool_map_with_fakes_and_external_mix(agent_db):
     assert "sleep" in tm
 
 
-def test_agent_config_accepts_fake_adapter():
-    """Scenarios should be able to drop a fake straight into AgentConfig."""
+def test_agent_config_accepts_fake_tools():
+    """Scenarios should be able to splat fake tools straight into AgentConfig."""
     ac = AgentConfig(
         id="whoever",
         model="openai/gpt-4o-mini",
         system_prompt="",
-        adapters=[FakeEmailAdapter.make_adapter_config()],
+        tools=[*FakeEmailAdapter.make_tools()],
     )
-    assert ac.adapters[0].name == "FakeEmail"
-    assert any(t.name == "send_email" for t in ac.adapters[0].tools)
+    assert any(t.name == "send_email" for t in ac.tools)

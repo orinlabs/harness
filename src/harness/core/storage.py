@@ -305,10 +305,19 @@ def _ensure_sandbox_started(client: Any, sandbox: Any) -> None:
 
 def _create_agent_sandbox(client: Any, safe_id: str) -> Any:
     """Provision a fresh Daytona sandbox labeled for this agent."""
-    from daytona import CreateSandboxFromSnapshotParams
+    from daytona import CreateSandboxFromImageParams, Image, Resources
 
+    # We only use the sandbox to persist ~/harness.sqlite, so run on the
+    # smallest footprint Daytona allows (1 vCPU / 1 GiB RAM / 1 GiB disk).
+    # Resource overrides aren't supported on snapshot-based creates today, so
+    # we build from a minimal Python image instead of the default snapshot.
     labels = {_SANDBOX_LABEL_KEY: safe_id}
-    params_kwargs: dict[str, Any] = {"language": "python", "labels": labels}
+    params_kwargs: dict[str, Any] = {
+        "language": "python",
+        "labels": labels,
+        "image": Image.debian_slim("3.12"),
+        "resources": Resources(cpu=1, memory=1, disk=1),
+    }
     if raw := os.environ.get("HARNESS_DAYTONA_AUTO_STOP_MINUTES"):
         try:
             params_kwargs["auto_stop_interval"] = int(raw)
@@ -318,7 +327,7 @@ def _create_agent_sandbox(client: Any, safe_id: str) -> Any:
             )
 
     logger.info("storage: creating Daytona sandbox for agent %s", safe_id)
-    sandbox = client.create(CreateSandboxFromSnapshotParams(**params_kwargs))
+    sandbox = client.create(CreateSandboxFromImageParams(**params_kwargs))
     logger.info(
         "storage: Daytona sandbox ready id=%s state=%s",
         getattr(sandbox, "id", "?"),
