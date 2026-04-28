@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: lint + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Required: real OpenRouter is hit by tests. Tests fail loudly if this
+      # is missing (never skip silently) -- see tests/conftest.py::openrouter_key.
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python from pyproject
+        run: uv python install
+
+      - name: Install deps
+        run: uv sync --dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Tests (default suite -- excludes tests/memory)
+        run: uv run pytest -q
