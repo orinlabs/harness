@@ -30,7 +30,7 @@ Optional:
     REASONING_EFFORT      override reasoning_effort (low|medium|high)
     LOG_LEVEL             default: INFO
     BEDROCK_URL           enables Bedrock lookup + tracing to Bedrock
-    BEDROCK_TOKEN         bedrock product API key
+    BEDROCK_TOKEN         bedrock org-scoped API key
 """
 from __future__ import annotations
 
@@ -245,15 +245,14 @@ def _resolve_agent_config(args, parser: argparse.ArgumentParser):
             "./agents/<name>.yaml, or set BEDROCK_URL + BEDROCK_TOKEN to "
             "auto-create a dev agent on the platform.\n",
         )
-    from harness.cloud.bedrock import create_dev_agent, fetch_harness_config, resolve_product
+    from harness.cloud.bedrock import create_dev_agent, fetch_harness_config, resolve_template
 
-    product_id = resolve_product(args.product)
+    template_id = resolve_template(args.template)
     model = args.model or "claude-haiku-4-5"
     created = create_dev_agent(
-        product_id=product_id,
+        template_id=template_id,
         model=model,
         system_prompt=args.system_prompt,
-        template=args.template,
         branch=_git_branch(),
         sha=_git_sha(),
     )
@@ -378,7 +377,7 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--local", action="store_true",
                    help="Sugar for --bedrock-url http://127.0.0.1:8000.")
     p.add_argument("--bedrock-token", default=None,
-                   help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.")
+                   help="Bedrock org-scoped API key. Defaults to $BEDROCK_TOKEN.")
     p.add_argument("--log-level",
                    default=os.environ.get("LOG_LEVEL", "INFO"),
                    help="Log level: DEBUG|INFO|WARNING|ERROR.")
@@ -386,10 +385,9 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--reasoning-effort", default=None,
                    help="Override reasoning effort.")
     p.add_argument("--template", default=None,
-                   help="Template uuid-or-name (forward-compat; Phase 2).")
-    p.add_argument("--product", default=None,
-                   help="Product UUID for auto-created agents. If omitted the "
-                        "single product visible to the API key is used.")
+                   help="Optional AgentTemplate uuid-or-name to base auto-created "
+                        "agents on. Omit to create a templateless agent (Bedrock "
+                        "infers organization from $BEDROCK_TOKEN).")
 
 
 def main(argv: list[str] | None = None) -> int:

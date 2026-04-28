@@ -1,6 +1,6 @@
 """Bedrock agent-config fetch + dev/eval agent creation.
 
-Owns every call to ``/api/cloud/agents/*`` and ``/api/products/products/``.
+Owns every call to ``/api/cloud/agents/*`` and ``/api/templates/``.
 Returns already-parsed Python types (``AgentConfig``, ``dict``) so the CLI
 layer never has to know Bedrock's JSON shape.
 """
@@ -95,53 +95,66 @@ def fetch_harness_config(
     )
 
 
-def resolve_product(explicit: str | None) -> str:
-    """Resolve a product UUID.
+def resolve_template(explicit: str | None) -> str | None:
+    """Resolve a template UUID-or-name to a UUID.
 
-    1. ``explicit`` wins if provided.
-    2. Else GET /api/products/products/ -- if exactly one visible, use it.
-    3. Else raise ``SystemExit`` with a helpful message.
+    Templates are optional on agent create (Bedrock allows agents without
+    a template), so this returns ``None`` when ``explicit`` is ``None``.
+
+    1. ``None`` -> ``None`` (caller skips ``template`` in the create body).
+    2. UUID-shaped string -> returned as-is.
+    3. Otherwise treated as a template name and resolved via
+       GET /api/templates/, scoped to the caller's organization.
+       Raises ``SystemExit`` if no/multiple matches.
     """
-    if explicit:
-        return explicit
-    url = f"{platform_url()}/api/products/products/"
+    if not explicit:
+        return None
+    try:
+        return str(uuid.UUID(explicit))
+    except ValueError:
+        pass
+
+    url = f"{platform_url()}/api/templates/"
     resp = http().get(url, headers=auth_header(), timeout=10.0)
     resp.raise_for_status()
-    products = resp.json()
-    if isinstance(products, dict) and "results" in products:
-        products = products["results"]
-    if not isinstance(products, list) or not products:
-        raise SystemExit("no products visible to this API key")
-    if len(products) > 1:
-        raise SystemExit("multiple products visible, pass --product <uuid>")
-    return products[0]["id"]
+    templates = resp.json()
+    if isinstance(templates, dict) and "results" in templates:
+        templates = templates["results"]
+    if not isinstance(templates, list):
+        raise SystemExit(f"unexpected templates response shape from {url}")
+    matches = [t for t in templates if t.get("name") == explicit]
+    if not matches:
+        raise SystemExit(f"no template named {explicit!r} visible to this API key")
+    if len(matches) > 1:
+        raise SystemExit(
+            f"multiple templates named {explicit!r}; pass --template <uuid>"
+        )
+    return matches[0]["id"]
 
 
 def create_dev_agent(
     *,
-    product_id: str,
+    template_id: str | None,
     model: str,
     system_prompt: str | None,
-    template: str | None,
     branch: str,
     sha: str,
 ) -> dict[str, Any]:
-    """POST /api/cloud/agents/ with purpose=dev. Returns the created agent JSON."""
+    """POST /api/cloud/agents/ with purpose=dev. Returns the created agent JSON.
+
+    ``template_id`` is optional — Bedrock agents can be created ad-hoc
+    without a template (organization is inferred from the API key).
+    """
     body: dict[str, Any] = {
         "name": f"dev-{uuid.uuid4().hex[:8]}",
         "purpose": "dev",
-        "product": product_id,
         "model": model,
         "tags": [f"git-ref:{branch}", f"git-sha:{sha}"],
     }
+    if template_id:
+        body["template"] = template_id
     if system_prompt:
         body["system_prompt"] = system_prompt
-    if template:
-        logger.warning(
-            "# TODO(Phase 2): template not yet implemented server-side; "
-            "ignoring --template=%s",
-            template,
-        )
     url = f"{platform_url()}/api/cloud/agents/"
     resp = http().post(url, json=body, headers=auth_header(), timeout=15.0)
     if resp.status_code >= 400:
@@ -153,10 +166,9 @@ def create_dev_agent(
 def create_eval_agent(
     *,
     scenario_name: str,
-    product_id: str,
+    template_id: str | None,
     model: str,
     system_prompt: str,
-    template: str | None,
     branch: str,
     sha: str,
 ) -> dict[str, Any]:
@@ -169,7 +181,6 @@ def create_eval_agent(
     body: dict[str, Any] = {
         "name": f"eval-{scenario_name}",
         "purpose": "eval",
-        "product": product_id,
         "model": model,
         "system_prompt": system_prompt or "",
         "tags": [
@@ -178,12 +189,8 @@ def create_eval_agent(
             f"git-sha:{sha}",
         ],
     }
-    if template:
-        logger.warning(
-            "# TODO(Phase 2): template not yet implemented server-side; "
-            "ignoring --template=%s",
-            template,
-        )
+    if template_id:
+        body["template"] = template_id
     url = f"{platform_url()}/api/cloud/agents/"
     resp = http().post(url, json=body, headers=auth_header(), timeout=15.0)
     if resp.status_code >= 400:
