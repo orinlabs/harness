@@ -6,8 +6,7 @@ import importlib
 def test_delete_agent_cli_deletes_local_storage(tmp_path, monkeypatch, capsys):
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(storage_root))
-    monkeypatch.delenv("HARNESS_TURSO_ORG", raising=False)
-    monkeypatch.delenv("HARNESS_TURSO_PLATFORM_TOKEN", raising=False)
+    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
 
     from harness.core import storage
@@ -37,8 +36,7 @@ def test_delete_agent_cli_deletes_local_storage(tmp_path, monkeypatch, capsys):
 def test_reset_memory_cli_resets_local_memory(tmp_path, monkeypatch, capsys):
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(storage_root))
-    monkeypatch.delenv("HARNESS_TURSO_ORG", raising=False)
-    monkeypatch.delenv("HARNESS_TURSO_PLATFORM_TOKEN", raising=False)
+    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
 
     from harness.core import storage

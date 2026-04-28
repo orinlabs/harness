@@ -412,8 +412,7 @@ class Simulation(metaclass=SimulationMeta):
             priority="high",
         )
         # Commit so the subsequent Harness.run() -- which opens a fresh
-        # storage connection -- sees the persisted rows. Remote libsql
-        # connections don't autocommit writes.
+        # storage connection -- sees the persisted rows.
         storage.flush()
 
     def inject_inbound_email(self, user_agent: "UserAgent", content: str):
@@ -561,7 +560,7 @@ class Simulation(metaclass=SimulationMeta):
         extend the fakes in a follow-up task. For now we just echo to
         stdout so scenarios calling this don't crash. We deliberately do
         NOT attempt a speculative INSERT against a non-existent table
-        because that would poison the active libsql transaction and
+        because that would poison the active sqlite transaction and
         nuke any prior-in-this-connection writes on commit.
         """
         print(f"[sim] NOTIFICATION ({priority}) {title}: {body[:200]}")

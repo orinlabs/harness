@@ -1,16 +1,15 @@
 """Run a Harness against a live bedrock agent.
 
 Fetches the agent's harness-config from bedrock, constructs an AgentConfig,
-and runs. Traces flow to bedrock's /api/tracing/* endpoints; storage goes to
-Turso; external tool calls hit bedrock's /api/cloud/agents/{id}/tools/{name}/invoke/.
+and runs. Traces flow to bedrock's /api/tracing/* endpoints; storage goes to a
+per-agent Daytona sandbox; external tool calls hit bedrock's
+/api/cloud/agents/{id}/tools/{name}/invoke/.
 
 Env (from .env):
-    BEDROCK_URL                 (e.g. http://127.0.0.1:8000)
-    BEDROCK_TOKEN               (bedrock product API key; usually passed on the
-                                 CLI but also honored from env for convenience)
-    HARNESS_TURSO_ORG           (for agent DB storage)
-    HARNESS_TURSO_PLATFORM_TOKEN
-    HARNESS_DATABASE_TOKEN
+    BEDROCK_URL       (e.g. http://127.0.0.1:8000)
+    BEDROCK_TOKEN     (bedrock product API key; usually passed on the CLI but
+                       also honored from env for convenience)
+    DAYTONA_API_KEY   (harness provisions one sandbox per agent for storage)
     OPENROUTER_API_KEY
 
 Usage:
@@ -20,7 +19,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import uuid
@@ -69,9 +67,7 @@ def main() -> None:
 
     for required in (
         "BEDROCK_URL",
-        "HARNESS_TURSO_ORG",
-        "HARNESS_TURSO_PLATFORM_TOKEN",
-        "HARNESS_DATABASE_TOKEN",
+        "DAYTONA_API_KEY",
         "OPENROUTER_API_KEY",
     ):
         if not os.environ.get(required):

@@ -1,37 +1,44 @@
-"""SQL-backed storage for harness memory.
+"""Per-agent sqlite storage, optionally backed by a Daytona sandbox.
 
-Two modes, selected by the `HARNESS_DATABASE_URL` env var:
+Two backends, selected by env:
 
-1. **Local sqlite** (default, when `HARNESS_DATABASE_URL` is unset).
-   Opens `/tmp/harness/{agent_id}.sqlite`. Simple and good for local dev/demo.
+1. **Daytona** (when ``DAYTONA_API_KEY`` is set — production mode).
+   One Daytona sandbox per agent, identified by label
+   ``harness.agent_id=<sanitized-id>``. The canonical sqlite file lives in the
+   sandbox at ``~/harness.sqlite``. harness opens a local working copy at
+   ``<storage_root>/daytona-cache/<agent_id>.sqlite``:
 
-2. **Turso / libSQL** (when `HARNESS_TURSO_ORG` or `HARNESS_DATABASE_URL` is set).
-   One database per agent.
+   - ``load(agent_id)``        — find/create+start the sandbox (including
+                                  transparently resuming an archived one),
+                                  download the sqlite file, open it locally,
+                                  apply pending migrations.
+   - ``flush()``                — commit locally, checkpoint WAL, upload the
+                                  working copy back to the sandbox so the
+                                  sandbox remains the source of truth.
+   - ``close()``                — flush, then close the local connection.
+   - ``delete_agent_storage()`` — archive the sandbox (preserves state in
+                                  cheap object storage; resumable by the next
+                                  ``load``) and delete the local cache. Pass
+                                  ``purge=True`` to fully delete instead.
+   - ``reset_agent_memory()``   — drop just ``harness.sqlite`` inside the
+                                  sandbox so the next ``load`` starts fresh,
+                                  without losing the sandbox itself.
 
-   - `HARNESS_TURSO_ORG` (required for Turso mode). DB URLs are built as
-     `libsql://agent-{agent_id}-{org}.turso.io` by default.
-   - `HARNESS_TURSO_GROUP` — defaults to `"default"`.
-   - `HARNESS_DATABASE_URL` — optional override. If set, this string is used
-     verbatim, with `{agent_id}` and `{org}` substituted. Useful for
-     self-hosted libSQL or custom edge proxies.
-   - `HARNESS_DATABASE_TOKEN` — the **group-scoped** libSQL auth token used
-     for data connections. Generate via the Platform API:
-       POST /v1/organizations/{org}/groups/{group}/auth/tokens
-   - `HARNESS_TURSO_PLATFORM_TOKEN` — the org-scoped **Platform API** token.
-     Only needed if you want harness to auto-provision agent databases on load
-     (via `POST /v1/organizations/{org}/databases`). Skip it if DBs are
-     provisioned out-of-band.
+   Config env:
 
-Lifecycle:
-  - `load(agent_id)` — open a connection and apply any pending migrations.
-  - `flush()`        — commit (and, in remote mode, close; local sqlite is
-                       opened in autocommit so flush() is a no-op until close).
-  - `close()`        — close the connection. Tests use this to simulate
-                       process exit.
+   - ``DAYTONA_API_KEY`` (required to enable this mode).
+   - ``DAYTONA_API_URL`` (optional; defaults to ``https://app.daytona.io/api``).
+   - ``DAYTONA_TARGET``  (optional; SDK default region otherwise).
+   - ``HARNESS_DAYTONA_AUTO_STOP_MINUTES`` (optional; passed as
+      ``auto_stop_interval``. Default leaves SDK's 15-minute default in place.)
 
-Module-level `db` is the currently open DB-API 2.0 connection. Memory code
-calls `db.execute(...)`, `db.executemany(...)`, etc. — nothing sqlite3-specific
-leaks into memory module internals.
+2. **Local sqlite** (default when ``DAYTONA_API_KEY`` is unset).
+   Opens ``<storage_root>/<agent_id>.sqlite``. Simple and fast; used by tests
+   and local dev when Daytona isn't available.
+
+Module-level ``db`` is the currently open DB-API 2.0 connection. Memory code
+calls ``db.execute(...)``, ``db.executemany(...)``, etc. Both backends are
+real ``sqlite3.Connection`` objects — there's no adapter layer.
 """
 from __future__ import annotations
 
@@ -43,16 +50,25 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 logger = logging.getLogger(__name__)
 
 _DEFAULT_STORAGE_ROOT = "/tmp/harness"
 _MIGRATIONS_DIR = Path(__file__).parent.parent / "memory" / "migrations"
 _SAFE_ID_RE = re.compile(r"[^a-z0-9-]+")
 
+# Path inside the Daytona sandbox (sandbox working dir is ~daytona/ by
+# default). Keeping this relative means it resolves correctly whether the
+# sandbox user is `daytona`, `root`, or anything else.
+_SANDBOX_DB_PATH = "harness.sqlite"
+_SANDBOX_LABEL_KEY = "harness.agent_id"
+
 db: Any = None
 _loaded_agent_id: str | None = None
+# When in Daytona mode, we hold the live Sandbox handle so flush() can
+# re-upload the working copy and delete_agent_storage() can tear the
+# sandbox down.
+_daytona_sandbox: Any = None
+_daytona_local_path: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -62,14 +78,16 @@ _loaded_agent_id: str | None = None
 
 def load(agent_id: str) -> Any:
     """Open the per-agent database and apply any pending migrations."""
-    global db, _loaded_agent_id
+    global db, _loaded_agent_id, _daytona_sandbox, _daytona_local_path
 
-    url_template = os.environ.get("HARNESS_DATABASE_URL")
-    org = os.environ.get("HARNESS_TURSO_ORG")
-    if url_template or org:
-        conn = _open_remote(agent_id, url_template, org)
+    if os.environ.get("DAYTONA_API_KEY"):
+        conn, sandbox, local_path = _open_daytona(agent_id)
+        _daytona_sandbox = sandbox
+        _daytona_local_path = local_path
     else:
         conn = _open_local(agent_id)
+        _daytona_sandbox = None
+        _daytona_local_path = None
 
     _apply_migrations(conn)
 
@@ -79,17 +97,40 @@ def load(agent_id: str) -> Any:
 
 
 def flush() -> None:
-    """Commit any pending writes. Hook for future remote-sync backends."""
-    if db is not None:
+    """Commit any pending writes.
+
+    In Daytona mode, this also checkpoints WAL into the main sqlite file and
+    uploads the working copy back to the sandbox so the sandbox remains the
+    source of truth between runs.
+    """
+    if db is None:
+        return
+    try:
+        db.commit()
+    except Exception as e:
+        logger.warning("storage.flush: commit failed: %s", e)
+        return
+
+    if _daytona_sandbox is not None and _daytona_local_path is not None:
         try:
-            db.commit()
+            # Force WAL frames into the main DB file so the bytes we upload
+            # are actually the latest state.
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception as e:
-            logger.warning("storage.flush: commit failed: %s", e)
+            logger.warning("storage.flush: wal_checkpoint failed: %s", e)
+        try:
+            _upload_db_to_sandbox(_daytona_sandbox, _daytona_local_path)
+        except Exception as e:
+            logger.exception(
+                "storage.flush: failed to upload sqlite to Daytona sandbox %s: %s",
+                getattr(_daytona_sandbox, "id", "?"),
+                e,
+            )
 
 
 def close() -> None:
     """Close the connection. Used in tests to simulate process exit."""
-    global db, _loaded_agent_id
+    global db, _loaded_agent_id, _daytona_sandbox, _daytona_local_path
     if db is not None:
         try:
             db.close()
@@ -97,31 +138,50 @@ def close() -> None:
             logger.warning("storage.close: close failed: %s", e)
     db = None
     _loaded_agent_id = None
+    _daytona_sandbox = None
+    _daytona_local_path = None
 
 
-def delete_agent_storage(agent_id: str, *, require_remote: bool = False) -> dict[str, bool]:
-    """Delete all harness-owned storage for an agent.
+def delete_agent_storage(
+    agent_id: str, *, require_remote: bool = False, purge: bool = False
+) -> dict[str, bool]:
+    """Tear down harness-owned storage for an agent.
 
-    This is the production deletion hook Bedrock calls when an agent is being
-    deleted. Local sqlite files are always removed; the Turso database is
-    removed when Turso env is configured.
+    Always removes the local working copy. In Daytona mode:
+
+    - Default (``purge=False``): archives the sandbox. State is preserved in
+      cheap object storage and ``storage.load(agent_id)`` can resurrect it
+      later. This is the right default for "Bedrock deleted the agent" — we
+      keep the door open in case the agent is recreated.
+    - ``purge=True``: fully deletes the sandbox. No recovery.
     """
+    remote = (
+        purge_agent_sandbox(agent_id, require_config=require_remote)
+        if purge
+        else archive_agent_sandbox(agent_id, require_config=require_remote)
+    )
     return {
         "local": delete_local_agent_db(agent_id),
-        "remote": delete_agent_db(agent_id, require_config=require_remote),
+        "remote": remote,
     }
 
 
-def reset_agent_memory(agent_id: str, *, require_remote: bool = False) -> dict[str, bool]:
-    """Reset an agent's memory so the next run starts from an empty DB."""
+def reset_agent_memory(
+    agent_id: str, *, require_remote: bool = False
+) -> dict[str, bool]:
+    """Reset an agent's memory so the next run starts from an empty DB.
+
+    Leaves the Daytona sandbox in place (cheap to keep) but wipes the sqlite
+    file inside it plus the local working copy.
+    """
     return {
         "local": delete_local_agent_db(agent_id),
-        "remote": delete_agent_db(agent_id, require_config=require_remote),
+        "remote": clear_agent_sandbox_db(agent_id, require_config=require_remote),
     }
 
 
 # ---------------------------------------------------------------------------
-# Local sqlite backend (default)
+# Local sqlite backend
 # ---------------------------------------------------------------------------
 
 
@@ -136,8 +196,14 @@ def _db_path(agent_id: str) -> Path:
     return _storage_root() / f"{_sanitize(agent_id)}.sqlite"
 
 
-def _open_local(agent_id: str) -> sqlite3.Connection:
-    path = _db_path(agent_id)
+def _daytona_cache_path(agent_id: str) -> Path:
+    """Local cache path for Daytona-mode working copy."""
+    root = _storage_root() / "daytona-cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{_sanitize(agent_id)}.sqlite"
+
+
+def _open_sqlite(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -145,254 +211,355 @@ def _open_local(agent_id: str) -> sqlite3.Connection:
     return conn
 
 
+def _open_local(agent_id: str) -> sqlite3.Connection:
+    return _open_sqlite(_db_path(agent_id))
+
+
 def delete_local_agent_db(agent_id: str) -> bool:
-    """Delete the local sqlite database and WAL sidecars for `agent_id`."""
+    """Delete local sqlite file(s) for ``agent_id`` (both default and cache roots)."""
     if _loaded_agent_id == agent_id:
         close()
 
-    path = _db_path(agent_id)
     deleted = False
-    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
-        try:
-            candidate.unlink()
-            deleted = True
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            raise RuntimeError(f"Could not delete local storage file {candidate}: {e}") from e
+    for path in (_db_path(agent_id), _daytona_cache_path(agent_id)):
+        for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+            try:
+                candidate.unlink()
+                deleted = True
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                raise RuntimeError(
+                    f"Could not delete local storage file {candidate}: {e}"
+                ) from e
     return deleted
 
 
 # ---------------------------------------------------------------------------
-# Turso / libSQL backend
+# Daytona backend
 # ---------------------------------------------------------------------------
 
 
-def _open_remote(agent_id: str, url_template: str | None, org: str | None) -> Any:
+def _daytona_client() -> Any:
+    """Build a Daytona client from env. Imported lazily so tests never touch it."""
     try:
-        import libsql_experimental as libsql  # type: ignore[import-not-found]
+        from daytona import Daytona, DaytonaConfig
     except ImportError as e:
         raise RuntimeError(
-            "Turso mode is enabled but `libsql-experimental` is not installed. "
-            "Add it (uv add libsql-experimental) or unset HARNESS_TURSO_ORG / "
-            "HARNESS_DATABASE_URL to fall back to local sqlite."
+            "DAYTONA_API_KEY is set but the `daytona` package is not installed. "
+            "Run `uv add daytona` or unset DAYTONA_API_KEY."
         ) from e
 
-    safe_id = _sanitize(agent_id)
-    db_token = os.environ.get("HARNESS_DATABASE_TOKEN") or None
-    platform_token = os.environ.get("HARNESS_TURSO_PLATFORM_TOKEN") or None
-    group = os.environ.get("HARNESS_TURSO_GROUP", "default")
+    api_key = os.environ.get("DAYTONA_API_KEY")
+    if not api_key:
+        raise RuntimeError("DAYTONA_API_KEY is required for Daytona storage mode.")
 
-    if org and platform_token:
-        _ensure_turso_db(
-            org=org, group=group, name=f"agent-{safe_id}", token=platform_token
-        )
-
-    url = _build_db_url(safe_id=safe_id, url_template=url_template, org=org)
-    kwargs: dict[str, Any] = {"database": url}
-    if db_token:
-        kwargs["auth_token"] = db_token
-    raw = libsql.connect(**kwargs)
-    return _LibsqlWrapper(raw)
+    kwargs: dict[str, Any] = {"api_key": api_key}
+    if url := os.environ.get("DAYTONA_API_URL"):
+        kwargs["api_url"] = url
+    if target := os.environ.get("DAYTONA_TARGET"):
+        kwargs["target"] = target
+    return Daytona(DaytonaConfig(**kwargs))
 
 
-def _build_db_url(*, safe_id: str, url_template: str | None, org: str | None) -> str:
-    """Compose the per-agent libSQL URL.
+def _find_agent_sandbox(client: Any, safe_id: str) -> Any | None:
+    """Look up the agent's sandbox by harness label. Returns None if missing."""
+    try:
+        result = client.list(labels={_SANDBOX_LABEL_KEY: safe_id}, limit=1)
+    except Exception as e:
+        raise RuntimeError(
+            f"Daytona list() failed while looking up sandbox for agent "
+            f"{safe_id!r}: {e}"
+        ) from e
 
-    Preference order:
-      1. `HARNESS_DATABASE_URL` with `{agent_id}` / `{org}` substitutions.
-      2. Standard Turso shape `libsql://agent-{agent_id}-{org}.turso.io` when
-         only `HARNESS_TURSO_ORG` is set.
+    items = getattr(result, "items", None)
+    if items is None:
+        # Older/newer SDK variants: list() may return a plain list.
+        items = result if isinstance(result, list) else []
+    return items[0] if items else None
+
+
+def _ensure_sandbox_started(client: Any, sandbox: Any) -> None:
+    """Idempotently ensure the sandbox is in STARTED state.
+
+    For archived sandboxes the SDK's ``start()`` handles restoration from
+    object storage transparently, so the same call covers both
+    stopped-from-idle and archived-then-resumed flows.
     """
-    if url_template:
-        url = url_template
-        if org:
-            url = url.replace("{org}", org)
-        url = url.replace("{agent_id}", safe_id)
-        return url
-    if org:
-        return f"libsql://agent-{safe_id}-{org}.turso.io"
-    raise RuntimeError(
-        "Cannot build a Turso URL: set either HARNESS_DATABASE_URL or "
-        "HARNESS_TURSO_ORG."
+    state = getattr(sandbox, "state", None)
+    state_value = getattr(state, "value", state)
+    if state_value == "started":
+        return
+    if state_value in ("starting", "creating", "restoring"):
+        # SDK's create() already waits; for other transitional states we
+        # don't have a nice wait primitive — attempting start() when the
+        # sandbox is already transitioning raises a clear error upstream.
+        return
+    logger.info(
+        "storage: starting Daytona sandbox id=%s (state=%s)",
+        getattr(sandbox, "id", "?"),
+        state_value,
     )
+    client.start(sandbox)
 
 
-def delete_agent_db(agent_id: str, *, require_config: bool = False) -> bool:
-    """Delete the Turso database for `agent_id` via the Platform API.
+def _create_agent_sandbox(client: Any, safe_id: str) -> Any:
+    """Provision a fresh Daytona sandbox labeled for this agent."""
+    from daytona import CreateSandboxFromSnapshotParams
 
-    No-op if the DB doesn't exist (404). Used by integration tests to tear
-    down their provisioned DBs. Needs `HARNESS_TURSO_ORG` and
-    `HARNESS_TURSO_PLATFORM_TOKEN` in the environment.
+    labels = {_SANDBOX_LABEL_KEY: safe_id}
+    params_kwargs: dict[str, Any] = {"language": "python", "labels": labels}
+    if raw := os.environ.get("HARNESS_DAYTONA_AUTO_STOP_MINUTES"):
+        try:
+            params_kwargs["auto_stop_interval"] = int(raw)
+        except ValueError:
+            logger.warning(
+                "HARNESS_DAYTONA_AUTO_STOP_MINUTES=%r is not an int; ignoring.", raw
+            )
+
+    logger.info("storage: creating Daytona sandbox for agent %s", safe_id)
+    sandbox = client.create(CreateSandboxFromSnapshotParams(**params_kwargs))
+    logger.info(
+        "storage: Daytona sandbox ready id=%s state=%s",
+        getattr(sandbox, "id", "?"),
+        getattr(getattr(sandbox, "state", None), "value", "?"),
+    )
+    return sandbox
+
+
+def _download_db_from_sandbox(sandbox: Any, local_path: Path) -> None:
+    """Download the sandbox's canonical sqlite file into ``local_path``.
+
+    A missing remote file is expected on the very first run — we treat it as
+    "start from empty" and leave ``local_path`` absent so sqlite3.connect
+    creates a fresh DB.
     """
-    org = os.environ.get("HARNESS_TURSO_ORG")
-    token = os.environ.get("HARNESS_TURSO_PLATFORM_TOKEN")
-    if not (org and token):
+    try:
+        data = sandbox.fs.download_file(_SANDBOX_DB_PATH)
+    except Exception as e:
+        msg = str(e).lower()
+        if "not found" in msg or "no such" in msg or "404" in msg:
+            # Clean up any stale cache so migrations run against a fresh DB.
+            for sidecar in (local_path, Path(f"{local_path}-wal"), Path(f"{local_path}-shm")):
+                try:
+                    sidecar.unlink()
+                except FileNotFoundError:
+                    pass
+            return
+        raise RuntimeError(
+            f"Daytona download_file({_SANDBOX_DB_PATH!r}) failed: {e}"
+        ) from e
+
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_bytes(data)
+    # Invalidate any stale WAL/SHM from a previous load so sqlite sees the
+    # downloaded file as the authoritative state.
+    for sidecar in (Path(f"{local_path}-wal"), Path(f"{local_path}-shm")):
+        try:
+            sidecar.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _upload_db_to_sandbox(sandbox: Any, local_path: Path) -> None:
+    if not local_path.exists():
+        return
+    data = local_path.read_bytes()
+    sandbox.fs.upload_file(data, _SANDBOX_DB_PATH)
+
+
+def _open_daytona(agent_id: str) -> tuple[sqlite3.Connection, Any, Path]:
+    """Open a per-agent sqlite connection backed by a Daytona sandbox.
+
+    Returns ``(connection, sandbox, local_cache_path)``.
+    """
+    safe_id = _sanitize(agent_id)
+    client = _daytona_client()
+
+    sandbox = _find_agent_sandbox(client, safe_id)
+    if sandbox is None:
+        sandbox = _create_agent_sandbox(client, safe_id)
+    else:
+        _ensure_sandbox_started(client, sandbox)
+
+    local_path = _daytona_cache_path(agent_id)
+    _download_db_from_sandbox(sandbox, local_path)
+    conn = _open_sqlite(local_path)
+    return conn, sandbox, local_path
+
+
+def _resolve_sandbox_for_teardown(
+    agent_id: str, *, require_config: bool
+) -> tuple[Any, Any] | None:
+    """Return ``(client, sandbox)`` for an agent, or None when nothing to do.
+
+    Returns None when Daytona isn't configured (and ``require_config`` is
+    False) or when no sandbox exists for this agent. Raises when
+    ``require_config`` is True and env is missing.
+    """
+    if not os.environ.get("DAYTONA_API_KEY"):
         if require_config:
-            missing = [
-                name
-                for name, value in (
-                    ("HARNESS_TURSO_ORG", org),
-                    ("HARNESS_TURSO_PLATFORM_TOKEN", token),
-                )
-                if not value
-            ]
             raise RuntimeError(
-                "Cannot delete remote agent storage; missing "
-                f"{', '.join(missing)}."
+                "Cannot touch remote agent storage; DAYTONA_API_KEY is not set."
+            )
+        return None
+
+    safe_id = _sanitize(agent_id)
+    try:
+        client = _daytona_client()
+        sandbox = _find_agent_sandbox(client, safe_id)
+    except RuntimeError:
+        if require_config:
+            raise
+        return None
+    if sandbox is None:
+        return None
+    return client, sandbox
+
+
+def archive_agent_sandbox(
+    agent_id: str, *, require_config: bool = False
+) -> bool:
+    """Archive the agent's Daytona sandbox. The sandbox is stopped first if
+    needed (archive() requires a stopped sandbox).
+
+    Archiving moves the sandbox filesystem to cheap object storage. The
+    sandbox can be resurrected later via ``client.start(sandbox)`` (the SDK
+    handles the recover step internally for archived sandboxes).
+
+    Returns ``True`` when the archive succeeded OR no sandbox existed for
+    this agent (the post-condition — "no live sandbox running" — holds
+    either way). Returns ``False`` when Daytona isn't configured or the
+    archive call errored.
+    """
+    if not os.environ.get("DAYTONA_API_KEY"):
+        if require_config:
+            raise RuntimeError(
+                "Cannot archive remote agent storage; DAYTONA_API_KEY is not set."
             )
         return False
 
-    name = f"agent-{_sanitize(agent_id)}"
-    url = f"https://api.turso.tech/v1/organizations/{org}/databases/{name}"
+    resolved = _resolve_sandbox_for_teardown(agent_id, require_config=require_config)
+    if resolved is None:
+        return True  # no sandbox to archive; desired post-condition holds
+    client, sandbox = resolved
+
+    state = getattr(getattr(sandbox, "state", None), "value", None)
+    if state == "archived":
+        return True
     try:
-        resp = httpx.delete(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30.0,
-        )
-    except httpx.HTTPError as e:
+        if state not in ("stopped", "stopping"):
+            # archive() requires the sandbox be stopped first.
+            try:
+                client.stop(sandbox)
+            except Exception as e:
+                logger.warning(
+                    "storage: stop before archive failed for sandbox id=%s: %s",
+                    getattr(sandbox, "id", "?"),
+                    e,
+                )
+        sandbox.archive()
+    except Exception as e:
         if require_config:
             raise RuntimeError(
-                f"Turso Platform API unreachable while deleting {name!r}: {e}"
+                f"Daytona archive failed for sandbox id={getattr(sandbox, 'id', '?')}: {e}"
             ) from e
-        logger.warning("storage: DELETE %s failed: %s", name, e)
+        logger.warning(
+            "storage: Daytona archive failed for sandbox id=%s: %s",
+            getattr(sandbox, "id", "?"),
+            e,
+        )
         return False
-    if resp.status_code in (200, 204, 404):
-        return True
-    if require_config:
-        raise RuntimeError(
-            f"Turso Platform API rejected deletion for {name!r}: "
-            f"{resp.status_code} {resp.text!r}"
-        )
-    logger.warning(
-        "storage: DELETE %s rejected: %s %s", name, resp.status_code, resp.text
-    )
-    return False
+    return True
 
 
-def _ensure_turso_db(*, org: str, group: str, name: str, token: str) -> None:
-    """Create a Turso database via the Platform API. Idempotent via 409.
+def purge_agent_sandbox(
+    agent_id: str, *, require_config: bool = False
+) -> bool:
+    """Fully delete the agent's Daytona sandbox. No recovery afterwards."""
+    if not os.environ.get("DAYTONA_API_KEY"):
+        if require_config:
+            raise RuntimeError(
+                "Cannot purge remote agent storage; DAYTONA_API_KEY is not set."
+            )
+        return False
 
-    Platform API docs: https://docs.turso.tech/api-reference/databases/create
-    """
-    url = f"https://api.turso.tech/v1/organizations/{org}/databases"
+    resolved = _resolve_sandbox_for_teardown(agent_id, require_config=require_config)
+    if resolved is None:
+        return True  # already gone
+    client, sandbox = resolved
+
     try:
-        resp = httpx.post(
-            url,
-            json={"name": name, "group": group},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            timeout=30.0,
+        client.delete(sandbox)
+    except Exception as e:
+        if require_config:
+            raise RuntimeError(
+                f"Daytona delete failed for sandbox id={getattr(sandbox, 'id', '?')}: {e}"
+            ) from e
+        logger.warning(
+            "storage: Daytona delete failed for sandbox id=%s: %s",
+            getattr(sandbox, "id", "?"),
+            e,
         )
-    except httpx.HTTPError as e:
-        raise RuntimeError(
-            f"Turso Platform API unreachable while provisioning {name!r}: {e}"
-        ) from e
-
-    if resp.status_code in (200, 201):
-        logger.info("storage: provisioned Turso db %s in org %s", name, org)
-        return
-    if resp.status_code == 409:
-        return
-    raise RuntimeError(
-        f"Turso Platform API rejected provisioning for {name!r}: "
-        f"{resp.status_code} {resp.text!r}"
-    )
+        return False
+    return True
 
 
-class _LibsqlWrapper:
-    """Thin adapter so `libsql_experimental`'s tuple-returning cursors look
-    like `sqlite3` row-factory cursors to the rest of the codebase.
+def clear_agent_sandbox_db(
+    agent_id: str, *, require_config: bool = False
+) -> bool:
+    """Remove just ``harness.sqlite`` inside the agent's sandbox.
 
-    Memory code does `row["col_name"]` *and* iterates tuple-style. Upstream
-    libsql returns bare tuples; we wrap each cursor so `fetchone()/fetchall()`
-    emit `_LibsqlRow` objects that support both.
+    Leaves the sandbox running so the next ``storage.load(agent_id)`` starts
+    from an empty sqlite without paying the create-sandbox round-trip.
     """
+    if not os.environ.get("DAYTONA_API_KEY"):
+        if require_config:
+            raise RuntimeError(
+                "Cannot clear remote agent storage; DAYTONA_API_KEY is not set."
+            )
+        return False
 
-    def __init__(self, inner):
-        self._inner = inner
+    resolved = _resolve_sandbox_for_teardown(agent_id, require_config=require_config)
+    if resolved is None:
+        return True  # no sandbox => nothing to clear; fresh load will start empty
+    client, sandbox = resolved
 
-    def execute(self, *args, **kwargs):
-        cur = self._inner.execute(*args, **kwargs)
-        return _LibsqlCursor(cur)
+    # File delete needs the sandbox running.
+    try:
+        _ensure_sandbox_started(client, sandbox)
+    except Exception as e:
+        if require_config:
+            raise RuntimeError(
+                f"Daytona start failed before clearing db for sandbox id="
+                f"{getattr(sandbox, 'id', '?')}: {e}"
+            ) from e
+        logger.warning(
+            "storage: Daytona start-before-clear failed for sandbox id=%s: %s",
+            getattr(sandbox, "id", "?"),
+            e,
+        )
+        return False
 
-    def executemany(self, *args, **kwargs):
-        cur = self._inner.executemany(*args, **kwargs)
-        return _LibsqlCursor(cur)
-
-    def executescript(self, sql: str):
-        return self._inner.executescript(sql)
-
-    def commit(self):
-        return self._inner.commit()
-
-    def rollback(self):
-        return self._inner.rollback()
-
-    def close(self):
-        return self._inner.close()
-
-    def cursor(self):
-        return _LibsqlCursor(self._inner.cursor())
-
-
-class _LibsqlCursor:
-    def __init__(self, inner):
-        self._inner = inner
-
-    def __iter__(self):
-        # libsql_experimental cursors don't support native iteration, so pull
-        # everything via fetchall. Memory queries we run here return <=200 rows.
-        cols = self._column_names()
-        for row in self._inner.fetchall():
-            yield _LibsqlRow(row, cols)
-
-    def fetchone(self):
-        row = self._inner.fetchone()
-        if row is None:
-            return None
-        return _LibsqlRow(row, self._column_names())
-
-    def fetchall(self):
-        cols = self._column_names()
-        return [_LibsqlRow(r, cols) for r in self._inner.fetchall()]
-
-    def _column_names(self) -> tuple[str, ...]:
-        desc = self._inner.description or ()
-        return tuple(c[0] for c in desc)
-
-
-class _LibsqlRow:
-    """Behaves like `sqlite3.Row`: indexable by int or column name, iterable,
-    convertible via `dict(row)`.
-    """
-
-    __slots__ = ("_values", "_cols")
-
-    def __init__(self, values: tuple, cols: tuple[str, ...]):
-        self._values = values
-        self._cols = cols
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return self._values[key]
-        try:
-            idx = self._cols.index(key)
-        except ValueError:
-            raise KeyError(key) from None
-        return self._values[idx]
-
-    def __iter__(self):
-        return iter(self._values)
-
-    def __len__(self):
-        return len(self._values)
-
-    def keys(self):
-        return list(self._cols)
+    try:
+        sandbox.fs.delete_file(_SANDBOX_DB_PATH)
+    except Exception as e:
+        msg = str(e).lower()
+        if "not found" in msg or "no such" in msg or "404" in msg:
+            return True
+        if require_config:
+            raise RuntimeError(
+                f"Daytona delete_file({_SANDBOX_DB_PATH!r}) failed for sandbox id="
+                f"{getattr(sandbox, 'id', '?')}: {e}"
+            ) from e
+        logger.warning(
+            "storage: delete_file(%s) failed for sandbox id=%s: %s",
+            _SANDBOX_DB_PATH,
+            getattr(sandbox, "id", "?"),
+            e,
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -401,10 +568,7 @@ class _LibsqlRow:
 
 
 def _sanitize(agent_id: str) -> str:
-    """Coerce an agent id into a DB-name-safe slug (lowercase alnum + hyphens).
-
-    Turso enforces this strictly; local sqlite file names benefit from it too.
-    """
+    """Coerce an agent id into a safe slug (lowercase alnum + hyphens)."""
     s = _SAFE_ID_RE.sub("-", agent_id.lower()).strip("-")
     return s or "agent"
 
