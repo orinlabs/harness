@@ -8,7 +8,7 @@ from harness.cloud.bedrock.config import (
     create_dev_agent,
     create_eval_agent,
     fetch_harness_config,
-    resolve_product,
+    resolve_template,
 )
 from harness.cloud.bedrock.runtime import BedrockAgentRuntime
 from harness.cloud.bedrock.trace_sink import BedrockTraceSink
@@ -19,5 +19,5 @@ __all__ = [
     "create_dev_agent",
     "create_eval_agent",
     "fetch_harness_config",
-    "resolve_product",
+    "resolve_template",
 ]

@@ -10,8 +10,9 @@ models and installed Celery/Django patches, this version:
   ``/api/tracing/spans/`` (``span_type=checkpoint`` and friends).
 * Leaves the fake-adapter I/O injection to T6 (``patch_external_clients``
   does not exist in harness).
-* Replaces ``override_product_id`` with ``override_template_id`` for
-  forward compatibility with T7's product/template HTTP lookup.
+* Uses ``override_template_id`` to scope eval agents to an
+  ``AgentTemplate``; T7 will do the HTTP lookup to resolve it into a
+  template snapshot.
 
 The bits that *are* ported:
 
@@ -121,8 +122,7 @@ class SimulationRunner:
         agent_id: str | None = None,
         agent_config=None,
         override_model: str | None = None,
-        # Bedrock's `override_product_id` is replaced with `override_template_id`
-        # — T7 will do the HTTP lookup to resolve it into a template snapshot.
+        # T7 will do the HTTP lookup to resolve this into a template snapshot.
         override_template_id: str | None = None,
         override_feature_flags: dict[str, str] | None = None,
         override_reasoning_effort: str = "",
