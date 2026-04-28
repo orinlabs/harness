@@ -50,9 +50,22 @@ class Harness:
             len(self.tool_map),
             sorted(self.tool_map.keys()),
         )
+        # Summarization always runs on a cheap model, not the agent's
+        # configured model. Otherwise every turn's `update_summaries()`
+        # fires N summary-generation LLM calls at whatever the agent
+        # happens to be using (Opus, Sonnet, etc.) -- easily >$1/turn on
+        # agents with deep history. gpt-5-nano is ~1000x cheaper per
+        # token and the summary quality is more than adequate for
+        # timeline rollups.
+        summary_model = "openai/gpt-5-nano"
+        logger.info(
+            "Harness init: using summary_model=%s (agent model=%s)",
+            summary_model,
+            config.model,
+        )
         self.memory = MemoryService(
             agent_id=config.id,
-            model=config.model,
+            model=summary_model,
             summarizer_v2=getattr(config, "summarizer_v2", False),
         )
         # Per-run accumulator: totals (summed) + per-model breakdown (for the

@@ -96,6 +96,11 @@ class SummaryUpdater:
         self.total_usage = SummarizerUsage()
 
         started_at = _now_iso()
+        logger.info(
+            "summarizer.update_all: starting model=%s v2=%s",
+            self.model,
+            self.v2,
+        )
         if self.v2:
             # v2 skips the 1m and 5m tiers entirely: raw messages fill
             # that window. Hourly summaries are built directly from
@@ -113,6 +118,21 @@ class SummaryUpdater:
         updated_week = self._update_weekly_summaries(current_time)
         updated_month = self._update_monthly_summaries(current_time)
         ended_at = _now_iso()
+        logger.info(
+            "summarizer.update_all: done created 1m=%d 5m=%d hour=%d day=%d "
+            "week=%d month=%d llm_calls=%d in=%d out=%d cost=$%.5f model=%s",
+            len(updated_1m),
+            len(updated_5m),
+            len(updated_hour),
+            len(updated_day),
+            len(updated_week),
+            len(updated_month),
+            self.total_usage.llm_calls,
+            self.total_usage.input_tokens,
+            self.total_usage.output_tokens,
+            self.total_usage.total_cost,
+            self.model,
+        )
 
         summaries_created = {
             "one_minute": len(updated_1m),
@@ -246,7 +266,10 @@ class SummaryUpdater:
         if not pending:
             return []
 
-        logger.debug("Creating %s one-minute summaries", len(pending))
+        logger.info(
+            "summarizer: tier=1m pending=%d -> making %d LLM call(s) via %s",
+            len(pending), len(pending), self.model,
+        )
 
         created: list[tuple] = []
         for (date_key, hour_key, minute_key), bucket_messages in sorted(
@@ -323,7 +346,10 @@ class SummaryUpdater:
         if not pending:
             return []
 
-        logger.debug("Creating %s five-minute summaries", len(pending))
+        logger.info(
+            "summarizer: tier=5m pending=%d -> making %d LLM call(s) via %s",
+            len(pending), len(pending), self.model,
+        )
         created = []
         for (date_key, hour_key, minute_key), content, total_messages in sorted(
             pending, key=lambda x: (x[0][0], x[0][1], x[0][2])
@@ -386,7 +412,10 @@ class SummaryUpdater:
         if not pending:
             return []
 
-        logger.debug("Creating %s hourly summaries", len(pending))
+        logger.info(
+            "summarizer: tier=hourly pending=%d -> making %d LLM call(s) via %s",
+            len(pending), len(pending), self.model,
+        )
         created = []
         for (summary_date, hour), content, total_messages in sorted(
             pending, key=lambda x: (x[0][0], x[0][1])
@@ -442,7 +471,10 @@ class SummaryUpdater:
         if not pending:
             return []
 
-        logger.debug("Creating %s daily summaries", len(pending))
+        logger.info(
+            "summarizer: tier=daily pending=%d -> making %d LLM call(s) via %s",
+            len(pending), len(pending), self.model,
+        )
         created = []
         for day, content, total_messages in sorted(pending, key=lambda x: x[0]):
             summary_text = self._create_summary(content=content, period_type=PeriodType.DAILY)
@@ -498,7 +530,10 @@ class SummaryUpdater:
         if not pending:
             return []
 
-        logger.debug("Creating %s weekly summaries", len(pending))
+        logger.info(
+            "summarizer: tier=weekly pending=%d -> making %d LLM call(s) via %s",
+            len(pending), len(pending), self.model,
+        )
         created = []
         for week, content, total_messages in sorted(pending, key=lambda x: x[0]):
             summary_text = self._create_summary(content=content, period_type=PeriodType.WEEKLY)
@@ -558,7 +593,10 @@ class SummaryUpdater:
         if not pending:
             return []
 
-        logger.debug("Creating %s monthly summaries", len(pending))
+        logger.info(
+            "summarizer: tier=monthly pending=%d -> making %d LLM call(s) via %s",
+            len(pending), len(pending), self.model,
+        )
         created = []
         for (year, month), content, total_messages in sorted(
             pending, key=lambda x: (x[0][0], x[0][1])
