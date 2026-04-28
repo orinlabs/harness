@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import os
 from pathlib import Path
 
@@ -25,19 +24,39 @@ for _var in (
     os.environ.pop(_var, None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_trace_sink_between_tests():
+    """Force the tracer to re-pick its sink each test.
+
+    The tracer caches its sink on first access (see ``get_trace_sink``). If
+    one test activates Bedrock via ``fake_platform`` and a later test runs
+    without Bedrock env, the cached Bedrock sink would leak into the second
+    test. Clearing the cache before every test makes the autoconfig run
+    against the current env.
+    """
+    from harness.core import tracer
+
+    tracer._reset_sink_for_tests()
+    yield
+    tracer._reset_sink_for_tests()
+
+
 @pytest.fixture
 def fake_platform(monkeypatch):
-    """Start a FakePlatform, wire env vars, reload core clients so they pick them up."""
+    """Start a FakePlatform and point Bedrock env vars at it.
+
+    Tests that take this fixture get a ``BedrockTraceSink`` and
+    ``BedrockAgentRuntime`` autoconfigured by the tracer + Harness, both
+    aimed at the in-process fake server. The protocol is identical to what
+    real Bedrock serves, so coverage here catches real wire-format bugs.
+    """
     platform = FakePlatform()
     platform.start()
     monkeypatch.setenv("BEDROCK_URL", platform.url)
     monkeypatch.setenv("BEDROCK_TOKEN", "test-token")
 
-    from harness.core import runtime_api, tracer
-
-    importlib.reload(tracer)
-    importlib.reload(runtime_api)
-
+    # The autouse reset fixture already cleared the cached sink; next tracer
+    # access will pick up a BedrockTraceSink pointing at the fake's URL.
     try:
         yield platform
     finally:

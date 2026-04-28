@@ -20,11 +20,10 @@ def harness_env(tmp_path, monkeypatch, openrouter_key, fake_platform):
     mig_dir = Path(__file__).parent.parent / "src/harness/memory/migrations"
     monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
 
-    from harness.core import llm, runtime_api, storage, tracer
+    from harness.core import llm, storage, tracer
 
     importlib.reload(storage)
     importlib.reload(tracer)
-    importlib.reload(runtime_api)
     importlib.reload(llm)
 
     yield fake_platform

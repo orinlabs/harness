@@ -36,11 +36,10 @@ def env(tmp_path, monkeypatch, openrouter_key):
     monkeypatch.setenv("BEDROCK_URL", platform.url)
     monkeypatch.setenv("BEDROCK_TOKEN", "lifecycle-test")
 
-    from harness.core import llm, runtime_api, storage, tracer
+    from harness.core import llm, storage, tracer
 
     importlib.reload(storage)
     importlib.reload(tracer)
-    importlib.reload(runtime_api)
     importlib.reload(llm)
 
     try:
@@ -187,7 +186,7 @@ def test_agent_recalls_fact_from_summarized_memory(env):
     SMS inbox. The inbox asks for a fact that only exists in a monthly-tier
     summary — so the agent has to rely on build_llm_inputs pulling that
     summary into the system prompt."""
-    from harness import AdapterConfig, AgentConfig, ExternalToolSpec, Harness
+    from harness import AgentConfig, ExternalToolSpec, Harness
     from harness.core import storage
     from harness.memory import MemoryService
 
@@ -246,13 +245,7 @@ def test_agent_recalls_fact_from_summarized_memory(env):
             "months) to answer, 3) reply via sms_send to the sender, 4) call "
             "sleep with a future time once done."
         ),
-        adapters=[
-            AdapterConfig(
-                name="sms",
-                description="SMS I/O",
-                tools=[sms_check, sms_send],
-            ),
-        ],
+        tools=[sms_check, sms_send],
     )
 
     start = time.perf_counter()

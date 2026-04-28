@@ -1,0 +1,24 @@
+# Sample standalone agent config.
+#
+# Run with:
+#   uv run harness agent demo
+#
+# The CLI resolves this because ./agents/<name>.{yaml,yml,json} wins over
+# Bedrock lookup. Requires:
+#   OPENROUTER_API_KEY      -- LLM calls
+#
+# No Bedrock env needed; trace sink autoconfigures to NullTraceSink so spans
+# are dropped. Usage totals are logged at end-of-run.
+
+id: demo
+model: claude-haiku-4-5
+reasoning_effort: medium
+
+system_prompt: |
+  You are a minimal demo agent. Call `sleep` with
+  until="2099-01-01T00:00:00Z" and reason="demo complete" once you have
+  nothing to do.
+
+# Flat list of tools. Only the built-in `sleep` tool is available here.
+# To add an HTTP-backed tool, see the schema in src/harness/config_loader.py.
+tools: []

@@ -1,63 +1,136 @@
 # Harness
 
-Harness is the local runner for Bedrock agents.
+Harness is a local agent runtime. Give it a config (model, system prompt,
+HTTP-backed tools) and it runs the agent loop in-process: calls models through
+OpenRouter, dispatches tool calls, stores memory in per-agent sqlite, and
+emits traces.
 
-It fetches an agent config from Bedrock, runs the agent loop in this process,
-calls models through OpenRouter, calls external tools through Bedrock adapter
-URLs, records traces back to Bedrock, and stores memory in a per-agent Daytona
-sandbox (one sandbox per agent, holding that agent's sqlite DB).
+Harness runs in two modes:
+
+- **Standalone.** Everything in-process; config comes from `./agents/<name>.yaml`.
+  Needs `OPENROUTER_API_KEY`. Nothing talks to any cloud besides OpenRouter
+  (and Daytona, if storage is configured that way).
+- **Cloud (Bedrock).** Config is fetched from Bedrock; traces + sleep go
+  back to Bedrock. Triggered automatically when `BEDROCK_URL` and
+  `BEDROCK_TOKEN` are set.
+
+The mode is picked per-run based on what's in the environment; the same
+binary handles both.
 
 ## Setup
-
-Install dependencies:
 
 ```bash
 uv sync --dev
 ```
 
-The CLI loads `.env` from the repo root. A typical `.env` looks like this:
+A minimal `.env`:
 
 ```bash
 OPENROUTER_API_KEY=...
-BEDROCK_TOKEN=...
-DAYTONA_API_KEY=dtn_...
 
-# Usually optional
-BEDROCK_URL=http://127.0.0.1:8000
+# Optional: per-agent Daytona sandbox. Without this, storage falls back to
+# a local sqlite file under $HARNESS_STORAGE_ROOT (default /tmp/harness).
+DAYTONA_API_KEY=dtn_...
 DAYTONA_API_URL=https://app.daytona.io/api
-HARNESS_DAYTONA_AUTO_STOP_MINUTES=15  # default is 15
+HARNESS_DAYTONA_AUTO_STOP_MINUTES=15
+
+# Optional: enable Bedrock mode. When unset, harness runs standalone.
+BEDROCK_URL=http://127.0.0.1:8000
+BEDROCK_TOKEN=...
 ```
 
 Notes:
 
-- `BEDROCK_TOKEN` is a Bedrock product API key.
-- `BEDROCK_URL` defaults to `http://127.0.0.1:8000`.
-- `DAYTONA_API_KEY` is required for CLI workflows. Harness provisions one
-  sandbox per agent (labeled `harness.agent_id=<id>`) and keeps the agent's
-  sqlite DB inside it. Without this env var, harness falls back to a local
-  sqlite file at `<HARNESS_STORAGE_ROOT>/<agent_id>.sqlite` — used by tests
-  and the standalone demo.
-- Missing API keys fail loudly. Tests and evals do not silently skip live calls.
+- Missing API keys fail loudly; Harness does not silently skip live calls.
+- `DAYTONA_API_KEY` without a running Daytona is fine for standalone dev as
+  long as tests don't touch storage. Tests strip `DAYTONA_*` before
+  touching storage (see `tests/conftest.py`).
 
-## Use With Local Bedrock
+## Standalone Quickstart
 
-Use this when Bedrock is running on your machine.
-
-Run an existing agent:
+1. Drop an agent config into `./agents/<name>.yaml`.
+2. Run it:
 
 ```bash
-uv run harness agent <AGENT_UUID> --local
+uv run harness agent <name>
 ```
 
-Or create a temporary dev agent and run it:
+There's a worked example at `agents/demo.yaml`. Run:
+
+```bash
+uv run harness agent demo
+```
+
+### Config schema
+
+Flat list of tools (no adapter grouping). Bedrock serves a nested
+`adapters: [{name, tools: [...]}]` shape; the Bedrock client flattens that
+on ingest so the harness sees the same flat list regardless of source.
+
+```yaml
+id: my-agent
+model: claude-haiku-4-5
+system_prompt: |
+  You are helpful.
+reasoning_effort: medium        # optional
+summarizer_v2: false            # optional
+
+tools:                          # flat list; no adapter grouping
+  - name: get_forecast
+    description: Five-day forecast for a city.
+    parameters:
+      type: object
+      properties:
+        city: { type: string }
+      required: [city]
+    url: http://localhost:9001/weather/get_forecast
+    timeout_seconds: 30
+    auth:                              # optional; default kind=none
+      kind: bearer_env                 # none | bearer_env | bearer_literal | headers
+      token_env: OPENWEATHER_API_KEY
+    forward_trace_context: false       # optional; default false
+```
+
+### Sleep semantics in standalone
+
+`ctx.runtime.sleep(...)` is a no-op in standalone mode. The harness still
+exits cleanly at the end of the current turn (the `SleepTool` sets
+`ctx.sleep_requested = True`), but nothing re-spawns the process at
+`until`. Use Bedrock mode when you need durable sleep/wake.
+
+### Usage tracking in standalone
+
+Usage totals (tokens, cost, per-model breakdown) are computed per run. They
+only persist via the `TraceSink`:
+
+- With Bedrock configured, totals land on the `run_agent` trace metadata.
+- Without, they're logged to stderr at end-of-run and not persisted.
+
+## Use With Bedrock
+
+Set `BEDROCK_URL` + `BEDROCK_TOKEN` in the environment (or pass
+`--bedrock-url`/`--bedrock-token` on the CLI; `--local` is sugar for
+`--bedrock-url http://127.0.0.1:8000`). With those present:
+
+- `harness agent <uuid>` fetches the config from Bedrock (if no local
+  `./agents/<uuid>.yaml` shadows it).
+- Traces + sleep POST back to Bedrock.
+
+```bash
+uv run harness agent <AGENT_UUID>
+uv run harness agent <AGENT_UUID> --local
+uv run harness agent <AGENT_UUID> --bedrock-url https://your-bedrock.example.com
+```
+
+Create a temporary dev agent (Bedrock auto-creates the row):
 
 ```bash
 uv run harness agent --local --product <PRODUCT_UUID> --system-prompt "You are helpful."
 ```
 
-If your API key can see exactly one product, you can omit `--product`.
+If your API key can see exactly one product, `--product` is optional.
 
-Useful local flags:
+Useful flags:
 
 ```bash
 uv run harness agent <AGENT_UUID> --local --model claude-haiku-4-5
@@ -65,87 +138,36 @@ uv run harness agent <AGENT_UUID> --local --reasoning-effort medium
 uv run harness agent <AGENT_UUID> --local --run-id <RUN_UUID>
 ```
 
-Spin down an agent:
+### Resolution order for `harness agent <X>`
+
+1. `./agents/<X>.{yaml,yml,json}` (local).
+2. Else `GET /api/cloud/agents/<X>/harness-config/` if Bedrock env is set.
+3. Else error.
+
+`harness agent` with no id auto-creates a dev agent on Bedrock (requires
+env); standalone mode errors because there's nowhere to put a generated
+config.
+
+### Spin-down / reset
 
 ```bash
 uv run harness delete-agent <AGENT_UUID>
-```
-
-This deletes all of the agent's side effects in the world. Bedrock calls this
-once when deleting an agent.
-
-Reset an agent's memory:
-
-```bash
 uv run harness reset-memory <AGENT_UUID>
 ```
 
-Bedrock calls this when an agent's memory should be wiped. The next run starts
-from empty memory.
+These operate on local storage + the Daytona sandbox (when configured).
+They don't require Bedrock.
 
-## Use With Remote Bedrock
-
-Point the CLI at the remote Bedrock URL.
+## Evals
 
 ```bash
-BEDROCK_URL=https://your-bedrock.example.com uv run harness agent <AGENT_UUID>
+uv run harness eval smoke
+uv run harness eval group-lunch-memory --model claude-haiku-4-5
 ```
 
-Or pass it as a flag:
-
-```bash
-uv run harness agent <AGENT_UUID> --bedrock-url https://your-bedrock.example.com
-```
-
-You can also create a temporary dev agent remotely:
-
-```bash
-uv run harness agent \
-  --bedrock-url https://your-bedrock.example.com \
-  --product <PRODUCT_UUID> \
-  --system-prompt "You are helpful."
-```
-
-## Run Without Bedrock
-
-For the quickest end-to-end check, run the demo:
-
-```bash
-uv run python scripts/run_demo.py
-```
-
-The demo starts an in-process fake platform, registers fake weather and SMS
-tools, uses local sqlite storage, and makes real OpenRouter calls. It only
-needs `OPENROUTER_API_KEY`.
-
-## Run An Eval Locally
-
-Run the eval runner from this repo, usually against local Bedrock:
-
-```bash
-uv run harness eval smoke --local
-```
-
-Run a larger scenario:
-
-```bash
-uv run harness eval group-lunch-memory --local --model claude-haiku-4-5
-```
-
-Run the same eval against remote Bedrock:
-
-```bash
-uv run harness eval smoke --bedrock-url https://your-bedrock.example.com
-```
-
-How evals work:
-
-- The eval simulation and fake adapters run locally in this process.
-- The eval still creates a real eval agent in Bedrock.
-- Model calls still go through OpenRouter.
-- CLI storage uses a per-agent Daytona sandbox unless `DAYTONA_API_KEY` is
-  unset (in which case harness falls back to local sqlite).
-- Results print to stdout, and the final line includes the Bedrock agent URL.
+Evals run standalone by default. When Bedrock env is set, spans flow to
+Bedrock under a synthesized `eval-<scenario>-<hex>` agent_id (no agent row
+is created in Bedrock).
 
 Available scenarios:
 
@@ -166,9 +188,7 @@ vegetarian-restaurant-heavy
 vending-bench
 ```
 
-## Make A Change Locally
-
-Use this loop for normal development:
+## Development Loop
 
 ```bash
 git checkout -b <branch-name>
@@ -176,10 +196,10 @@ uv sync --dev
 # edit code
 uv run ruff check .
 uv run pytest
-uv run harness eval smoke --local
+uv run harness eval smoke
 ```
 
-For targeted checks:
+Targeted:
 
 ```bash
 uv run pytest tests/test_harness_e2e.py
@@ -192,55 +212,25 @@ Testing expectations:
 - LLM-related tests use real OpenRouter calls.
 - Tests never talk to a real Daytona sandbox; `tests/conftest.py` strips
   `DAYTONA_*` from the environment before any storage module loads.
-- If an API key is required and missing, the run should fail.
-
-## Common Commands
-
-```bash
-# Install
-uv sync --dev
-
-# Run the default test suite
-uv run pytest
-
-# Run formatting/lint checks
-uv run ruff check .
-
-# Run the no-Bedrock demo
-uv run python scripts/run_demo.py
-
-# Run an existing local Bedrock agent
-uv run harness agent <AGENT_UUID> --local
-
-# Run an existing remote Bedrock agent
-uv run harness agent <AGENT_UUID> --bedrock-url https://your-bedrock.example.com
-
-# Run a local eval
-uv run harness eval smoke --local
-```
+- If an API key is required and missing, the run fails loudly.
 
 ## Repo Map
 
 ```text
-src/harness/cli.py              CLI entrypoint: harness agent / harness eval
-src/harness/harness.py          Main agent loop
-src/harness/config.py           AgentConfig, AdapterConfig, ExternalToolSpec
-src/harness/core/llm.py         OpenRouter client
-src/harness/core/storage.py     Per-agent sqlite, optionally backed by a Daytona sandbox
-src/harness/core/tracer.py      Bedrock tracing
-src/harness/tools/              Built-in and external tool wrappers
-src/harness/memory/             SQL-backed memory and summaries
-src/harness/evals/              Eval runner, fake adapters, scenarios
-scripts/run_demo.py             No-Bedrock demo
-scripts/run_live.py             Lower-level live-agent helper
-tests/                          Unit, e2e, and memory tests
-```
-
-## Lower-Level Live Script
-
-Most runs should use `uv run harness agent ...`. If you need the older explicit
-script entrypoint, it is still available:
-
-```bash
-uv run python scripts/run_live.py <AGENT_UUID> --bedrock-token "$BEDROCK_TOKEN"
+src/harness/cli.py                 CLI entrypoint: harness agent / eval / delete-agent / reset-memory
+src/harness/harness.py             Main agent loop
+src/harness/config.py              AgentConfig, ExternalToolSpec, ToolAuth
+src/harness/config_loader.py       Load AgentConfig from ./agents/<name>.yaml
+src/harness/core/llm.py            OpenRouter client
+src/harness/core/storage.py        Per-agent sqlite, optionally backed by Daytona
+src/harness/core/tracer.py         Trace/span context manager; delegates HTTP to TraceSink
+src/harness/core/tracing.py        TraceSink protocol + NullTraceSink + InMemoryTraceSink
+src/harness/core/runtime.py        AgentRuntime protocol + LocalAgentRuntime
+src/harness/cloud/autoconfig.py    Pick TraceSink + AgentRuntime from env
+src/harness/cloud/bedrock/         Bedrock integration (trace sink, runtime, config fetch)
+src/harness/tools/                 Built-in and external tool wrappers
+src/harness/memory/                SQL-backed memory and summaries
+src/harness/evals/                 Eval runner, fake adapters, scenarios
+agents/                            Local agent configs (YAML)
+tests/                             Unit, e2e, and memory tests
 ```

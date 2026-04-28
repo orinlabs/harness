@@ -1,35 +1,19 @@
-"""Trace + span client.
+"""Trace + span API.
 
-Matches the platform's existing trace shape (two-tier model of `Trace` + `Span`,
-typed spans, separate input/output text fields, and standard metadata keys
-like `usage`, `llm_cost`, `model_breakdown`, `summaries_created`).
+Transport-agnostic. Every HTTP / storage concern lives in a ``TraceSink``
+(``harness.core.tracing``); this module just manages the trace/span
+lifecycle, ContextVar-based parenting, and the emergency "close everything
+on SIGTERM" registry.
 
-Wire protocol (authed with BEDROCK_TOKEN):
-
-    POST   {PLATFORM}/api/tracing/traces/              -> create trace
-      body:  {id, name, started_at, agent_id, metadata}
-
-    PATCH  {PLATFORM}/api/tracing/traces/{id}/         -> close trace
-      body:  {ended_at, error, metadata}
-      (metadata merges; bedrock's /end/ POST ignores metadata updates, so we
-       use PATCH which accepts ended_at + metadata in one call.)
-
-    POST   {PLATFORM}/api/tracing/spans/               -> create span
-      body:  {id, trace_id, parent_id, name, span_type, started_at,
-              input_text, metadata, agent_id}
-
-    PATCH  {PLATFORM}/api/tracing/spans/{id}/          -> close span
-      body:  {ended_at, input_text, output_text, error, metadata}
-
-The first span opened in a context creates the trace implicitly. Nested spans
-reuse the same trace_id via ContextVar-based parent tracking. Failures to reach
-the platform are logged but never raised — tracing is best-effort.
+Module-level ``_sink`` is the currently-installed sink. It auto-populates on
+first use via ``harness.cloud.autoconfigure()`` (returns a Bedrock sink when
+the env is set, else ``NullTraceSink``). Callers that want explicit control
+(most notably ``Harness.__init__`` when the user passed ``trace_sink=...``)
+call ``set_trace_sink(sink)`` before the first span opens.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -37,7 +21,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Iterator
 
-import httpx
+from harness.core.tracing import TraceSink
 
 logger = logging.getLogger(__name__)
 
@@ -65,40 +49,53 @@ _current_trace_agent_id: ContextVar[str | None] = ContextVar(
 _current_parent_span_id: ContextVar[str | None] = ContextVar(
     "harness_parent_span_id", default=None
 )
-_client: httpx.Client | None = None
 
 # Emergency registry of still-open traces/spans.
 #
 # ContextVars are scoped per-task, so a signal handler or atexit hook can't see
 # them. We mirror open-trace and open-span info into these module-level dicts
 # so `close_all_open(error)` can force-close anything left dangling when the
-# process is killed (SIGTERM from the platform, crash, etc.). Entries are
-# removed on normal close.
+# process is killed. Entries are removed on normal close.
 _open_traces: dict[str, dict[str, Any]] = {}
 _open_spans: dict[str, dict[str, Any]] = {}
 
 
-def _platform_url() -> str | None:
-    """Return the platform base URL or None if tracing is disabled.
+_sink: TraceSink | None = None
 
-    Tracing is best-effort. When `BEDROCK_URL` is unset, all tracer
-    HTTP calls short-circuit. This is what lets unit tests that don't need a
-    platform (e.g. the memory port) run without spinning up fake_platform.
+
+def set_trace_sink(sink: TraceSink) -> None:
+    """Install a ``TraceSink`` for subsequent span events.
+
+    Called from ``Harness.__init__`` when the user wants an explicit sink
+    (or from tests). Replaces any previously-installed sink.
     """
-    url = os.environ.get("BEDROCK_URL")
-    return url.rstrip("/") if url else None
+    global _sink
+    _sink = sink
 
 
-def _auth_header() -> dict[str, str]:
-    token = os.environ.get("BEDROCK_TOKEN", "")
-    return {"Authorization": f"Bearer {token}"} if token else {}
+def get_trace_sink() -> TraceSink:
+    """Return the active ``TraceSink``, auto-configuring on first access.
+
+    Deferred import of ``harness.cloud.autoconfig`` keeps ``harness.core`` free
+    of any cloud-provider dependency at import time.
+    """
+    global _sink
+    if _sink is None:
+        from harness.cloud.autoconfig import autoconfigure
+
+        sink, _runtime = autoconfigure()
+        _sink = sink
+    return _sink
 
 
-def _http() -> httpx.Client:
-    global _client
-    if _client is None:
-        _client = httpx.Client(timeout=10.0)
-    return _client
+def _reset_sink_for_tests() -> None:
+    """Clear the cached sink so the next ``get_trace_sink()`` re-runs autoconfig.
+
+    Test-only helper; ``tests/conftest.py`` calls this between tests so env
+    changes from one test don't leak into the next.
+    """
+    global _sink
+    _sink = None
 
 
 def _now_iso() -> str:
@@ -121,8 +118,8 @@ def get_current_span_id() -> str | None:
 class Span:
     """In-process handle for an open span.
 
-    Callers mutate `input_text`, `output_text`, and `metadata` via the helper
-    methods; they're shipped to the platform when the span closes.
+    Callers mutate ``input_text``, ``output_text``, and ``metadata`` via the
+    helper methods; they're shipped to the sink when the span closes.
     """
 
     def __init__(self, span_id: str, trace_id: str, name: str, span_type: SpanType):
@@ -158,14 +155,9 @@ def span(
     metadata: dict[str, Any] | None = None,
     agent_id: str | None = None,
 ) -> Iterator[Span]:
-    """Open a span. If no trace is active, one is created implicitly.
+    """Open a span. If no trace is active, one is created implicitly."""
+    sink = get_trace_sink()
 
-    - `span_type` controls the enum tag (text/tool/llm/function/audio).
-    - `input` / `metadata` are initial values; callers may add more before close
-      via `.input(...)`, `.output(...)`, `.set_metadata(...)`.
-    - `agent_id` is attached to the trace on trace creation only; ignored when
-      a trace is already active.
-    """
     span_id = str(uuid.uuid4())
     started_at = _now_iso()
 
@@ -177,28 +169,34 @@ def span(
     if trace_id is None:
         trace_id = str(uuid.uuid4())
         created_trace = True
-        _open_trace(
-            trace_id=trace_id,
-            name=name,
-            started_at=started_at,
-            agent_id=agent_id,
-        )
+        try:
+            sink.open_trace(
+                trace_id=trace_id,
+                name=name,
+                started_at=started_at,
+                agent_id=agent_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tracer: sink.open_trace failed")
         trace_id_token = _current_trace_id.set(trace_id)
         trace_name_token = _current_trace_name.set(name)
         trace_agent_token = _current_trace_agent_id.set(agent_id)
 
     parent_id = _current_parent_span_id.get()
 
-    _open_span(
-        span_id=span_id,
-        trace_id=trace_id,
-        parent_id=parent_id,
-        name=name,
-        span_type=span_type,
-        started_at=started_at,
-        input_text=input,
-        metadata=metadata or {},
-    )
+    try:
+        sink.open_span(
+            span_id=span_id,
+            trace_id=trace_id,
+            parent_id=parent_id,
+            name=name,
+            span_type=span_type.value,
+            started_at=started_at,
+            input_text=input,
+            metadata=metadata or {},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("tracer: sink.open_span failed")
 
     handle = Span(span_id, trace_id, name, span_type)
     if input is not None:
@@ -238,30 +236,36 @@ def span(
         _current_parent_span_id.reset(parent_token)
         ended_at = _now_iso()
         _open_spans.pop(span_id, None)
-        _close_span(
-            span_id=span_id,
-            trace_id=trace_id,
-            parent_id=parent_id,
-            name=name,
-            span_type=span_type,
-            ended_at=ended_at,
-            input_text=handle._input,
-            output_text=handle._output,
-            error=error_msg if status == "error" else None,
-            metadata=handle._metadata,
-        )
+        try:
+            sink.close_span(
+                span_id=span_id,
+                trace_id=trace_id,
+                parent_id=parent_id,
+                name=name,
+                span_type=span_type.value,
+                ended_at=ended_at,
+                input_text=handle._input,
+                output_text=handle._output,
+                error=error_msg if status == "error" else None,
+                metadata=handle._metadata,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tracer: sink.close_span failed")
         if created_trace:
             _open_traces.pop(trace_id, None)
-            _close_trace(
-                trace_id=trace_id,
-                name=name,
-                agent_id=agent_id,
-                ended_at=ended_at,
-                error=error_msg if status == "error" else None,
-                # Propagate the root span's metadata up to the trace so the
-                # platform can show a usage summary on the trace row itself.
-                metadata=dict(handle._metadata),
-            )
+            try:
+                sink.close_trace(
+                    trace_id=trace_id,
+                    name=name,
+                    agent_id=agent_id,
+                    ended_at=ended_at,
+                    error=error_msg if status == "error" else None,
+                    # Propagate the root span's metadata up to the trace so
+                    # backends can show a usage summary on the trace row.
+                    metadata=dict(handle._metadata),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("tracer: sink.close_trace failed")
             if trace_id_token is not None:
                 _current_trace_id.reset(trace_id_token)
             if trace_name_token is not None:
@@ -332,17 +336,16 @@ def emit_completed_span(
 ) -> None:
     """Emit a span that represents work already completed.
 
-    Unlike `span()`, this doesn't open a context — useful when you want to log
-    a span *only if* something happened, and the work was already bracketed
-    with manual timestamps. Nests under whichever span is currently active
-    via the same ContextVars.
+    Unlike ``span()``, this doesn't open a context -- useful when you want
+    to log a span *only if* something happened, and the work was already
+    bracketed with manual timestamps. Nests under whichever span is
+    currently active via the same ContextVars.
 
-    If no trace is active when this is called, a trace is created and closed
-    around this single span (to preserve the invariant that every span
-    belongs to a trace). When `agent_id` is supplied, it's attached to that
-    standalone trace so the span is discoverable under the agent in the
-    platform UI rather than appearing as an orphan.
+    If no trace is active when this is called, a trace is created and
+    closed around this single span (to preserve the invariant that every
+    span belongs to a trace).
     """
+    sink = get_trace_sink()
     span_id = str(uuid.uuid4())
     metadata = metadata or {}
 
@@ -351,184 +354,67 @@ def emit_completed_span(
     if trace_id is None:
         trace_id = str(uuid.uuid4())
         standalone_trace = True
-        _open_trace(
-            trace_id=trace_id,
-            name=name,
-            started_at=started_at,
-            agent_id=agent_id,
-        )
+        try:
+            sink.open_trace(
+                trace_id=trace_id,
+                name=name,
+                started_at=started_at,
+                agent_id=agent_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tracer: sink.open_trace failed")
 
     parent_id = _current_parent_span_id.get()
-    _open_span(
-        span_id=span_id,
-        trace_id=trace_id,
-        parent_id=parent_id,
-        name=name,
-        span_type=span_type,
-        started_at=started_at,
-        input_text=input,
-        metadata=metadata,
-    )
-    _close_span(
-        span_id=span_id,
-        trace_id=trace_id,
-        parent_id=parent_id,
-        name=name,
-        span_type=span_type,
-        ended_at=ended_at,
-        input_text=input,
-        output_text=output,
-        error=error,
-        metadata=metadata,
-    )
-    if standalone_trace:
-        _close_trace(
+    try:
+        sink.open_span(
+            span_id=span_id,
             trace_id=trace_id,
+            parent_id=parent_id,
             name=name,
-            agent_id=agent_id,
+            span_type=span_type.value,
+            started_at=started_at,
+            input_text=input,
+            metadata=metadata,
+        )
+        sink.close_span(
+            span_id=span_id,
+            trace_id=trace_id,
+            parent_id=parent_id,
+            name=name,
+            span_type=span_type.value,
             ended_at=ended_at,
+            input_text=input,
+            output_text=output,
             error=error,
-            metadata=dict(metadata),
+            metadata=metadata,
         )
+    except Exception:  # noqa: BLE001
+        logger.exception("tracer: sink.open_span/close_span failed")
 
-
-# ---------------------------------------------------------------------------
-# HTTP emission (fire-and-log-on-failure)
-# ---------------------------------------------------------------------------
-
-
-def _open_trace(
-    *,
-    trace_id: str,
-    name: str,
-    started_at: str,
-    agent_id: str | None,
-) -> None:
-    base = _platform_url()
-    if base is None:
-        return
-    body = {
-        "id": trace_id,
-        "name": name,
-        "started_at": started_at,
-        "agent_id": agent_id,
-        "metadata": {},
-    }
-    try:
-        _http().post(
-            f"{base}/api/tracing/traces/", json=body, headers=_auth_header()
-        )
-    except httpx.HTTPError as e:
-        logger.warning("tracer: failed to open trace %s: %s", name, e)
-
-
-def _close_trace(
-    *,
-    trace_id: str,
-    name: str,
-    agent_id: str | None,
-    ended_at: str,
-    error: str | None,
-    metadata: dict[str, Any],
-) -> None:
-    base = _platform_url()
-    if base is None:
-        return
-    # PATCH merges `metadata` with what was set at create time, and applies
-    # ended_at/error in the same call. The /end/ POST endpoint exists but
-    # ignores metadata updates, so we avoid it.
-    body = {
-        "ended_at": ended_at,
-        "error": error or "",
-        "metadata": _safe_json(metadata),
-    }
-    try:
-        _http().patch(
-            f"{base}/api/tracing/traces/{trace_id}/",
-            json=body,
-            headers=_auth_header(),
-        )
-    except httpx.HTTPError as e:
-        logger.warning("tracer: failed to close trace %s: %s", trace_id, e)
-
-
-def _open_span(
-    *,
-    span_id: str,
-    trace_id: str,
-    parent_id: str | None,
-    name: str,
-    span_type: SpanType,
-    started_at: str,
-    input_text: str | None,
-    metadata: dict[str, Any],
-) -> None:
-    base = _platform_url()
-    if base is None:
-        return
-    body = {
-        "id": span_id,
-        "trace_id": trace_id,
-        "parent_id": parent_id,
-        "name": name,
-        "span_type": span_type.value,
-        "started_at": started_at,
-        "input_text": input_text,
-        "metadata": _safe_json(metadata),
-    }
-    try:
-        _http().post(
-            f"{base}/api/tracing/spans/", json=body, headers=_auth_header()
-        )
-    except httpx.HTTPError as e:
-        logger.warning("tracer: failed to open span %s: %s", name, e)
-
-
-def _close_span(
-    *,
-    span_id: str,
-    trace_id: str,
-    parent_id: str | None,
-    name: str,
-    span_type: SpanType,
-    ended_at: str,
-    input_text: str | None,
-    output_text: str | None,
-    error: str | None,
-    metadata: dict[str, Any],
-) -> None:
-    base = _platform_url()
-    if base is None:
-        return
-    # PATCH merges metadata with what was set at create time; /end/ POST does
-    # not, so we PATCH instead.
-    body = {
-        "ended_at": ended_at,
-        "input_text": input_text or "",
-        "output_text": output_text or "",
-        "error": error or "",
-        "metadata": _safe_json(metadata),
-    }
-    try:
-        _http().patch(
-            f"{base}/api/tracing/spans/{span_id}/",
-            json=body,
-            headers=_auth_header(),
-        )
-    except httpx.HTTPError as e:
-        logger.warning("tracer: failed to close span %s: %s", span_id, e)
+    if standalone_trace:
+        try:
+            sink.close_trace(
+                trace_id=trace_id,
+                name=name,
+                agent_id=agent_id,
+                ended_at=ended_at,
+                error=error,
+                metadata=dict(metadata),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tracer: sink.close_trace failed")
 
 
 def close_all_open(error: str) -> None:
-    """Force-close every still-open span and trace with `error`.
+    """Force-close every still-open span and trace with ``error``.
 
     Called from the CLI's signal handlers / atexit hook when the harness is
-    killed mid-run (e.g. platform sends SIGTERM when the agent flips to
-    sleeping). Iterates over a snapshot of the registries so closing is
-    idempotent even if the normal `finally` path also fires.
+    killed mid-run. Iterates over a snapshot of the registries so closing
+    is idempotent even if the normal ``finally`` path also fires.
     """
     if not _open_spans and not _open_traces:
         return
+    sink = get_trace_sink()
     ended_at = _now_iso()
     logger.info(
         "tracer: force-closing %d span(s) and %d trace(s) (%s)",
@@ -537,47 +423,37 @@ def close_all_open(error: str) -> None:
         error,
     )
 
-    # Close spans first (leaves-to-root would be ideal, but PATCH is
-    # idempotent on the platform so order doesn't matter for correctness).
     for span_id, info in list(_open_spans.items()):
         handle: Span = info["handle"]
         handle._metadata.setdefault("error", error)
-        _close_span(
-            span_id=span_id,
-            trace_id=info["trace_id"],
-            parent_id=info["parent_id"],
-            name=info["name"],
-            span_type=info["span_type"],
-            ended_at=ended_at,
-            input_text=handle._input,
-            output_text=handle._output,
-            error=error,
-            metadata=handle._metadata,
-        )
+        try:
+            sink.close_span(
+                span_id=span_id,
+                trace_id=info["trace_id"],
+                parent_id=info["parent_id"],
+                name=info["name"],
+                span_type=info["span_type"].value,
+                ended_at=ended_at,
+                input_text=handle._input,
+                output_text=handle._output,
+                error=error,
+                metadata=handle._metadata,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tracer: sink.close_span failed during drain")
         _open_spans.pop(span_id, None)
 
     for trace_id, info in list(_open_traces.items()):
         handle = info["handle"]
-        _close_trace(
-            trace_id=trace_id,
-            name=info["name"],
-            agent_id=info["agent_id"],
-            ended_at=ended_at,
-            error=error,
-            metadata=dict(handle._metadata),
-        )
+        try:
+            sink.close_trace(
+                trace_id=trace_id,
+                name=info["name"],
+                agent_id=info["agent_id"],
+                ended_at=ended_at,
+                error=error,
+                metadata=dict(handle._metadata),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tracer: sink.close_trace failed during drain")
         _open_traces.pop(trace_id, None)
-
-
-def _safe_json(obj: Any) -> Any:
-    """Recursively coerce to JSON-serializable primitives."""
-    if isinstance(obj, dict):
-        return {str(k): _safe_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_safe_json(v) for v in obj]
-    if isinstance(obj, (str, int, float, bool)) or obj is None:
-        return obj
-    try:
-        return json.loads(json.dumps(obj, default=str))
-    except Exception:
-        return str(obj)

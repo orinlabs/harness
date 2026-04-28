@@ -11,8 +11,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from harness.config import AdapterConfig
-from harness.tools.base import ToolResult, ToolSchema
+from harness.tools.base import Tool, ToolResult, ToolSchema
 
 from .base import new_id, now_iso, require_db
 
@@ -564,9 +563,5 @@ class FakeEmailAdapter:
     ]
 
     @classmethod
-    def make_adapter_config(cls) -> AdapterConfig:
-        return AdapterConfig(
-            name=cls.name,
-            description=cls.description,
-            tools=[T() for T in cls.TOOLS],
-        )
+    def make_tools(cls) -> list[Tool]:
+        return [T() for T in cls.TOOLS]

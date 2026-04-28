@@ -20,18 +20,18 @@ def harness_env(tmp_path, monkeypatch, openrouter_key, fake_platform):
     mig_dir = Path(__file__).parent.parent / "src/harness/memory/migrations"
     monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
 
-    from harness.core import llm, runtime_api, storage, tracer
+    from harness.core import llm, storage, tracer
 
     importlib.reload(storage)
     importlib.reload(tracer)
-    importlib.reload(runtime_api)
     importlib.reload(llm)
 
     yield fake_platform
 
 
 def test_external_adapter_tool_end_to_end(harness_env):
-    from harness import AdapterConfig, AgentConfig, ExternalToolSpec, Harness
+    from harness import AgentConfig, ExternalToolSpec, Harness
+    from harness.config import ToolAuth
 
     echo_calls: list[dict] = []
 
@@ -41,6 +41,8 @@ def test_external_adapter_tool_end_to_end(harness_env):
 
     harness_env.register_tool("echo", echo_handler)
 
+    # Shape matches what BedrockConfigClient.fetch_harness_config produces: bearer
+    # auth from env + trace-context forwarding. This is the production path.
     echo_spec = ExternalToolSpec(
         name="echo",
         description="Echoes the provided text uppercased.",
@@ -50,6 +52,8 @@ def test_external_adapter_tool_end_to_end(harness_env):
             "required": ["text"],
         },
         url=f"{harness_env.url}/fake_tools/echo",
+        auth=ToolAuth(kind="bearer_env", token_env="BEDROCK_TOKEN"),
+        forward_trace_context=True,
     )
 
     config = AgentConfig(
@@ -61,13 +65,7 @@ def test_external_adapter_tool_end_to_end(harness_env):
             'then call `sleep` with until="2099-01-01T00:00:00Z" and reason equal '
             'to the exact echo result you received.'
         ),
-        adapters=[
-            AdapterConfig(
-                name="test-adapter",
-                description="Test-only echo tool.",
-                tools=[echo_spec],
-            )
-        ],
+        tools=[echo_spec],
     )
 
     Harness(config, run_id="run-adapter").run()

@@ -1,8 +1,9 @@
 """In-process fake adapters for eval scenarios.
 
-Each submodule exposes an ``*Adapter`` class with a ``make_adapter_config()``
-classmethod that drops directly into ``AgentConfig.adapters``, plus an
-``inject_inbound_*`` helper for scenarios to simulate inbound traffic.
+Each submodule exposes an ``*Adapter`` class with a ``make_tools()``
+classmethod that returns a flat ``list[Tool]`` suitable for splicing into
+``AgentConfig.tools``, plus an ``inject_inbound_*`` helper for scenarios
+to simulate inbound traffic.
 
 Migrations:
     Before using any fake adapter, scenarios must ensure the extra tables

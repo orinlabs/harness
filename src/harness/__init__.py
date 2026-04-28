@@ -1,12 +1,12 @@
-from harness.config import AdapterConfig, AgentConfig, ExternalToolSpec
+from harness.config import AgentConfig, ExternalToolSpec, ToolAuth
 from harness.context import RunContext
 
 __all__ = [
-    "AdapterConfig",
     "AgentConfig",
     "ExternalToolSpec",
     "Harness",
     "RunContext",
+    "ToolAuth",
 ]
 
 __version__ = "0.1.0"

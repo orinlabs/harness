@@ -20,7 +20,8 @@ from datetime import UTC, datetime
 from harness.config import AgentConfig
 from harness.constants import MAX_TURNS
 from harness.context import RunContext, set_agent_id
-from harness.core import llm, storage
+from harness.core import llm, storage, tracer
+from harness.core.runtime import AgentRuntime
 from harness.core.tracer import (
     SpanType,
     emit_completed_span,
@@ -28,6 +29,7 @@ from harness.core.tracer import (
     text_span,
     tool_span,
 )
+from harness.core.tracing import TraceSink
 from harness.memory import MemoryService
 from harness.tools import Tool, build_tool_map
 
@@ -39,10 +41,31 @@ def _now_iso() -> str:
 
 
 class Harness:
-    def __init__(self, config: AgentConfig, run_id: str):
+    def __init__(
+        self,
+        config: AgentConfig,
+        run_id: str,
+        *,
+        trace_sink: TraceSink | None = None,
+        runtime: AgentRuntime | None = None,
+    ):
         self.config = config
-        self.ctx = RunContext(agent_id=config.id, run_id=run_id)
-        self.tool_map: dict[str, Tool] = build_tool_map(config.adapters)
+        # Pick defaults from the environment when the caller didn't pass
+        # explicit dependencies. autoconfigure() returns Bedrock-backed
+        # implementations when BEDROCK_URL + BEDROCK_TOKEN are set, else
+        # NullTraceSink + LocalAgentRuntime (standalone mode).
+        if trace_sink is None or runtime is None:
+            from harness.cloud.autoconfig import autoconfigure
+
+            auto_sink, auto_runtime = autoconfigure()
+            trace_sink = trace_sink or auto_sink
+            runtime = runtime or auto_runtime
+        self._trace_sink = trace_sink
+        self._runtime = runtime
+        tracer.set_trace_sink(trace_sink)
+
+        self.ctx = RunContext(agent_id=config.id, run_id=run_id, runtime=runtime)
+        self.tool_map: dict[str, Tool] = build_tool_map(config.tools)
         # Expose the tool map on the per-run context so built-in tools can
         # invoke siblings (e.g. sleep -> list_notifications pre-flight check).
         self.ctx.tool_map = self.tool_map
@@ -105,7 +128,7 @@ class Harness:
                             if not self._step(turn_span):
                                 return
                 except BaseException as exc:  # noqa: BLE001
-                    # SystemExit (SIGTERM from bedrock's /stop or a
+                    # SystemExit (SIGTERM from a supervisor's /stop or a
                     # supersede), KeyboardInterrupt, and anything else
                     # that isn't Exception. Flag the run so the finally
                     # block can skip the end-of-run summarization (we
@@ -122,26 +145,41 @@ class Harness:
                     )
                     raise
                 finally:
-                    run_span.set_metadata(
-                        usage={
-                            **self._run_usage,
-                            "cost_usd": self._run_usage["total_cost_usd"],
-                            "cache_hit_rate": (
-                                self._run_usage["cached_tokens"]
-                                / self._run_usage["input_tokens"]
-                                if self._run_usage["input_tokens"] > 0
-                                else 0.0
-                            ),
-                            "model_breakdown": self._model_breakdown,
-                        }
+                    final_usage = {
+                        **self._run_usage,
+                        "cost_usd": self._run_usage["total_cost_usd"],
+                        "cache_hit_rate": (
+                            self._run_usage["cached_tokens"]
+                            / self._run_usage["input_tokens"]
+                            if self._run_usage["input_tokens"] > 0
+                            else 0.0
+                        ),
+                        "model_breakdown": self._model_breakdown,
+                    }
+                    run_span.set_metadata(usage=final_usage)
+                    # Mirror the usage totals to the logger so standalone
+                    # runs (NullTraceSink) still surface cost -- tracing is
+                    # the only other path and it's a no-op without a backend.
+                    logger.info(
+                        "run_agent usage: agent=%s run=%s calls=%d "
+                        "tokens=in/%d+out/%d+cache/%d+reason/%d cost=$%.6f models=%s",
+                        self.config.id,
+                        self.ctx.run_id,
+                        int(final_usage["llm_calls"]),
+                        int(final_usage["input_tokens"]),
+                        int(final_usage["output_tokens"]),
+                        int(final_usage["cached_tokens"]),
+                        int(final_usage["reasoning_tokens"]),
+                        float(final_usage["total_cost_usd"]),
+                        list(self._model_breakdown.keys()),
                     )
         finally:
             # v2 defers all summarization to end-of-run so the summary
             # describes completed actions, not in-flight state. Skipped
             # on the interrupted path -- SIGTERM should propagate
             # without being stretched by an LLM call, and the
-            # bedrock-side wake_agents drain is the backstop for state
-            # the agent left pending. Wrapped in try so a summarization
+            # platform-side wake-drain is the backstop for state the
+            # agent left pending. Wrapped in try so a summarization
             # failure can never block the storage flush below.
             if self.memory.summarizer_v2 and not interrupted:
                 try:

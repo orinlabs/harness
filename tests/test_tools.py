@@ -5,22 +5,42 @@ import time
 
 import pytest
 
-from harness.config import AdapterConfig, ExternalToolSpec
+from harness.config import ExternalToolSpec, ToolAuth
 from harness.context import RunContext
 from tests.fake_platform import FakeToolError
 
 
+def _bedrock_spec(**overrides) -> ExternalToolSpec:
+    """Helper for tests that need a Bedrock-proxied spec (bearer auth + trace fwd).
+
+    This is the shape ``BedrockConfigClient.fetch_harness_config`` produces; it's
+    what Bedrock's adapter runtime expects on the wire. Standalone tools use
+    ``ExternalToolSpec(...)`` directly with defaults.
+    """
+    base = dict(
+        auth=ToolAuth(kind="bearer_env", token_env="BEDROCK_TOKEN"),
+        forward_trace_context=True,
+    )
+    base.update(overrides)
+    return ExternalToolSpec(**base)
+
+
 def _ctx(agent_id: str = "agent-1", run_id: str = "run-1") -> RunContext:
-    return RunContext(agent_id=agent_id, run_id=run_id)
+    """RunContext wired with a Bedrock runtime (every test in this file uses
+    ``fake_platform``, which points BEDROCK_URL at its own server)."""
+    from harness.cloud.bedrock import BedrockAgentRuntime
+
+    return RunContext(agent_id=agent_id, run_id=run_id, runtime=BedrockAgentRuntime())
 
 
-def test_external_tool_posts_and_returns_text(fake_platform):
+def test_external_tool_bedrock_style_posts_and_returns_text(fake_platform):
+    """Bedrock-shaped spec: bearer auth from env + trace_id/parent_span_id in body."""
     from harness.tools.external import ExternalTool
 
     fake_platform.register_tool(
         "echo", lambda args, env: {"text": str(args["x"]).upper()}
     )
-    spec = ExternalToolSpec(
+    spec = _bedrock_spec(
         name="echo",
         description="upper-case echo",
         parameters={"type": "object", "properties": {"x": {"type": "string"}}},
@@ -46,6 +66,58 @@ def test_external_tool_posts_and_returns_text(fake_platform):
     }
     assert req.headers.get("Authorization") == "Bearer test-token"
     assert req.headers.get("Content-Type") == "application/json"
+
+
+def test_external_tool_standalone_default_omits_auth_and_trace_fields(fake_platform):
+    """Standalone spec (no auth, no trace fwd): body has only the core fields, no auth header."""
+    from harness.tools.external import ExternalTool
+
+    fake_platform.register_tool(
+        "bare", lambda args, env: {"text": f"hello {args.get('name', '?')}"}
+    )
+    spec = ExternalToolSpec(
+        name="bare",
+        description="no-auth tool",
+        parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+        url=f"{fake_platform.url}/fake_tools/bare",
+    )
+    tool = ExternalTool(spec)
+
+    result = tool.call({"name": "alice"}, _ctx())
+    assert result.text == "hello alice"
+
+    posts = [
+        r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/bare")
+    ]
+    req = posts[0]
+    assert req.body == {
+        "args": {"name": "alice"},
+        "agent_id": "agent-1",
+        "run_id": "run-1",
+    }
+    # No auth configured -> no Authorization header sent.
+    assert "Authorization" not in {k.title() for k in req.headers.keys()}
+
+
+def test_external_tool_custom_headers_auth(fake_platform):
+    """ToolAuth(kind='headers') lets configs ship custom auth shapes."""
+    from harness.tools.external import ExternalTool
+
+    fake_platform.register_tool("api", lambda args, env: {"text": "ok"})
+    spec = ExternalToolSpec(
+        name="api",
+        description="custom-auth tool",
+        parameters={"type": "object", "properties": {}},
+        url=f"{fake_platform.url}/fake_tools/api",
+        auth=ToolAuth(kind="headers", headers={"X-API-Key": "secret-123"}),
+    )
+    ExternalTool(spec).call({}, _ctx())
+
+    req = next(
+        r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/api")
+    )
+    # Preserve the caller's header case through httpx -> BaseHTTPRequestHandler.
+    assert req.headers.get("X-API-Key") == "secret-123"
 
 
 def test_external_tool_timeout(fake_platform):
@@ -241,7 +313,7 @@ def test_sleep_tool_no_list_notifications_tool_available(fake_platform):
     assert len(fake_platform.sleep_requests) == 1
 
 
-def test_build_tool_map_merges_builtins_and_adapters(fake_platform):
+def test_build_tool_map_merges_builtins_and_tools(fake_platform):
     from harness.tools import build_tool_map
 
     spec = ExternalToolSpec(
@@ -250,9 +322,8 @@ def test_build_tool_map_merges_builtins_and_adapters(fake_platform):
         parameters={"type": "object", "properties": {}},
         url=f"{fake_platform.url}/fake_tools/search",
     )
-    adapter = AdapterConfig(name="a1", description="", tools=[spec])
 
-    tool_map = build_tool_map([adapter])
+    tool_map = build_tool_map([spec])
     assert set(tool_map.keys()) == {"sleep", "search"}
 
 
@@ -265,7 +336,6 @@ def test_build_tool_map_rejects_collision(fake_platform):
         parameters={"type": "object", "properties": {}},
         url=f"{fake_platform.url}/fake_tools/sleep",
     )
-    adapter = AdapterConfig(name="a1", description="", tools=[bad])
 
     with pytest.raises(ValueError, match="collision"):
-        build_tool_map([adapter])
+        build_tool_map([bad])

@@ -1,16 +1,21 @@
 """External tool wrapper.
 
-`ExternalTool(spec)` satisfies the `Tool` protocol by POSTing args to a URL the
-platform registered in `AgentConfig`. The harness never sees the tool's actual
-implementation — auth, proxying, and dispatching all live on the platform side.
+``ExternalTool(spec)`` satisfies the ``Tool`` protocol by POSTing args to
+``spec.url``. The harness never sees the tool's implementation.
 
-Wire contract:
+Wire contract (standalone):
   POST {spec.url}
-  Headers: Authorization: Bearer $BEDROCK_TOKEN, Content-Type: application/json
   Body:    {"args": {...}, "agent_id": "...", "run_id": "..."}
   200:     {"text": str, "images": [base64, ...] | null}
-  non-2xx: surfaced verbatim to the model as ToolResult.text (JSON body -> JSON
-           string; non-JSON -> "<status> <reason>: <text>")
+
+When ``spec.auth`` is configured, an ``Authorization`` header is added.
+When ``spec.forward_trace_context=True`` the body also carries
+``trace_id`` / ``parent_span_id`` so a backend that re-emits its own span
+(e.g. Bedrock's adapter runtime) can nest under our active harness trace.
+
+Failure modes:
+  non-2xx: surfaced verbatim to the model as ToolResult.text (JSON body ->
+           JSON string; non-JSON -> "<status> <reason>: <text>")
   timeout: ToolResult.text = "timeout after Ns"
 """
 from __future__ import annotations
@@ -22,7 +27,7 @@ from typing import Any
 
 import httpx
 
-from harness.config import ExternalToolSpec
+from harness.config import ExternalToolSpec, ToolAuth
 from harness.context import RunContext
 from harness.tools.base import ToolResult, ToolSchema
 
@@ -38,9 +43,16 @@ def _http() -> httpx.Client:
     return _client
 
 
-def _auth_header() -> dict[str, str]:
-    token = os.environ.get("BEDROCK_TOKEN", "")
-    return {"Authorization": f"Bearer {token}"} if token else {}
+def _headers_for(auth: ToolAuth) -> dict[str, str]:
+    """Translate a ``ToolAuth`` into HTTP headers."""
+    if auth.kind == "bearer_env":
+        token = os.environ.get(auth.token_env or "", "")
+        return {"Authorization": f"Bearer {token}"} if token else {}
+    if auth.kind == "bearer_literal":
+        return {"Authorization": f"Bearer {auth.token}"} if auth.token else {}
+    if auth.kind == "headers":
+        return dict(auth.headers)
+    return {}
 
 
 class ExternalTool:
@@ -64,19 +76,24 @@ class ExternalTool:
         return ToolSchema(self._spec.name, self._spec.description, self._spec.parameters)
 
     def call(self, args: dict, ctx: RunContext) -> ToolResult:
-        # Include tracing context so the adapter runtime can parent its own
-        # tool span under our active harness tree rather than creating a
-        # sibling trace at the root.
-        from harness.core.tracer import get_current_span_id, get_current_trace_id
-
-        body = {
+        body: dict[str, Any] = {
             "args": args,
             "agent_id": ctx.agent_id,
             "run_id": ctx.run_id,
-            "trace_id": get_current_trace_id(),
-            "parent_span_id": get_current_span_id(),
         }
-        headers = {"Content-Type": "application/json", **_auth_header()}
+        if self._spec.forward_trace_context:
+            # Only pulled when the backend actually consumes these (Bedrock's
+            # adapter runtime does, standalone HTTP tools don't). Deferred
+            # import avoids dragging tracer into tools/ imports.
+            from harness.core.tracer import (
+                get_current_span_id,
+                get_current_trace_id,
+            )
+
+            body["trace_id"] = get_current_trace_id()
+            body["parent_span_id"] = get_current_span_id()
+
+        headers = {"Content-Type": "application/json", **_headers_for(self._spec.auth)}
 
         try:
             resp = _http().post(
