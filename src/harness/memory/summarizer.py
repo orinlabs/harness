@@ -16,16 +16,11 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from harness.core import llm, storage
-from harness.core.tracer import SpanType, emit_completed_span
+from harness.core.tracer import llm_span, text_span
 from harness.memory.bucketing import hour_start, last_completed_1m_end
 from harness.memory.marks import force_timezone, week_start_sunday
 from harness.memory.types import PERIOD_META, PeriodType
 
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone as _tz
-
-    return datetime.now(tz=_tz.utc).isoformat()
 
 logger = logging.getLogger(__name__)
 
@@ -95,29 +90,57 @@ class SummaryUpdater:
             current_time = datetime.now().astimezone()
         self.total_usage = SummarizerUsage()
 
-        started_at = _now_iso()
         logger.info(
             "summarizer.update_all: starting model=%s v2=%s",
             self.model,
             self.v2,
         )
-        if self.v2:
-            # v2 skips the 1m and 5m tiers entirely: raw messages fill
-            # that window. Hourly summaries are built directly from
-            # messages by ``_update_hourly_summaries`` when v2 is on
-            # (see the v2 branch inside that method for the
-            # raw-messages-source path). The remaining tiers roll up
-            # off completed hourly summaries as usual.
-            updated_1m: list = []
-            updated_5m: list = []
-        else:
-            updated_1m = self._update_one_minute_summaries(current_time)
-            updated_5m = self._update_five_minute_summaries(current_time)
-        updated_hour = self._update_hourly_summaries(current_time)
-        updated_day = self._update_daily_summaries(current_time)
-        updated_week = self._update_weekly_summaries(current_time)
-        updated_month = self._update_monthly_summaries(current_time)
-        ended_at = _now_iso()
+        # Wrap the whole tier cascade in a single `memory_summarization`
+        # text span. Per-tier work opens child `summarize_<tier>` spans
+        # (only when there's pending work) and each LLM call opens an
+        # `llm` span underneath. Nests under whatever span is active
+        # when `update_all` is called (usually `turn_N`, or `run_agent`
+        # for the v2 end-of-run path).
+        with text_span(
+            "memory_summarization",
+            metadata={"model": self.model, "v2": self.v2},
+        ) as parent_span:
+            if self.v2:
+                # v2 skips the 1m and 5m tiers entirely: raw messages
+                # fill that window. Hourly summaries are built directly
+                # from messages by ``_update_hourly_summaries`` when v2
+                # is on (see the v2 branch inside that method for the
+                # raw-messages-source path). The remaining tiers roll
+                # up off completed hourly summaries as usual.
+                updated_1m: list = []
+                updated_5m: list = []
+            else:
+                updated_1m = self._update_one_minute_summaries(current_time)
+                updated_5m = self._update_five_minute_summaries(current_time)
+            updated_hour = self._update_hourly_summaries(current_time)
+            updated_day = self._update_daily_summaries(current_time)
+            updated_week = self._update_weekly_summaries(current_time)
+            updated_month = self._update_monthly_summaries(current_time)
+
+            summaries_created = {
+                "one_minute": len(updated_1m),
+                "five_minute": len(updated_5m),
+                "hourly": len(updated_hour),
+                "daily": len(updated_day),
+                "weekly": len(updated_week),
+                "monthly": len(updated_month),
+            }
+            parent_span.set_metadata(
+                summaries_created=summaries_created,
+                usage={
+                    "input_tokens": self.total_usage.input_tokens,
+                    "output_tokens": self.total_usage.output_tokens,
+                    "total_cost_usd": self.total_usage.total_cost,
+                    "llm_calls": self.total_usage.llm_calls,
+                    "model": self.model,
+                },
+            )
+
         logger.info(
             "summarizer.update_all: done created 1m=%d 5m=%d hour=%d day=%d "
             "week=%d month=%d llm_calls=%d in=%d out=%d cost=$%.5f model=%s",
@@ -133,37 +156,6 @@ class SummaryUpdater:
             self.total_usage.total_cost,
             self.model,
         )
-
-        summaries_created = {
-            "one_minute": len(updated_1m),
-            "five_minute": len(updated_5m),
-            "hourly": len(updated_hour),
-            "daily": len(updated_day),
-            "weekly": len(updated_week),
-            "monthly": len(updated_month),
-        }
-        total_created = sum(summaries_created.values())
-
-        # Only emit a trace span when real work happened — skips the noisy
-        # empty memory_summarization spans that otherwise appear on every
-        # turn before any completed bucket exists.
-        if total_created > 0:
-            emit_completed_span(
-                "memory_summarization",
-                span_type=SpanType.TEXT,
-                started_at=started_at,
-                ended_at=ended_at,
-                metadata={
-                    "summaries_created": summaries_created,
-                    "usage": {
-                        "input_tokens": self.total_usage.input_tokens,
-                        "output_tokens": self.total_usage.output_tokens,
-                        "total_cost_usd": self.total_usage.total_cost,
-                        "llm_calls": self.total_usage.llm_calls,
-                        "model": self.model,
-                    },
-                },
-            )
 
         return UpdateAllResult(
             one_minute_created=len(updated_1m),
@@ -652,15 +644,37 @@ class SummaryUpdater:
             f"{content}\n\n"
         )
 
-        try:
-            resp = llm.complete(
-                model=self.model,
-                system="",
-                messages=[{"role": "user", "content": prompt}],
+        # Wrap every summarizer LLM call in an `llm` span so the run's
+        # trace tree shows which tier fired, the input prompt, the summary
+        # output, and the per-call cost -- same treatment `_step` gives
+        # the main agent turn's `openrouter_api_call` span. Nests under
+        # whatever parent span is active (`summarize_<tier>` below, which
+        # nests under `memory_summarization`, which nests under `turn_N`
+        # or `run_agent`).
+        with llm_span(
+            "summarizer_call",
+            metadata={
+                "model": self.model,
+                "provider": "openrouter",
+                "period_type": period_type.value,
+            },
+        ) as s:
+            s.input(prompt[:20000])
+            try:
+                resp = llm.complete(
+                    model=self.model,
+                    system="",
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            except Exception as e:
+                logger.exception("Summarizer LLM call failed: %s", e)
+                s.set_metadata(error=f"{type(e).__name__}: {e}")
+                return None
+            s.output(resp.text[:20000] if resp.text else "")
+            s.set_metadata(
+                llm_cost=resp.usage.to_llm_cost_dict(),
+                finish_reason=resp.finish_reason,
             )
-        except Exception as e:
-            logger.exception("Summarizer LLM call failed: %s", e)
-            return None
 
         self.total_usage.input_tokens += resp.usage.prompt_tokens
         self.total_usage.output_tokens += resp.usage.completion_tokens
