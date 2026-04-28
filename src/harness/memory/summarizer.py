@@ -103,6 +103,17 @@ class SummaryUpdater:
             self.model,
             self.v2,
         )
+        existing_counts = self._count_existing_summaries()
+        logger.info(
+            "summarizer.update_all: sandbox already has messages=%d "
+            "five_minute=%d hourly=%d daily=%d weekly=%d monthly=%d",
+            existing_counts["messages"],
+            existing_counts["five_minute"],
+            existing_counts["hourly"],
+            existing_counts["daily"],
+            existing_counts["weekly"],
+            existing_counts["monthly"],
+        )
         # Wrap the whole tier cascade in a single `memory_summarization`
         # text span. Per-tier work opens child `summarize_<tier>` spans
         # (only when there's pending work) and each LLM call opens an
@@ -111,7 +122,11 @@ class SummaryUpdater:
         # for the v2 end-of-run path).
         with text_span(
             "memory_summarization",
-            metadata={"model": self.model, "v2": self.v2},
+            metadata={
+                "model": self.model,
+                "v2": self.v2,
+                "existing_counts": existing_counts,
+            },
         ) as parent_span:
             if self.v2:
                 # v2 skips the 5m tier entirely: raw messages fill
@@ -629,3 +644,30 @@ class SummaryUpdater:
             f"INSERT OR REPLACE INTO {table} ({columns_sql}) VALUES ({placeholders})",
             (str(uuid.uuid4()), *key_values, summary_text, message_count, _now_ns()),
         )
+
+    @staticmethod
+    def _count_existing_summaries() -> dict[str, int]:
+        """Count messages + per-tier summaries already persisted in the sandbox.
+
+        Used to log how much history we inherited from previous runs at
+        the start of `update_all`, so a run's log line makes it obvious
+        whether we're starting fresh or building on months of prior
+        rollups. Returned as a plain dict so it can also ride on the
+        `memory_summarization` span's metadata.
+        """
+        assert storage.db is not None
+        db = storage.db
+
+        def _count(table: str) -> int:
+            return db.execute(
+                f"SELECT COUNT(*) AS c FROM {table}"
+            ).fetchone()["c"]
+
+        return {
+            "messages": _count("messages"),
+            "five_minute": _count("five_minute_summaries"),
+            "hourly": _count("hourly_summaries"),
+            "daily": _count("daily_summaries"),
+            "weekly": _count("weekly_summaries"),
+            "monthly": _count("monthly_summaries"),
+        }
