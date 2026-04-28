@@ -46,7 +46,7 @@ class CreateContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         name = args.get("name")
         if not name:
             return ToolResult(text="Error: name is required.")
@@ -90,7 +90,7 @@ class GetContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         cid = args.get("contact_id")
         if not cid:
             return ToolResult(text="Error: contact_id is required.")
@@ -136,7 +136,7 @@ class ListContactsTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         db = require_db()
         limit = min(int(args.get("limit") or 50), 100)
         search = args.get("search") or ""
@@ -196,7 +196,7 @@ class UpdateContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         cid = args.get("contact_id")
         if not cid:
             return ToolResult(text="Error: contact_id is required.")
@@ -243,7 +243,7 @@ class DeleteContactTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         cid = args.get("contact_id")
         if not cid:
             return ToolResult(text="Error: contact_id is required.")

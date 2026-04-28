@@ -219,7 +219,7 @@ class ListThreadsTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         db = require_db()
         limit = min(int(args.get("limit") or 10), 100)
         rows = db.execute(
@@ -283,7 +283,7 @@ class GetThreadTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         thread_id = args.get("thread_id")
         if not thread_id:
             return ToolResult(text="Error: thread_id is required.")
@@ -364,7 +364,7 @@ class SendEmailTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         to = _split_list(args.get("to"))
         cc = _split_list(args.get("cc"))
         subject = args.get("subject") or ""
@@ -415,7 +415,7 @@ class ReplyToEmailTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         message_id = args.get("message_id")
         to = _split_list(args.get("to"))
         body = args.get("body") or args.get("text") or ""
@@ -432,7 +432,11 @@ class ReplyToEmailTool(_ToolBase):
 
         thread_id = parent["thread_id"]
         parent_subject = parent["subject"] or ""
-        reply_subject = parent_subject if parent_subject.lower().startswith("re:") else f"Re: {parent_subject}"
+        reply_subject = (
+            parent_subject
+            if parent_subject.lower().startswith("re:")
+            else f"Re: {parent_subject}"
+        )
         _record_outbound_message(
             thread_id=thread_id,
             subject=reply_subject,
@@ -474,7 +478,7 @@ class SearchEmailsTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         db = require_db()
         clauses: list[str] = []
         params: list[Any] = []
@@ -539,7 +543,7 @@ class GetInboxInfoTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         return ToolResult(
             text=f"Your email address: {AGENT_EMAIL_ADDRESS}\nDisplay name: Eval Agent"
         )

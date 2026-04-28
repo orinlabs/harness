@@ -115,7 +115,7 @@ class _ToolBase:
         return ToolSchema(self.name, self.description, self.parameters)
 
 
-def _agent_id(ctx: "RunContext | None") -> str:
+def _agent_id(ctx: RunContext | None) -> str:
     """Resolve the current agent id.
 
     ``ctx`` is optional (tests pass ``None``). Falls back to
@@ -151,7 +151,7 @@ class ComputerExecTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         command = (args.get("command") or "").strip()
         if not command:
             return ToolResult(text="Error: No command provided.")
@@ -202,7 +202,7 @@ class ComputerReadFileTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         path = (args.get("path") or "").strip()
         if not path:
             return ToolResult(text="Error: No path provided.")
@@ -236,7 +236,7 @@ class ComputerWriteFileTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         path = (args.get("path") or "").strip()
         if not path:
             return ToolResult(text="Error: No path provided.")
@@ -270,7 +270,7 @@ class ComputerListFilesTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         path = args.get("path") or "/"
         try:
             target = _resolve(_agent_id(ctx), path)

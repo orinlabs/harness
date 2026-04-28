@@ -172,7 +172,7 @@ def migrate_agent(
             raise
 
     if skip_empty and msg_count == 0:
-        print(f"    empty Turso DB (0 messages) - skipping")
+        print("    empty Turso DB (0 messages) - skipping")
         try:
             turso_conn.close()
         except Exception:

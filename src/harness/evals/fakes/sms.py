@@ -70,7 +70,7 @@ class ListConversationsTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         db = require_db()
         limit = min(int(args.get("limit") or 20), 100)
         rows = db.execute(
@@ -123,7 +123,7 @@ class GetConversationTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         phone = args.get("phone")
         if not phone:
             return ToolResult(text="Error: phone is required.")
@@ -169,7 +169,7 @@ class SendSmsTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         phone = args.get("phone") or args.get("to")
         body = args.get("body") or ""
         if not phone or not body:
@@ -211,7 +211,7 @@ class OpenAttachmentTool(_ToolBase):
         "additionalProperties": False,
     }
 
-    def call(self, args: dict, ctx: "RunContext | None") -> ToolResult:
+    def call(self, args: dict, ctx: RunContext | None) -> ToolResult:
         return ToolResult(text="No message with attachments found.")
 
 

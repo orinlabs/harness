@@ -20,7 +20,7 @@ class UserAgent:
 
     def __init__(
         self,
-        user_def: "UserDefinition",
+        user_def: UserDefinition,
         eval_mode: str = "deterministic",
     ):
         self.profile = user_def

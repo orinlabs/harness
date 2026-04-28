@@ -12,7 +12,7 @@ import json
 import sys
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -57,7 +57,7 @@ def _insert_message(ts: datetime, role: str, content: str) -> None:
     from harness.core import storage
 
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
+        ts = ts.replace(tzinfo=UTC)
     ts_ns = int(ts.timestamp() * 1_000_000_000)
     msg = {"role": role, "content": content}
     storage.db.execute(
@@ -126,7 +126,7 @@ def test_tiered_summaries_build_across_all_six_layers(env):
     from harness.memory import MemoryService
 
     storage.load("agent-lifecycle")
-    now = datetime.now(tz=timezone.utc).replace(second=0, microsecond=0)
+    now = datetime.now(tz=UTC).replace(second=0, microsecond=0)
 
     _seed_history(now)
 
@@ -191,7 +191,7 @@ def test_agent_recalls_fact_from_summarized_memory(env):
     from harness.memory import MemoryService
 
     storage.load("agent-lifecycle-2")
-    now = datetime.now(tz=timezone.utc).replace(second=0, microsecond=0)
+    now = datetime.now(tz=UTC).replace(second=0, microsecond=0)
 
     _seed_history(now)
     MemoryService(agent_id="agent-lifecycle-2", model=CHEAP_MODEL).update_summaries(
