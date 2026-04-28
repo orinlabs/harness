@@ -1,5 +1,6 @@
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 _agent_id: ContextVar[str | None] = ContextVar("harness_agent_id", default=None)
 
@@ -23,3 +24,8 @@ class RunContext:
     run_id: str
     turn: int = 0
     sleep_requested: bool = False
+    # Populated by Harness after building the tool map. Lets built-in tools
+    # (e.g. SleepTool) look up and invoke sibling tools -- e.g. sleep calls
+    # list_notifications to refuse sleep while attention items are pending.
+    # Typed as Any to avoid a context <-> tools import cycle.
+    tool_map: dict[str, Any] = field(default_factory=dict)

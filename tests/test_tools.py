@@ -127,6 +127,120 @@ def test_sleep_tool_posts_and_flags_ctx(fake_platform):
     assert sr["reason"] == "done"
 
 
+def test_sleep_tool_allows_sleep_when_no_notifications(fake_platform):
+    """list_notifications returning its empty-inbox string must NOT block sleep."""
+    from harness.tools.external import ExternalTool
+    from harness.tools.sleep import SleepTool
+
+    fake_platform.register_tool(
+        "list_notifications",
+        lambda args, env: {"text": "You have no pending notifications."},
+    )
+    list_tool = ExternalTool(
+        ExternalToolSpec(
+            name="list_notifications",
+            description="list",
+            parameters={"type": "object", "properties": {}},
+            url=f"{fake_platform.url}/fake_tools/list_notifications",
+        )
+    )
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.tool_map = {"list_notifications": list_tool}
+    tool = SleepTool()
+
+    result = tool.call({"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx)
+
+    assert "2099-01-01T00:00:00Z" in result.text
+    assert ctx.sleep_requested is True
+    assert len(fake_platform.sleep_requests) == 1
+    # The pre-check must have hit list_notifications exactly once.
+    calls = [r for r in fake_platform.requests if r.path.endswith("/list_notifications")]
+    assert len(calls) == 1
+
+
+def test_sleep_tool_blocks_when_notifications_pending(fake_platform):
+    """Any non-empty list_notifications output must refuse sleep and skip runtime_api.sleep."""
+    from harness.tools.external import ExternalTool
+    from harness.tools.sleep import SleepTool
+
+    fake_response = (
+        "You have 1 notification(s):\n\n"
+        "1. Mike sent a photo [HIGH PRIORITY]\n"
+        "   Notification ID: abc-123\n"
+        "   Source: sms\n"
+        "   Details: bring it in by 5pm\n"
+    )
+    fake_platform.register_tool(
+        "list_notifications", lambda args, env: {"text": fake_response}
+    )
+    list_tool = ExternalTool(
+        ExternalToolSpec(
+            name="list_notifications",
+            description="list",
+            parameters={"type": "object", "properties": {}},
+            url=f"{fake_platform.url}/fake_tools/list_notifications",
+        )
+    )
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.tool_map = {"list_notifications": list_tool}
+    tool = SleepTool()
+
+    result = tool.call({"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx)
+
+    # Agent got refused...
+    assert "Cannot sleep" in result.text
+    assert "Mike sent a photo" in result.text
+    # ...and the runtime_api.sleep POST was NOT issued.
+    assert ctx.sleep_requested is False
+    assert fake_platform.sleep_requests == []
+
+
+def test_sleep_tool_allows_sleep_when_list_notifications_errors(fake_platform):
+    """Transient list_notifications errors must not wedge the agent awake."""
+    from harness.tools.external import ExternalTool
+    from harness.tools.sleep import SleepTool
+
+    fake_platform.register_tool(
+        "list_notifications",
+        lambda args, env: {"text": "Error listing notifications: db timeout"},
+    )
+    list_tool = ExternalTool(
+        ExternalToolSpec(
+            name="list_notifications",
+            description="list",
+            parameters={"type": "object", "properties": {}},
+            url=f"{fake_platform.url}/fake_tools/list_notifications",
+        )
+    )
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.tool_map = {"list_notifications": list_tool}
+    tool = SleepTool()
+
+    result = tool.call({"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx)
+
+    assert "2099-01-01T00:00:00Z" in result.text
+    assert ctx.sleep_requested is True
+    assert len(fake_platform.sleep_requests) == 1
+
+
+def test_sleep_tool_no_list_notifications_tool_available(fake_platform):
+    """When the adapter set doesn't provide list_notifications, sleep proceeds normally."""
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.tool_map = {}  # no list_notifications registered
+    tool = SleepTool()
+
+    result = tool.call({"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx)
+
+    assert "2099-01-01T00:00:00Z" in result.text
+    assert ctx.sleep_requested is True
+    assert len(fake_platform.sleep_requests) == 1
+
+
 def test_build_tool_map_merges_builtins_and_adapters(fake_platform):
     from harness.tools import build_tool_map
 

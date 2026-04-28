@@ -43,6 +43,9 @@ class Harness:
         self.config = config
         self.ctx = RunContext(agent_id=config.id, run_id=run_id)
         self.tool_map: dict[str, Tool] = build_tool_map(config.adapters)
+        # Expose the tool map on the per-run context so built-in tools can
+        # invoke siblings (e.g. sleep -> list_notifications pre-flight check).
+        self.ctx.tool_map = self.tool_map
         logger.info(
             "Harness init: agent=%s run=%s tool_map has %d tool(s): %s",
             config.id,
