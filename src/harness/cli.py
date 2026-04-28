@@ -31,7 +31,7 @@ Optional env (override defaults):
     HARNESS_DAYTONA_AUTO_STOP_MINUTES passed as `auto_stop_interval`
     MODEL                             override the agent's configured model
     REASONING_EFFORT                  override reasoning_effort (low|medium|high)
-    LOG_LEVEL                         default: DEBUG
+    LOG_LEVEL                         default: INFO
 """
 from __future__ import annotations
 
@@ -421,7 +421,7 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--bedrock-token", default=None,
                    help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.")
     p.add_argument("--log-level",
-                   default=os.environ.get("LOG_LEVEL", "DEBUG"),
+                   default=os.environ.get("LOG_LEVEL", "INFO"),
                    help="Log level: DEBUG|INFO|WARNING|ERROR.")
     p.add_argument("--model", default=None, help="Override the model.")
     p.add_argument("--reasoning-effort", default=None,
@@ -462,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
              "next `harness agent` resurrect it.",
     )
     delete_p.add_argument("--log-level",
-                          default=os.environ.get("LOG_LEVEL", "DEBUG"),
+                          default=os.environ.get("LOG_LEVEL", "INFO"),
                           help="Log level: DEBUG|INFO|WARNING|ERROR.")
 
     reset_p = subparsers.add_parser(
@@ -471,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     reset_p.add_argument("agent_id", help="Agent UUID to reset memory for.")
     reset_p.add_argument("--log-level",
-                         default=os.environ.get("LOG_LEVEL", "DEBUG"),
+                         default=os.environ.get("LOG_LEVEL", "INFO"),
                          help="Log level: DEBUG|INFO|WARNING|ERROR.")
 
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
