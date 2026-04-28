@@ -4,8 +4,8 @@ Harness is the local runner for Bedrock agents.
 
 It fetches an agent config from Bedrock, runs the agent loop in this process,
 calls models through OpenRouter, calls external tools through Bedrock adapter
-URLs, records traces back to Bedrock, and stores memory in libSQL/Turso for the
-CLI workflows.
+URLs, records traces back to Bedrock, and stores memory in a per-agent Daytona
+sandbox (one sandbox per agent, holding that agent's sqlite DB).
 
 ## Setup
 
@@ -20,19 +20,23 @@ The CLI loads `.env` from the repo root. A typical `.env` looks like this:
 ```bash
 OPENROUTER_API_KEY=...
 BEDROCK_TOKEN=...
-HARNESS_TURSO_PLATFORM_TOKEN=...
-HARNESS_DATABASE_TOKEN=...
+DAYTONA_API_KEY=dtn_...
 
 # Usually optional
-HARNESS_TURSO_ORG=<your-turso-org>
-HARNESS_TURSO_GROUP=default
 BEDROCK_URL=http://127.0.0.1:8000
+DAYTONA_API_URL=https://app.daytona.io/api
+HARNESS_DAYTONA_AUTO_STOP_MINUTES=15  # default is 15
 ```
 
 Notes:
 
 - `BEDROCK_TOKEN` is a Bedrock product API key.
 - `BEDROCK_URL` defaults to `http://127.0.0.1:8000`.
+- `DAYTONA_API_KEY` is required for CLI workflows. Harness provisions one
+  sandbox per agent (labeled `harness.agent_id=<id>`) and keeps the agent's
+  sqlite DB inside it. Without this env var, harness falls back to a local
+  sqlite file at `<HARNESS_STORAGE_ROOT>/<agent_id>.sqlite` — used by tests
+  and the standalone demo.
 - Missing API keys fail loudly. Tests and evals do not silently skip live calls.
 
 ## Use With Local Bedrock
@@ -139,7 +143,8 @@ How evals work:
 - The eval simulation and fake adapters run locally in this process.
 - The eval still creates a real eval agent in Bedrock.
 - Model calls still go through OpenRouter.
-- CLI storage uses Turso/libSQL unless you are using the standalone demo path.
+- CLI storage uses a per-agent Daytona sandbox unless `DAYTONA_API_KEY` is
+  unset (in which case harness falls back to local sqlite).
 - Results print to stdout, and the final line includes the Bedrock agent URL.
 
 Available scenarios:
@@ -179,14 +184,14 @@ For targeted checks:
 ```bash
 uv run pytest tests/test_harness_e2e.py
 uv run pytest tests/memory -o "addopts="
-RUN_LIVE_TURSO=1 uv run pytest tests/integration -o "addopts="
 ```
 
 Testing expectations:
 
-- Default tests exclude `tests/memory` and `tests/integration`.
+- Default tests exclude `tests/memory`.
 - LLM-related tests use real OpenRouter calls.
-- Live Turso tests require `RUN_LIVE_TURSO=1`.
+- Tests never talk to a real Daytona sandbox; `tests/conftest.py` strips
+  `DAYTONA_*` from the environment before any storage module loads.
 - If an API key is required and missing, the run should fail.
 
 ## Common Commands
@@ -221,14 +226,14 @@ src/harness/cli.py              CLI entrypoint: harness agent / harness eval
 src/harness/harness.py          Main agent loop
 src/harness/config.py           AgentConfig, AdapterConfig, ExternalToolSpec
 src/harness/core/llm.py         OpenRouter client
-src/harness/core/storage.py     sqlite or Turso/libSQL storage
+src/harness/core/storage.py     Per-agent sqlite, optionally backed by a Daytona sandbox
 src/harness/core/tracer.py      Bedrock tracing
 src/harness/tools/              Built-in and external tool wrappers
 src/harness/memory/             SQL-backed memory and summaries
 src/harness/evals/              Eval runner, fake adapters, scenarios
 scripts/run_demo.py             No-Bedrock demo
 scripts/run_live.py             Lower-level live-agent helper
-tests/                          Unit, e2e, memory, and integration tests
+tests/                          Unit, e2e, and memory tests
 ```
 
 ## Lower-Level Live Script

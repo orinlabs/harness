@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Agent harness. Runnable agent loop with memory, tools, and OpenRouter-backed LLM calls."
 requires-python = ">=3.11"
 dependencies = [
+    "daytona>=0.169.0",
     "httpx>=0.27",
-    "libsql-experimental>=0.0.55",
     "pydantic>=2.7",
     "pyyaml>=6.0.3",
 ]
@@ -30,12 +30,9 @@ packages = ["src/harness"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# tests/memory/       — tiered-memory tests (expensive LLM calls)
-# tests/integration/  — live Turso tests (hit real Turso org, opt-in)
-# Invoke explicitly:
+# tests/memory/ — tiered-memory tests (expensive LLM calls). Invoke with:
 #   pytest tests/memory -o "addopts="
-#   RUN_LIVE_TURSO=1 pytest tests/integration -o "addopts="
-addopts = "-v --tb=short --ignore=tests/memory --ignore=tests/integration"
+addopts = "-v --tb=short --ignore=tests/memory"
 timeout = 120
 
 [tool.ruff]

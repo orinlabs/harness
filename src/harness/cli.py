@@ -3,9 +3,11 @@
 Two subcommands:
 
     harness agent [AGENT_ID] [options]    # Run a single agent run.
-    harness delete-agent AGENT_ID         # Delete agent-owned harness storage.
-    harness reset-memory AGENT_ID         # Reset agent memory storage.
-    harness import-bedrock-memory AGENT_ID --input payload.json
+    harness delete-agent AGENT_ID [--purge]
+                                          # Archive (default) or fully purge
+                                          # agent-owned harness storage.
+    harness reset-memory AGENT_ID         # Reset agent memory storage (keeps
+                                          # the Daytona sandbox around).
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
 The `agent` path is the production-adjacent path. The `eval` path is for
@@ -13,21 +15,23 @@ offline evaluation against the in-process fake adapters (imports are
 deferred into the `eval` branch so cold-start of `harness agent` never
 pays the price of pulling `harness.evals` / `harness.evals.fakes`).
 
-Environment is loaded from `.env` in cwd if present. Non-secret
-identifiers (platform URL, Turso org/group) have baked-in defaults.
+Environment is loaded from `.env` in cwd if present. Non-secret identifiers
+(platform URL) have baked-in defaults.
 
 Required env (secrets) common to both subcommands:
-    HARNESS_TURSO_PLATFORM_TOKEN  Turso platform API token (for DB provisioning)
-    HARNESS_DATABASE_TOKEN        Turso group-scoped data token
+    DAYTONA_API_KEY       Daytona API key. Harness provisions one sandbox per
+                          agent (labeled `harness.agent_id=<id>`) and keeps
+                          that agent's sqlite DB inside it.
     OPENROUTER_API_KEY
 
 Optional env (override defaults):
-    BEDROCK_URL                   default: http://127.0.0.1:8000
-    HARNESS_TURSO_ORG             default: bryanhoulton
-    HARNESS_TURSO_GROUP           default: default
-    MODEL                         override the agent's configured model (agent, existing id)
-    REASONING_EFFORT              override reasoning_effort (low|medium|high)
-    LOG_LEVEL                     default: DEBUG
+    BEDROCK_URL                       default: http://127.0.0.1:8000
+    DAYTONA_API_URL                   default: https://app.daytona.io/api
+    DAYTONA_TARGET                    SDK default region if unset
+    HARNESS_DAYTONA_AUTO_STOP_MINUTES passed as `auto_stop_interval`
+    MODEL                             override the agent's configured model
+    REASONING_EFFORT                  override reasoning_effort (low|medium|high)
+    LOG_LEVEL                         default: DEBUG
 """
 from __future__ import annotations
 
@@ -48,13 +52,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ENV: dict[str, str] = {
     "BEDROCK_URL": "http://127.0.0.1:8000",
-    "HARNESS_TURSO_ORG": "bryanhoulton",
-    "HARNESS_TURSO_GROUP": "default",
 }
 
 REQUIRED_ENV = (
-    "HARNESS_TURSO_PLATFORM_TOKEN",
-    "HARNESS_DATABASE_TOKEN",
+    "DAYTONA_API_KEY",
     "OPENROUTER_API_KEY",
 )
 
@@ -363,17 +364,19 @@ def _cmd_delete_agent(args, parser: argparse.ArgumentParser) -> int:
     try:
         result = storage.delete_agent_storage(
             args.agent_id,
-            require_remote=bool(os.environ.get("HARNESS_TURSO_ORG")),
+            require_remote=bool(os.environ.get("DAYTONA_API_KEY")),
+            purge=args.purge,
         )
     except RuntimeError as e:
         parser.exit(1, f"delete agent failed: {e}\n")
 
+    mode = "purged" if args.purge else "archived"
     logger.info(
-        "deleted agent storage: id=%s local=%s remote=%s",
-        args.agent_id, result["local"], result["remote"],
+        "deleted agent storage (%s): id=%s local=%s remote=%s",
+        mode, args.agent_id, result["local"], result["remote"],
     )
     print(
-        "deleted agent storage: "
+        f"deleted agent storage ({mode}): "
         f"id={args.agent_id} local={result['local']} remote={result['remote']}",
         file=sys.stderr,
     )
@@ -388,7 +391,7 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
     try:
         result = storage.reset_agent_memory(
             args.agent_id,
-            require_remote=bool(os.environ.get("HARNESS_TURSO_ORG")),
+            require_remote=bool(os.environ.get("DAYTONA_API_KEY")),
         )
     except RuntimeError as e:
         parser.exit(1, f"reset memory failed: {e}\n")
@@ -400,26 +403,6 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
     print(
         "reset agent memory: "
         f"id={args.agent_id} local={result['local']} remote={result['remote']}",
-        file=sys.stderr,
-    )
-    return 0
-
-
-def _cmd_import_bedrock_memory(args, parser: argparse.ArgumentParser) -> int:
-    _load_env()
-
-    from harness.memory.legacy_bedrock_import import import_legacy_bedrock_memory
-
-    try:
-        counts = import_legacy_bedrock_memory(args.agent_id, args.input)
-    except Exception as e:
-        logger.exception("legacy Bedrock memory import failed: id=%s", args.agent_id)
-        parser.exit(1, f"import Bedrock memory failed: {e}\n")
-
-    print(
-        "imported Bedrock memory: "
-        f"id={args.agent_id} "
-        + " ".join(f"{key}={value}" for key, value in counts.as_dict().items()),
         file=sys.stderr,
     )
     return 0
@@ -468,9 +451,16 @@ def main(argv: list[str] | None = None) -> int:
 
     delete_p = subparsers.add_parser(
         "delete-agent",
-        help="Delete harness-owned storage for an agent.",
+        help="Archive (default) or purge harness-owned storage for an agent.",
     )
     delete_p.add_argument("agent_id", help="Agent UUID to delete storage for.")
+    delete_p.add_argument(
+        "--purge",
+        action="store_true",
+        help="Fully delete the Daytona sandbox (no recovery). Default is to "
+             "archive, which moves state to cheap object storage and lets the "
+             "next `harness agent` resurrect it.",
+    )
     delete_p.add_argument("--log-level",
                           default=os.environ.get("LOG_LEVEL", "DEBUG"),
                           help="Log level: DEBUG|INFO|WARNING|ERROR.")
@@ -483,20 +473,6 @@ def main(argv: list[str] | None = None) -> int:
     reset_p.add_argument("--log-level",
                          default=os.environ.get("LOG_LEVEL", "DEBUG"),
                          help="Log level: DEBUG|INFO|WARNING|ERROR.")
-
-    import_memory_p = subparsers.add_parser(
-        "import-bedrock-memory",
-        help="Import one agent's legacy Bedrock memory export.",
-    )
-    import_memory_p.add_argument("agent_id", help="Agent UUID to import memory for.")
-    import_memory_p.add_argument(
-        "--input",
-        required=True,
-        help="Path to a JSON payload exported by the Bedrock migration.",
-    )
-    import_memory_p.add_argument("--log-level",
-                                 default=os.environ.get("LOG_LEVEL", "DEBUG"),
-                                 help="Log level: DEBUG|INFO|WARNING|ERROR.")
 
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario",
@@ -514,8 +490,6 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_delete_agent(args, delete_p)
     if args.command == "reset-memory":
         return _cmd_reset_memory(args, reset_p)
-    if args.command == "import-bedrock-memory":
-        return _cmd_import_bedrock_memory(args, import_memory_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval
