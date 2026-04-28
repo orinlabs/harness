@@ -1,10 +1,15 @@
-"""Hierarchical summarisation: 1m -> 5m -> hourly -> daily -> weekly -> monthly.
+"""Hierarchical summarisation: 5m -> hourly -> daily -> weekly -> monthly.
 
-Each tier reads the tier below (raw messages for 1m, otherwise summaries from
-the next-finer tier), groups into bucket keys, and writes one summary per
-completed bucket via an LLM call. Buckets still in progress (the current
-minute / hour / day / week / month) are skipped so we never produce partial
-summaries.
+The 5m tier reads from raw `messages`; higher tiers roll up the
+next-finer tier. Each tier groups into bucket keys and writes one
+summary per completed bucket via an LLM call. Buckets still in
+progress (the current 5-minute window / hour / day / week / month)
+are skipped so we never produce partial summaries.
+
+Note: a 1-minute tier existed previously but was removed (see
+migration 0002_drop_one_minute_summaries). It was firing an LLM call
+per completed minute which dominated per-turn cost without
+meaningfully improving recall over the 5m tier.
 """
 from __future__ import annotations
 
@@ -17,10 +22,13 @@ from typing import Any
 
 from harness.core import llm, storage
 from harness.core.tracer import llm_span, text_span
-from harness.memory.bucketing import hour_start, last_completed_1m_end
+from harness.memory.bucketing import (
+    floor_to_5_minutes,
+    hour_start,
+    last_completed_5m_end,
+)
 from harness.memory.marks import force_timezone, week_start_sunday
 from harness.memory.types import PERIOD_META, PeriodType
-
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +43,6 @@ class SummarizerUsage:
 
 @dataclass
 class UpdateAllResult:
-    one_minute_created: int = 0
     five_minute_created: int = 0
     hourly_created: int = 0
     daily_created: int = 0
@@ -58,19 +65,20 @@ def _dt_to_ns(dt: datetime) -> int:
 
 
 class SummaryUpdater:
-    """Run sync summarisation across all six tiers in order:
-    1m -> 5m -> hourly -> daily -> weekly -> monthly.
+    """Run sync summarisation across the five tiers in order:
+    5m -> hourly -> daily -> weekly -> monthly.
 
-    When ``v2=True``, the cascade is flattened: no 1m / 5m tiers (raw
-    messages fill that window), summarization is deferred to end-of-run
-    by the caller (Harness), and the summarization prompt is constrained
-    to past-tense actions only -- no "waiting for X" / "pending Y"
+    When ``v2=True``, the 5m tier is skipped too (raw messages fill
+    that window), summarization is deferred to end-of-run by the
+    caller (Harness), and the summarization prompt is constrained to
+    past-tense actions only -- no "waiting for X" / "pending Y"
     state-describing phrasing that stale summaries were turning into
     current-state assertions on the next run.
 
-    The v2 cascade still produces hourly, daily, weekly, monthly summaries;
-    it only changes where they are computed from (raw messages instead of
-    pre-aggregated 5m summaries) and what the prompt allows them to say.
+    The v2 cascade still produces hourly, daily, weekly, monthly
+    summaries; it only changes where they are computed from (raw
+    messages instead of pre-aggregated 5m summaries) and what the
+    prompt allows them to say.
     """
 
     def __init__(
@@ -106,16 +114,14 @@ class SummaryUpdater:
             metadata={"model": self.model, "v2": self.v2},
         ) as parent_span:
             if self.v2:
-                # v2 skips the 1m and 5m tiers entirely: raw messages
-                # fill that window. Hourly summaries are built directly
-                # from messages by ``_update_hourly_summaries`` when v2
-                # is on (see the v2 branch inside that method for the
-                # raw-messages-source path). The remaining tiers roll
-                # up off completed hourly summaries as usual.
-                updated_1m: list = []
+                # v2 skips the 5m tier entirely: raw messages fill
+                # that window. Hourly summaries are built directly
+                # from messages by ``_update_hourly_summaries`` when
+                # v2 is on (see the v2 branch inside that method for
+                # the raw-messages-source path). The remaining tiers
+                # roll up off completed hourly summaries as usual.
                 updated_5m: list = []
             else:
-                updated_1m = self._update_one_minute_summaries(current_time)
                 updated_5m = self._update_five_minute_summaries(current_time)
             updated_hour = self._update_hourly_summaries(current_time)
             updated_day = self._update_daily_summaries(current_time)
@@ -123,7 +129,6 @@ class SummaryUpdater:
             updated_month = self._update_monthly_summaries(current_time)
 
             summaries_created = {
-                "one_minute": len(updated_1m),
                 "five_minute": len(updated_5m),
                 "hourly": len(updated_hour),
                 "daily": len(updated_day),
@@ -142,9 +147,8 @@ class SummaryUpdater:
             )
 
         logger.info(
-            "summarizer.update_all: done created 1m=%d 5m=%d hour=%d day=%d "
+            "summarizer.update_all: done created 5m=%d hour=%d day=%d "
             "week=%d month=%d llm_calls=%d in=%d out=%d cost=$%.5f model=%s",
-            len(updated_1m),
             len(updated_5m),
             len(updated_hour),
             len(updated_day),
@@ -158,7 +162,6 @@ class SummaryUpdater:
         )
 
         return UpdateAllResult(
-            one_minute_created=len(updated_1m),
             five_minute_created=len(updated_5m),
             hourly_created=len(updated_hour),
             daily_created=len(updated_day),
@@ -168,31 +171,34 @@ class SummaryUpdater:
         )
 
     # ------------------------------------------------------------------
-    # 1-minute: raw messages -> one summary per completed minute
+    # 5-minute: raw messages -> one summary per completed 5-minute bucket
     # ------------------------------------------------------------------
+    #
+    # Previously this tier rolled up 1-minute summaries. The 1m tier was
+    # removed (see migration 0002) because it was firing an LLM call per
+    # completed minute even when nothing interesting happened, which
+    # dominated per-turn cost on long-running agents. 5m is now the finest
+    # summary tier and reads the raw `messages` log directly -- same
+    # pattern `_update_hourly_summaries`'s v2 branch uses.
 
-    def _update_one_minute_summaries(self, current_time: datetime) -> list[tuple]:
+    def _update_five_minute_summaries(self, current_time: datetime) -> list[tuple]:
         assert storage.db is not None
         db = storage.db
 
         timezone_now = force_timezone(current_time, self.timezone_name)
-        cutoff = last_completed_1m_end(timezone_now)
+        cutoff = last_completed_5m_end(timezone_now)
 
         existing_keys = {
-            (row["date"], row["hour"], row["minute"])
-            for row in db.execute(
-                "SELECT date, hour, minute FROM one_minute_summaries"
-            )
-        }
-        existing_5m_keys = {
             (row["date"], row["hour"], row["minute"])
             for row in db.execute(
                 "SELECT date, hour, minute FROM five_minute_summaries"
             )
         }
 
-        # Message filter: ts < cutoff, optionally lower-bounded by latest summary
-        # to avoid expensive full-history scans.
+        # Lower-bound the message scan at the latest 5m summary's bucket
+        # start so we never re-scan history we've already rolled up. On
+        # a fresh DB (no 5m rows yet) this is None and we scan from the
+        # beginning of the messages table.
         lower_ns: int | None = None
         if existing_keys:
             latest_key = max(existing_keys)
@@ -202,19 +208,6 @@ class SummaryUpdater:
                     time(latest_key[1], latest_key[2]),
                 ),
                 self.timezone_name,
-            )
-            lower_ns = _dt_to_ns(earliest_fetch)
-        elif existing_5m_keys:
-            latest_5m = max(existing_5m_keys)
-            earliest_fetch = (
-                force_timezone(
-                    datetime.combine(
-                        date.fromisoformat(latest_5m[0]),
-                        time(latest_5m[1], latest_5m[2]),
-                    ),
-                    self.timezone_name,
-                )
-                + timedelta(minutes=5)
             )
             lower_ns = _dt_to_ns(earliest_fetch)
 
@@ -230,110 +223,33 @@ class SummaryUpdater:
                 (_dt_to_ns(cutoff),),
             ).fetchall()
 
+        # Bucket raw messages into 5-minute slots. Any bucket whose
+        # boundary hasn't fully completed (end > now) is deferred to a
+        # future run so we never produce a partial summary.
         buckets: dict[datetime, list[dict]] = {}
         for row in rows:
             local_time = force_timezone(
-                datetime.fromtimestamp(row["ts_ns"] / 1_000_000_000), self.timezone_name
+                datetime.fromtimestamp(row["ts_ns"] / 1_000_000_000),
+                self.timezone_name,
             )
-            bucket_start = last_completed_1m_end(local_time)
-            bucket_end = bucket_start + timedelta(minutes=1)
+            bucket_start = floor_to_5_minutes(local_time)
+            bucket_end = bucket_start + timedelta(minutes=5)
             if bucket_end > timezone_now:
                 continue
-            buckets.setdefault(bucket_start, []).append(json.loads(row["content_json"]))
+            buckets.setdefault(bucket_start, []).append(
+                json.loads(row["content_json"])
+            )
 
         pending: list[tuple[tuple[str, int, int], list[dict]]] = []
         for bucket_start, bucket_messages in buckets.items():
-            key = (bucket_start.date().isoformat(), bucket_start.hour, bucket_start.minute)
-            if key in existing_keys:
-                continue
-            five_min_key = (
+            key = (
                 bucket_start.date().isoformat(),
                 bucket_start.hour,
-                (bucket_start.minute // 5) * 5,
+                bucket_start.minute,
             )
-            if five_min_key in existing_5m_keys:
+            if key in existing_keys:
                 continue
             pending.append((key, bucket_messages))
-
-        if not pending:
-            return []
-
-        logger.info(
-            "summarizer: tier=1m pending=%d -> making %d LLM call(s) via %s",
-            len(pending), len(pending), self.model,
-        )
-
-        created: list[tuple] = []
-        for (date_key, hour_key, minute_key), bucket_messages in sorted(
-            pending, key=lambda x: (x[0][0], x[0][1], x[0][2])
-        ):
-            content = json.dumps(bucket_messages)
-            summary_text = self._create_summary(
-                content=content, period_type=PeriodType.ONE_MINUTE
-            )
-            if not summary_text or not summary_text.strip():
-                logger.error(
-                    "Failed to create 1-minute summary for %s %02d:%02d - empty, skipping",
-                    date_key,
-                    hour_key,
-                    minute_key,
-                )
-                continue
-            self._upsert_summary(
-                "one_minute_summaries",
-                ("date", "hour", "minute"),
-                (date_key, hour_key, minute_key),
-                summary_text,
-                len(bucket_messages),
-            )
-            created.append((date_key, hour_key, minute_key))
-
-        return created
-
-    # ------------------------------------------------------------------
-    # 5-minute: roll up 1m summaries into 5-minute buckets
-    # ------------------------------------------------------------------
-
-    def _update_five_minute_summaries(self, current_time: datetime) -> list[tuple]:
-        assert storage.db is not None
-        db = storage.db
-
-        timezone_now = force_timezone(current_time, self.timezone_name)
-
-        one_min_rows = db.execute(
-            "SELECT date, hour, minute, summary, message_count FROM one_minute_summaries "
-            "ORDER BY date, hour, minute"
-        ).fetchall()
-
-        five_min_groups: dict[tuple[str, int, int], list[dict]] = {}
-        for r in one_min_rows:
-            bucket_minute = (r["minute"] // 5) * 5
-            key = (r["date"], r["hour"], bucket_minute)
-            five_min_groups.setdefault(key, []).append(dict(r))
-
-        existing_keys = {
-            (row["date"], row["hour"], row["minute"])
-            for row in db.execute(
-                "SELECT date, hour, minute FROM five_minute_summaries"
-            )
-        }
-
-        pending = []
-        for (summary_date, hour, minute), summaries_1m in five_min_groups.items():
-            bucket_start = force_timezone(
-                datetime.combine(date.fromisoformat(summary_date), time(hour, minute)),
-                self.timezone_name,
-            )
-            if bucket_start + timedelta(minutes=5) > timezone_now:
-                continue
-            if (summary_date, hour, minute) not in existing_keys and summaries_1m:
-                parts = [
-                    f"[{s['hour']:02d}:{s['minute']:02d}] {s['summary']}"
-                    for s in summaries_1m
-                ]
-                combined_content = "\n\n".join(parts)
-                total_messages = sum(s["message_count"] for s in summaries_1m)
-                pending.append(((summary_date, hour, minute), combined_content, total_messages))
 
         if not pending:
             return []
@@ -342,21 +258,28 @@ class SummaryUpdater:
             "summarizer: tier=5m pending=%d -> making %d LLM call(s) via %s",
             len(pending), len(pending), self.model,
         )
-        created = []
-        for (date_key, hour_key, minute_key), content, total_messages in sorted(
+        created: list[tuple] = []
+        for (date_key, hour_key, minute_key), bucket_messages in sorted(
             pending, key=lambda x: (x[0][0], x[0][1], x[0][2])
         ):
+            content = json.dumps(bucket_messages)
             summary_text = self._create_summary(
                 content=content, period_type=PeriodType.FIVE_MINUTE
             )
             if not summary_text or not summary_text.strip():
+                logger.error(
+                    "Failed to create 5-minute summary for %s %02d:%02d - empty, skipping",
+                    date_key,
+                    hour_key,
+                    minute_key,
+                )
                 continue
             self._upsert_summary(
                 "five_minute_summaries",
                 ("date", "hour", "minute"),
                 (date_key, hour_key, minute_key),
                 summary_text,
-                total_messages,
+                len(bucket_messages),
             )
             created.append((date_key, hour_key, minute_key))
 
@@ -648,15 +571,21 @@ class SummaryUpdater:
         # trace tree shows which tier fired, the input prompt, the summary
         # output, and the per-call cost -- same treatment `_step` gives
         # the main agent turn's `openrouter_api_call` span. Nests under
-        # whatever parent span is active (`summarize_<tier>` below, which
-        # nests under `memory_summarization`, which nests under `turn_N`
-        # or `run_agent`).
+        # `memory_summarization`, which nests under `turn_N` or
+        # `run_agent`.
+        #
+        # Pin `reasoning_effort="minimal"` so reasoning-capable models
+        # (gpt-5-nano in particular) don't burn reasoning tokens on
+        # what is essentially a straightforward rewrite task. Summary
+        # quality at this tier is more than adequate without extended
+        # thinking.
         with llm_span(
             "summarizer_call",
             metadata={
                 "model": self.model,
                 "provider": "openrouter",
                 "period_type": period_type.value,
+                "reasoning_effort": "minimal",
             },
         ) as s:
             s.input(prompt[:20000])
@@ -665,6 +594,7 @@ class SummaryUpdater:
                     model=self.model,
                     system="",
                     messages=[{"role": "user", "content": prompt}],
+                    reasoning_effort="minimal",
                 )
             except Exception as e:
                 logger.exception("Summarizer LLM call failed: %s", e)

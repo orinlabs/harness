@@ -11,7 +11,6 @@ class ComputeMarksTests(SimpleTestCase):
         now = datetime(2026, 3, 4, 9, 34, 0, tzinfo=UTC)
         m = compute_marks(now)
 
-        assert m.one_min_cursor == datetime(2026, 3, 4, 9, 34, 0, tzinfo=UTC)
         assert m.five_min_cursor == datetime(2026, 3, 4, 9, 30, 0, tzinfo=UTC)
         assert m.five_min_window_start == datetime(2026, 3, 4, 8, 0, 0, tzinfo=UTC)
         assert m.hourly_window_start == datetime(2026, 3, 3, 0, 0, 0, tzinfo=UTC)
@@ -66,7 +65,6 @@ class ComputeMarksTests(SimpleTestCase):
         m = compute_marks(now)
 
         assert m.now.tzinfo == tz
-        assert m.one_min_cursor.tzinfo == tz
         assert m.five_min_cursor.tzinfo == tz
         assert m.five_min_window_start.tzinfo == tz
         assert m.hourly_window_start.tzinfo == tz
@@ -104,7 +102,6 @@ class ComputeMarksTests(SimpleTestCase):
         m = compute_marks(now)
 
         assert m.now.tzinfo is None
-        assert m.one_min_cursor.tzinfo is None
         assert m.five_min_cursor.tzinfo is None
         assert m.five_min_window_start.tzinfo is None
         assert m.hourly_window_start.tzinfo is None

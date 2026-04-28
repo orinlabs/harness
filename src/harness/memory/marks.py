@@ -16,9 +16,6 @@ class MemoryMarks:
 
     now: datetime
 
-    # Most recent completed 1-minute boundary at/before now.
-    one_min_cursor: datetime
-
     # Most recent completed 5-minute boundary at/before now.
     five_min_cursor: datetime
 
@@ -52,9 +49,6 @@ class MemoryWindows:
     message_start: datetime | None
     message_end: datetime | None
 
-    one_min_start: datetime | None
-    one_min_end: datetime | None
-
     five_min_start: datetime | None
     five_min_end: datetime | None
 
@@ -81,10 +75,6 @@ def force_timezone(dt: datetime, tz_name: str) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=tz)
     return dt.astimezone(tz)
-
-
-def floor_to_1_minute(dt: datetime) -> datetime:
-    return dt.replace(second=0, microsecond=0)
 
 
 def floor_to_5_minutes(dt: datetime) -> datetime:
@@ -164,7 +154,6 @@ def compute_marks(now: datetime) -> MemoryMarks:
     - weekly_window_start = prev_month_start(daily_window_start)
     - monthly_window_start = epoch sentinel
     """
-    one_min_cursor = floor_to_1_minute(now)
     five_min_cursor = floor_to_5_minutes(now)
     five_min_window_start = shift_timeline(hour_start(five_min_cursor), -timedelta(hours=1))
     hourly_window_start = day_start_prev(five_min_window_start)
@@ -174,7 +163,6 @@ def compute_marks(now: datetime) -> MemoryMarks:
 
     return MemoryMarks(
         now=now,
-        one_min_cursor=one_min_cursor,
         five_min_cursor=five_min_cursor,
         five_min_window_start=five_min_window_start,
         hourly_window_start=hourly_window_start,
@@ -196,12 +184,14 @@ def compute_windows(now: datetime, min_resolution: PeriodType | None) -> MemoryW
     message_start = None
     message_end = None
 
+    # Raw messages live in the (cursor, now] window down to the most
+    # recent 5-minute boundary. Prior to the 1m tier removal this was
+    # snapped to 1-minute granularity, but without a 1m tier there is
+    # no value in a finer boundary for the raw-message window.
     if min_resolution is None:
         message_end = cursor
-        cursor = floor_to_1_minute(cursor)
+        cursor = floor_to_5_minutes(cursor)
         message_start = cursor
-    elif min_resolution == PeriodType.ONE_MINUTE:
-        cursor = floor_to_1_minute(cursor)
     elif min_resolution == PeriodType.FIVE_MINUTE:
         cursor = floor_to_5_minutes(cursor)
     elif min_resolution == PeriodType.HOURLY:
@@ -213,16 +203,9 @@ def compute_windows(now: datetime, min_resolution: PeriodType | None) -> MemoryW
     elif min_resolution == PeriodType.MONTHLY:
         cursor = month_start(cursor)
 
-    one_min_start = None
-    one_min_end = None
-    if min_resolution in (None, PeriodType.ONE_MINUTE):
-        one_min_end = cursor
-        one_min_start = floor_to_5_minutes(one_min_end)
-        cursor = one_min_start
-
     five_min_start = None
     five_min_end = None
-    if min_resolution in (None, PeriodType.ONE_MINUTE, PeriodType.FIVE_MINUTE):
+    if min_resolution in (None, PeriodType.FIVE_MINUTE):
         five_min_end = cursor
         five_min_start = shift_timeline(hour_start(five_min_end), -timedelta(hours=1))
         cursor = five_min_start
@@ -231,7 +214,6 @@ def compute_windows(now: datetime, min_resolution: PeriodType | None) -> MemoryW
     hourly_end = None
     if min_resolution in (
         None,
-        PeriodType.ONE_MINUTE,
         PeriodType.FIVE_MINUTE,
         PeriodType.HOURLY,
     ):
@@ -243,7 +225,6 @@ def compute_windows(now: datetime, min_resolution: PeriodType | None) -> MemoryW
     daily_end = None
     if min_resolution in (
         None,
-        PeriodType.ONE_MINUTE,
         PeriodType.FIVE_MINUTE,
         PeriodType.HOURLY,
         PeriodType.DAILY,
@@ -256,7 +237,6 @@ def compute_windows(now: datetime, min_resolution: PeriodType | None) -> MemoryW
     weekly_end = None
     if min_resolution in (
         None,
-        PeriodType.ONE_MINUTE,
         PeriodType.FIVE_MINUTE,
         PeriodType.HOURLY,
         PeriodType.DAILY,
@@ -273,8 +253,6 @@ def compute_windows(now: datetime, min_resolution: PeriodType | None) -> MemoryW
         min_resolution=min_resolution,
         message_start=message_start,
         message_end=message_end,
-        one_min_start=one_min_start,
-        one_min_end=one_min_end,
         five_min_start=five_min_start,
         five_min_end=five_min_end,
         hourly_start=hourly_start,

@@ -4,17 +4,6 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 
 
-def floor_to_1_minute(dt: datetime) -> datetime:
-    return dt.replace(second=0, microsecond=0)
-
-
-def last_completed_1m_end(now: datetime) -> datetime:
-    floored = floor_to_1_minute(now)
-    if floored == now:
-        return now - timedelta(minutes=1)
-    return floored
-
-
 def floor_to_5_minutes(dt: datetime) -> datetime:
     local = dt.replace(second=0, microsecond=0)
     bucket_minute = (local.minute // 5) * 5

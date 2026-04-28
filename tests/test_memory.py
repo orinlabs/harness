@@ -84,12 +84,14 @@ def test_nudge_appends_user_message(memory_env):
     assert messages[-1] == {"role": "user", "content": NUDGE_TEXT}
 
 
-def test_one_minute_summaries_generated_for_completed_buckets(memory_env):
-    """Log messages with timestamps in past minutes; assert 1m summaries appear."""
+def test_five_minute_summaries_generated_for_completed_buckets(memory_env):
+    """Log messages with timestamps in a past 5-minute bucket; assert a 5m summary appears."""
     m = _make()
 
+    # 6 minutes ago guarantees we're in a completed (non-current) 5m
+    # bucket regardless of when the test runs within the current window.
     now = time.time_ns()
-    two_min_ago = now - 2 * NS_PER_MINUTE
+    six_min_ago = now - 6 * NS_PER_MINUTE
 
     m.log_messages(
         [
@@ -101,26 +103,26 @@ def test_one_minute_summaries_generated_for_completed_buckets(memory_env):
                 "content": "Paris has a famous tower called the Eiffel Tower.",
             },
         ],
-        ts_ns=two_min_ago,
+        ts_ns=six_min_ago,
     )
     m.update_summaries()
 
     rows = memory_env.db.execute(
-        "SELECT date, hour, minute, summary FROM one_minute_summaries"
+        "SELECT date, hour, minute, summary FROM five_minute_summaries"
     ).fetchall()
-    assert len(rows) >= 1, "expected at least one 1-minute summary"
+    assert len(rows) >= 1, "expected at least one 5-minute summary"
 
     combined = "\n".join(r["summary"] for r in rows).lower()
     assert "paris" in combined, f"summary did not reference Paris: {combined!r}"
 
 
-def test_summaries_not_regenerated_for_current_minute(memory_env):
-    """Messages in the current (incomplete) minute must not produce a 1m summary yet."""
+def test_summaries_not_regenerated_for_current_five_minute_bucket(memory_env):
+    """Messages in the current (incomplete) 5m bucket must not produce a 5m summary yet."""
     m = _make()
     m.log_messages([{"role": "user", "content": "just happened"}])
 
     count = memory_env.db.execute(
-        "SELECT COUNT(*) AS c FROM one_minute_summaries"
+        "SELECT COUNT(*) AS c FROM five_minute_summaries"
     ).fetchone()["c"]
     assert count == 0
 
@@ -129,8 +131,9 @@ def test_build_llm_inputs_renders_summary_block(memory_env):
     """Messages old enough to be summarized should push the summary header into system."""
     m = _make(recent_limit=4)
 
+    # 6 minutes ago: guaranteed to be in a completed 5m bucket.
     now = time.time_ns()
-    long_ago = now - 2 * NS_PER_MINUTE
+    long_ago = now - 6 * NS_PER_MINUTE
 
     m.log_messages(
         [
@@ -143,7 +146,7 @@ def test_build_llm_inputs_renders_summary_block(memory_env):
 
     system, _ = m.build_llm_inputs("base sys")
 
-    assert "1-MINUTE SUMMARIES" in system or "HOURLY SUMMARIES" in system, (
+    assert "5-MINUTE SUMMARIES" in system or "HOURLY SUMMARIES" in system, (
         f"expected a tier header in rendered system, got: {system!r}"
     )
     assert "kumquat" in system.lower(), (

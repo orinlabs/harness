@@ -25,7 +25,6 @@ from harness.memory.rows import (
     HourlySummary,
     MessageRow,
     MonthlySummary,
-    OneMinuteSummary,
     WeeklySummary,
 )
 from harness.memory.types import PeriodType
@@ -34,12 +33,11 @@ logger = logging.getLogger(__name__)
 
 
 RESOLUTION_LEVEL: dict[PeriodType, int] = {
-    PeriodType.ONE_MINUTE: 0,
-    PeriodType.FIVE_MINUTE: 1,
-    PeriodType.HOURLY: 2,
-    PeriodType.DAILY: 3,
-    PeriodType.WEEKLY: 4,
-    PeriodType.MONTHLY: 5,
+    PeriodType.FIVE_MINUTE: 0,
+    PeriodType.HOURLY: 1,
+    PeriodType.DAILY: 2,
+    PeriodType.WEEKLY: 3,
+    PeriodType.MONTHLY: 4,
 }
 
 
@@ -57,7 +55,6 @@ class MemoryData:
     daily_summaries: list[DailySummary] = field(default_factory=list)
     hourly_summaries: list[HourlySummary] = field(default_factory=list)
     five_minute_summaries: list[FiveMinuteSummary] = field(default_factory=list)
-    one_minute_summaries: list[OneMinuteSummary] = field(default_factory=list)
     messages: list[MessageRow] = field(default_factory=list)
     last_summarized_time: datetime | None = None
 
@@ -105,19 +102,20 @@ class MemoryContextBuilder:
         windows = compute_windows(local_now, min_resolution)
         min_level = RESOLUTION_LEVEL.get(min_resolution, 0) if min_resolution else -1
 
-        # -- Messages: (one_min_cursor, now] --
+        # -- Messages: (five_min_cursor, now] --
         messages: list[MessageRow] = []
         if min_resolution is None:
             assert windows.message_start is not None and windows.message_end is not None
             lower_bound = windows.message_start
 
-            # Fall back to the start of the current hour if no 1-minute summaries
-            # exist. Preserves conversation continuity before summarization has
-            # produced any 1m rows.
-            has_1m = db.execute(
-                "SELECT 1 FROM one_minute_summaries LIMIT 1"
+            # Fall back to the start of the current hour if no 5-minute
+            # summaries exist yet. Preserves conversation continuity
+            # before summarization has produced any 5m rows (e.g. on
+            # the first turn of a brand-new agent).
+            has_5m = db.execute(
+                "SELECT 1 FROM five_minute_summaries LIMIT 1"
             ).fetchone()
-            if not has_1m:
+            if not has_5m:
                 lower_bound = windows.message_end.replace(
                     minute=0, second=0, microsecond=0
                 )
@@ -138,30 +136,6 @@ class MemoryContextBuilder:
                     ts_ns=r["ts_ns"],
                     role=r["role"],
                     content=json.loads(r["content_json"]),
-                )
-                for r in rows
-            ]
-
-        # -- OneMinuteSummary: [one_min_start, one_min_end) --
-        one_minute_summaries: list[OneMinuteSummary] = []
-        if min_level <= RESOLUTION_LEVEL[PeriodType.ONE_MINUTE]:
-            assert windows.one_min_start is not None and windows.one_min_end is not None
-            rows = _select_dhm_range(
-                db,
-                table="one_minute_summaries",
-                start=windows.one_min_start,
-                end=windows.one_min_end,
-                columns="id, date, hour, minute, summary, message_count",
-                order="date, hour, minute",
-            )
-            one_minute_summaries = [
-                OneMinuteSummary(
-                    id=r["id"],
-                    date=_parse_date(r["date"]),
-                    hour=r["hour"],
-                    minute=r["minute"],
-                    summary=r["summary"],
-                    message_count=r["message_count"],
                 )
                 for r in rows
             ]
@@ -295,9 +269,8 @@ class MemoryContextBuilder:
             daily_summaries=daily_summaries,
             hourly_summaries=hourly_summaries,
             five_minute_summaries=five_minute_summaries,
-            one_minute_summaries=one_minute_summaries,
             messages=messages,
-            last_summarized_time=windows.message_start or windows.one_min_end,
+            last_summarized_time=windows.message_start or windows.five_min_end,
         )
 
     # ------------------------------------------------------------------
@@ -338,19 +311,6 @@ class MemoryContextBuilder:
                 start_dt = datetime.combine(s.date, time(s.hour, s.minute, 0))
                 start_dt = force_timezone(start_dt, self.timezone)
                 end_dt = start_dt + timedelta(minutes=5)
-                if self.time_offset:
-                    start_dt += timedelta(minutes=self.time_offset)
-                    end_dt += timedelta(minutes=self.time_offset)
-                parts.append(
-                    f"\n{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}: {s.summary}"
-                )
-
-        if data.one_minute_summaries:
-            parts.append("\n\n=== 1-MINUTE SUMMARIES ===")
-            for s in data.one_minute_summaries:
-                start_dt = datetime.combine(s.date, time(s.hour, s.minute, 0))
-                start_dt = force_timezone(start_dt, self.timezone)
-                end_dt = start_dt + timedelta(minutes=1)
                 if self.time_offset:
                     start_dt += timedelta(minutes=self.time_offset)
                     end_dt += timedelta(minutes=self.time_offset)

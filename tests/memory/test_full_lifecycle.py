@@ -70,8 +70,8 @@ def _insert_message(ts: datetime, role: str, content: str) -> None:
 def _seed_conversation_at(ts: datetime, fact: str) -> None:
     """Write a short user+assistant exchange at consecutive microseconds.
 
-    The messages share a bucket key (same minute) so they produce exactly
-    one 1-minute summary.
+    The messages share a bucket key (same 5-minute slot) so they
+    produce exactly one 5-minute summary.
     """
     _insert_message(ts, "user", f"Just so you remember: {fact}")
     _insert_message(ts + timedelta(milliseconds=1), "assistant", f"Got it — I'll remember: {fact}")
@@ -92,7 +92,7 @@ def _seed_history(now: datetime) -> None:
       - ~5 days ago:   daily + weekly
       - ~6 hours ago:  hourly + daily
       - ~30 min ago:   5-minute + hourly
-      - ~3 min ago:    1-minute + 5-minute
+      - ~7 min ago:    5-minute (bucket already complete)
     """
     _seed_conversation_at(
         now - timedelta(days=62, hours=3),
@@ -115,7 +115,7 @@ def _seed_history(now: datetime) -> None:
         "the meeting is at 3 pm tomorrow",
     )
     _seed_conversation_at(
-        now - timedelta(minutes=3),
+        now - timedelta(minutes=7),
         "reminder: grocery run after work",
     )
 
@@ -139,7 +139,6 @@ def test_tiered_summaries_build_across_all_six_layers(env):
         return storage.db.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
 
     counts = {
-        "1m": _count("one_minute_summaries"),
         "5m": _count("five_minute_summaries"),
         "hourly": _count("hourly_summaries"),
         "daily": _count("daily_summaries"),
@@ -154,8 +153,9 @@ def test_tiered_summaries_build_across_all_six_layers(env):
         f"${usage.total_cost:.4f}"
     )
 
-    assert counts["1m"] >= 6, f"expected >=6 1m summaries (one per seeded bucket), got {counts}"
-    assert counts["5m"] >= 1
+    assert counts["5m"] >= 1, (
+        f"expected >=1 5m summary (at least from the ~7min-ago seed), got {counts}"
+    )
     assert counts["hourly"] >= 1
     assert counts["daily"] >= 1
     assert counts["weekly"] >= 1
@@ -164,7 +164,6 @@ def test_tiered_summaries_build_across_all_six_layers(env):
     all_summary_text = "\n".join(
         row["summary"]
         for table in (
-            "one_minute_summaries",
             "five_minute_summaries",
             "hourly_summaries",
             "daily_summaries",

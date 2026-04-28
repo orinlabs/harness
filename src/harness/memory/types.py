@@ -5,7 +5,6 @@ from pydantic import BaseModel
 
 
 class PeriodType(Enum):
-    ONE_MINUTE = "one_minute"
     FIVE_MINUTE = "five_minute"
     HOURLY = "hourly"
     DAILY = "daily"
@@ -20,8 +19,8 @@ class PeriodMeta(BaseModel):
 
 
 PERIOD_META: dict[PeriodType, PeriodMeta] = {
-    PeriodType.ONE_MINUTE: PeriodMeta(
-        max_length="1-2 sentences",
+    PeriodType.FIVE_MINUTE: PeriodMeta(
+        max_length="2 sentences",
         focus=dedent(
             """
             Summarize these messages while preserving the most amount of semantic information possible, like a historian would. Try
@@ -30,16 +29,6 @@ PERIOD_META: dict[PeriodType, PeriodMeta] = {
             IMPORTANT: Always preserve the user's exact instructions, preferences, corrections, and emotional reactions verbatim
             or near-verbatim. If the user says "don't use markdown" or "stop doing X", that must appear in the summary. User
             directives and feelings are the highest-priority information to retain.
-            """
-        ),
-        time_period="this minute",
-    ),
-    PeriodType.FIVE_MINUTE: PeriodMeta(
-        max_length="2 sentences",
-        focus=dedent(
-            """
-            Summarize these messages while preserving the most amount of semantic information possible, like a historian would. Try
-            and lose as little information as possible.
             """
         ),
         time_period="these five minutes",

@@ -14,22 +14,26 @@ from tests.memory.conftest import (
     insert_five_min,
     insert_hourly,
     insert_message,
-    insert_one_min,
 )
 
 
-def test_messages_window_is_after_one_min_cursor(builder, storage_env):
+def test_messages_window_is_after_five_min_cursor(builder, storage_env):
     current_time = datetime(2024, 1, 10, 10, 12, 30, tzinfo=UTC)
     marks = compute_marks(current_time)
 
-    # Anchor a 1-minute summary so fetch_data uses the cursor-based message window
-    # (without one, it falls back to start-of-hour for conversation continuity).
-    insert_one_min(
-        storage_env, marks.one_min_cursor.date(), marks.one_min_cursor.hour, 0, "anchor"
+    # Anchor a 5-minute summary so fetch_data uses the cursor-based
+    # message window. Without one, fetch_data falls back to start-of-hour
+    # for conversation continuity (tested implicitly elsewhere).
+    insert_five_min(
+        storage_env,
+        marks.five_min_cursor.date(),
+        marks.five_min_cursor.hour,
+        marks.five_min_cursor.minute,
+        "anchor",
     )
 
-    insert_message(storage_env, marks.one_min_cursor - timedelta(seconds=30), "before-cursor")
-    insert_message(storage_env, marks.one_min_cursor + timedelta(seconds=15), "after-cursor")
+    insert_message(storage_env, marks.five_min_cursor - timedelta(seconds=30), "before-cursor")
+    insert_message(storage_env, marks.five_min_cursor + timedelta(seconds=15), "after-cursor")
     insert_message(storage_env, current_time + timedelta(minutes=1), "future")
 
     data = builder.fetch_data(current_time)

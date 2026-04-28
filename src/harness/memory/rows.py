@@ -19,16 +19,6 @@ class MessageRow:
 
 
 @dataclass
-class OneMinuteSummary:
-    id: str
-    date: _date
-    hour: int
-    minute: int
-    summary: str
-    message_count: int
-
-
-@dataclass
 class FiveMinuteSummary:
     id: str
     date: _date

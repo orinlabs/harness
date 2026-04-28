@@ -51,15 +51,6 @@ def _now_ns() -> int:
     return time.time_ns()
 
 
-def insert_one_min(storage, d: _date, hour: int, minute: int, summary: str = "1min"):
-    storage.db.execute(
-        "INSERT INTO one_minute_summaries "
-        "(id, date, hour, minute, summary, message_count, created_at_ns) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), d.isoformat(), hour, minute, summary, 1, _now_ns()),
-    )
-
-
 def insert_five_min(storage, d: _date, hour: int, minute: int, summary: str = "5min"):
     storage.db.execute(
         "INSERT INTO five_minute_summaries "
