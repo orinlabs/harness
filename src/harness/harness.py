@@ -43,6 +43,13 @@ class Harness:
         self.config = config
         self.ctx = RunContext(agent_id=config.id, run_id=run_id)
         self.tool_map: dict[str, Tool] = build_tool_map(config.adapters)
+        logger.info(
+            "Harness init: agent=%s run=%s tool_map has %d tool(s): %s",
+            config.id,
+            run_id,
+            len(self.tool_map),
+            sorted(self.tool_map.keys()),
+        )
         self.memory = MemoryService(
             agent_id=config.id,
             model=config.model,

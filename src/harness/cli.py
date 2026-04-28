@@ -339,6 +339,18 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
         "built agent config: id=%s model=%s adapters=%d",
         config.id, config.model, len(config.adapters),
     )
+    for adapter in config.adapters:
+        tool_names = [getattr(t, "name", "<unnamed>") for t in adapter.tools]
+        logger.info(
+            "built agent config: adapter=%r has %d tool(s): %s",
+            adapter.name, len(adapter.tools), tool_names,
+        )
+    total_tools = sum(len(a.tools) for a in config.adapters)
+    logger.info(
+        "built agent config: %d total tool(s) across %d adapter(s) "
+        "(built-ins added separately)",
+        total_tools, len(config.adapters),
+    )
 
     from harness import Harness
 
