@@ -231,17 +231,26 @@ class Harness:
             s.set_metadata(llm_cost=resp.usage.to_llm_cost_dict())
         llm_ended_at = _now_iso()
 
-        # If the model returned a plain-text reasoning summary (thinking models
-        # like o1 / gpt-5 with `summary: "auto"`), surface it as a sibling
-        # `thinking` span under the turn — matches the bedrock convention.
-        if resp.reasoning:
+        # Emit a sibling `thinking` span under the turn whenever the model
+        # did any reasoning work -- either returned plaintext (Anthropic,
+        # Gemini, OpenAI with `summary: "auto"`) or just a reasoning-token
+        # count (OpenAI when the raw thinking stays encrypted). That way
+        # the trace always shows a visible span right after
+        # `openrouter_api_call` confirming reasoning actually happened,
+        # not just silent tokens buried in the usage dict.
+        reasoning_tokens = resp.usage.reasoning_tokens
+        if resp.reasoning or reasoning_tokens > 0:
             emit_completed_span(
                 "thinking",
                 span_type=SpanType.TEXT,
                 started_at=llm_started_at,
                 ended_at=llm_ended_at,
-                output=resp.reasoning,
-                metadata={"model": self.config.model},
+                output=resp.reasoning or "(reasoning tokens used; no plaintext returned)",
+                metadata={
+                    "model": self.config.model,
+                    "reasoning_tokens": reasoning_tokens,
+                    "has_plaintext": bool(resp.reasoning),
+                },
             )
 
         # Accumulate onto the turn and the run-level rollup.

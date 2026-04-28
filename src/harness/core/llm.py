@@ -235,10 +235,22 @@ def complete(
         body["tools"] = tools
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
-    # Always request plain-text reasoning summaries. OpenAI reasoning models
-    # (o1, gpt-5) encrypt raw reasoning by default; `summary: "auto"` opts
-    # into a human-readable summary. No-op on non-reasoning models.
-    reasoning_cfg: dict[str, Any] = {"summary": "auto"}
+    # Turn reasoning on by default and request plain-text summaries.
+    #
+    # OpenRouter's `reasoning` object is a no-op on non-reasoning models,
+    # so always sending it is safe. But the defaults-per-field matter:
+    #
+    #   - `enabled: true` is required to activate extended thinking on
+    #     Anthropic (Claude 3.7 / 4.x) and Gemini thinking models. Without
+    #     it, those providers return zero reasoning tokens even though the
+    #     model is capable -- which is what caused "Opus 4.7 isn't
+    #     reasoning" until we set this explicitly.
+    #   - `summary: "auto"` opts OpenAI o-series / gpt-5 into a human-
+    #     readable summary instead of the default encrypted blob. Ignored
+    #     by providers that don't encrypt.
+    #   - An explicit `effort` (or the summarizer's `"minimal"` override)
+    #     wins over the implied medium effort from `enabled: true`.
+    reasoning_cfg: dict[str, Any] = {"enabled": True, "summary": "auto"}
     if reasoning_effort:
         reasoning_cfg["effort"] = reasoning_effort
     body["reasoning"] = reasoning_cfg
