@@ -16,7 +16,9 @@ Subcommands:
     harness reset-memory AGENT_ID         # Reset agent memory storage.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
-Environment is loaded from `.env` in cwd if present. Required secrets:
+Environment is loaded from the first `.env` found by walking up from cwd
+(so a per-repo `.env` shadows an org-level `.env` one or more directories
+up). Required secrets:
     OPENROUTER_API_KEY
 
 Optional:
@@ -40,7 +42,6 @@ import signal
 import subprocess
 import sys
 import uuid
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -106,12 +107,12 @@ def _install_shutdown_handlers() -> None:
 
 def _load_env() -> None:
     try:
-        from dotenv import load_dotenv
+        from dotenv import find_dotenv, load_dotenv
     except ImportError:
         logger.debug("python-dotenv not installed; skipping .env load")
         return
-    env_path = Path.cwd() / ".env"
-    if env_path.exists():
+    env_path = find_dotenv(usecwd=True)
+    if env_path:
         logger.debug("loading env from %s", env_path)
         load_dotenv(env_path)
 
