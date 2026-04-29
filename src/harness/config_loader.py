@@ -17,7 +17,10 @@ YAML schema (JSON is equivalent):
     system_prompt: |          # required
       ...
     reasoning_effort: medium  # optional
-    summarizer_v2: false      # optional
+    summarizer_v2: false      # optional, legacy — prefer feature_flags below
+    feature_flags:            # optional; per-agent overrides keyed by name
+      summarizer_v2: "on"
+      auto_associative_memory: "off"
 
     tools:                    # flat list -- no adapter grouping
       - name: get_forecast
@@ -104,6 +107,7 @@ def build_agent_config(data: dict[str, Any]) -> AgentConfig:
         model=str(data["model"]),
         system_prompt=str(data["system_prompt"]),
         reasoning_effort=_opt_str(data.get("reasoning_effort")),
+        feature_flags=_feature_flags(data.get("feature_flags")),
         summarizer_v2=bool(data.get("summarizer_v2", False)),
         tools=[_tool(t) for t in data.get("tools", []) or []],
     )
@@ -153,6 +157,24 @@ def _opt_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _feature_flags(value: Any) -> dict[str, str]:
+    """Coerce the optional ``feature_flags`` block into ``dict[str, str]``.
+
+    Accepts ``None`` (no flags), a real mapping (the typical case), or any
+    other value (rejected with a clear error). Values are stringified so a
+    YAML ``true`` / ``false`` becomes the literal string ``"True"`` /
+    ``"False"`` — but new YAML configs should quote ``"on"`` / ``"off"``
+    explicitly to match Bedrock's wire format.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"feature_flags must be a mapping of name -> string value, got {type(value).__name__}"
+        )
+    return {str(k): str(v) for k, v in value.items()}
 
 
 def _require_keys(data: dict[str, Any], keys: tuple[str, ...], *, where: str) -> None:
