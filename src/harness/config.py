@@ -74,9 +74,28 @@ class AgentConfig:
     system_prompt: str
     tools: "list[ExternalToolSpec | Tool]" = field(default_factory=list)
     reasoning_effort: str | None = None
-    # When True, ``MemoryService`` defers all summarization to end-of-run
-    # and uses the past-tense-only prompt variant. Off by default so
-    # existing agents keep the original 1m -> 5m -> hourly -> ... cascade
-    # and mid-run summary triggers. Plumbed from the platform's agent
-    # config (e.g. the ``summarizer_v2`` feature flag on Bedrock).
+    # Generic per-agent feature flags. Maps flag name -> stored value
+    # (typically ``"on"`` / ``"off"`` but free-form strings are allowed
+    # so non-boolean flags work — e.g. a tier name or a model variant).
+    # Plumbed from the platform's agent config (Bedrock's ``feature_flags``
+    # field on the ``harness-config`` payload, or ``feature_flags:`` in
+    # standalone YAML configs). Use ``is_enabled(name)`` for the common
+    # boolean check; use ``feature_flags.get(name, default)`` for value
+    # reads.
+    feature_flags: dict[str, str] = field(default_factory=dict)
+    # Legacy: explicit summarizer_v2 toggle. Kept for backward compat
+    # with YAML configs that predate ``feature_flags``. New configs
+    # should set ``feature_flags["summarizer_v2"] = "on"`` instead;
+    # ``Harness.__init__`` honors either source.
     summarizer_v2: bool = False
+
+    def is_enabled(self, flag: str) -> bool:
+        """Return True if ``feature_flags[flag]`` resolves to ``"on"``.
+
+        Matches Bedrock's ``FeatureFlag.is_enabled(name, agent)`` semantics:
+        any value other than the literal string ``"on"`` (case-insensitive)
+        — including the empty string and a missing flag — counts as off.
+        Use ``feature_flags.get(name, default)`` directly when a flag is
+        modeled as a free-form string instead of a boolean toggle.
+        """
+        return (self.feature_flags.get(flag, "") or "").strip().lower() == "on"
