@@ -1,0 +1,125 @@
+name: publish-daytona-snapshot
+
+# On every push to main: build the harness image, push it to GHCR with the
+# commit SHA as its tag, then point the Daytona snapshot named
+# `harness-latest` at the new image. Consumers always reference the snapshot
+# by its constant name (`harness-latest`) -- they never have to update SHAs.
+#
+# Daytona forbids `:latest`/`:lts`/`:stable` as IMAGE tags (they're moving
+# targets), but snapshot NAMES are user-controlled identifiers. So we tag
+# the image with an immutable `:sha-<short>` and reuse the snapshot name.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  SNAPSHOT_NAME: harness-latest
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image reference
+        id: meta
+        run: |
+          repo_lower="${GITHUB_REPOSITORY,,}"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          image="${REGISTRY}/${repo_lower}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "ref=${image}:sha-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Daytona expects amd64. Building only one platform keeps the
+          # workflow fast; cross-arch builds aren't useful here.
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:main
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Update Daytona snapshot
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          DAYTONA_API_URL: ${{ secrets.DAYTONA_API_URL || 'https://app.daytona.io/api' }}
+          IMAGE_REF: ${{ steps.meta.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DAYTONA_API_KEY:-}" ]]; then
+            echo "DAYTONA_API_KEY secret is not set; skipping snapshot publish."
+            exit 1
+          fi
+
+          api() {
+            local method="$1" path="$2" data="${3:-}"
+            local url="${DAYTONA_API_URL%/}${path}"
+            if [[ -n "$data" ]]; then
+              curl -sS -o /tmp/resp -w "%{http_code}" \
+                -X "$method" "$url" \
+                -H "Authorization: Bearer ${DAYTONA_API_KEY}" \
+                -H "Content-Type: application/json" \
+                --data "$data"
+            else
+              curl -sS -o /tmp/resp -w "%{http_code}" \
+                -X "$method" "$url" \
+                -H "Authorization: Bearer ${DAYTONA_API_KEY}"
+            fi
+          }
+
+          echo "Deleting any existing snapshot named ${SNAPSHOT_NAME}..."
+          status=$(api DELETE "/snapshots/${SNAPSHOT_NAME}")
+          case "$status" in
+            200|202|204|404) echo "delete -> $status (ok)";;
+            *) echo "delete -> $status"; cat /tmp/resp; exit 1;;
+          esac
+
+          echo "Creating snapshot ${SNAPSHOT_NAME} -> ${IMAGE_REF}..."
+          body=$(jq -nc \
+            --arg name "$SNAPSHOT_NAME" \
+            --arg image "$IMAGE_REF" \
+            '{name: $name, imageName: $image, cpu: 1, memory: 1, disk: 3}')
+          status=$(api POST "/snapshots" "$body")
+          case "$status" in
+            200|201|202)
+              echo "create -> $status"
+              cat /tmp/resp
+              echo
+              ;;
+            *)
+              echo "create -> $status"
+              cat /tmp/resp
+              exit 1
+              ;;
+          esac
+
+          echo
+          echo "Snapshot ${SNAPSHOT_NAME} now points at ${IMAGE_REF}."

@@ -1,0 +1,19 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+*.egg-info
+dist
+build
+.env
+*.sqlite
+*.sqlite-journal
+.DS_Store
+
+# Test + dev artifacts that don't belong in the snapshot.
+tests/
+exports/
+.cursor/

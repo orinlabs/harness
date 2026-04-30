@@ -26,6 +26,36 @@ When the harness itself runs on durable infrastructure (e.g. a Daytona
 sandbox), the sqlite file persists with the host. There's no separate
 storage backend to configure.
 
+## Daytona snapshot
+
+Every commit to `main` builds and publishes a Docker image to GHCR and
+points the Daytona snapshot named `harness-latest` at the new image. See
+[`Dockerfile`](./Dockerfile) for the build; see
+[`.github/workflows/publish-daytona-snapshot.yml`](./.github/workflows/publish-daytona-snapshot.yml)
+for the publish step.
+
+Consumers create sandboxes with `snapshot="harness-latest"` and always
+get the most recent harness — the snapshot name is constant; only the
+image SHA behind it changes.
+
+```python
+from daytona import Daytona, CreateSandboxFromSnapshotParams
+
+sb = Daytona().create(CreateSandboxFromSnapshotParams(snapshot="harness-latest"))
+sb.process.exec("harness agent demo")
+```
+
+**Required repo secrets** (Settings → Secrets → Actions):
+
+- `DAYTONA_API_KEY` — used by the publish workflow to delete + recreate
+  the snapshot.
+- `DAYTONA_API_URL` (optional) — defaults to `https://app.daytona.io/api`.
+
+**One-time Daytona setup:** add a [GHCR registry](https://www.daytona.io/docs/en/snapshots/#github-container-registry-ghcr)
+to your Daytona org so the snapshot can pull from
+`ghcr.io/orinlabs/harness:sha-...`. Or make the GHCR package public and
+skip the registry step.
+
 ## Setup
 
 ```bash
