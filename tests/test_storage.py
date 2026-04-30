@@ -175,22 +175,6 @@ def test_delete_local_agent_db_removes_sqlite_and_sidecars(storage_env, custom_m
     assert all(not path.exists() for path in sidecars)
 
 
-def test_archive_agent_sandbox_requires_daytona_env_when_requested(storage_env, monkeypatch):
-    storage = storage_env
-    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
-
-    with pytest.raises(RuntimeError, match="DAYTONA_API_KEY"):
-        storage.archive_agent_sandbox("agent-delete", require_config=True)
-
-
-def test_purge_agent_sandbox_requires_daytona_env_when_requested(storage_env, monkeypatch):
-    storage = storage_env
-    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
-
-    with pytest.raises(RuntimeError, match="DAYTONA_API_KEY"):
-        storage.purge_agent_sandbox("agent-delete", require_config=True)
-
-
 def test_reset_agent_memory_discards_existing_local_memory(storage_env, custom_migrations):
     storage = storage_env
     conn = storage.load("agent-reset")
@@ -207,7 +191,7 @@ def test_reset_agent_memory_discards_existing_local_memory(storage_env, custom_m
     storage.flush()
 
     result = storage.reset_agent_memory("agent-reset")
-    assert result == {"local": True, "remote": False}
+    assert result == {"local": True}
 
     conn = storage.load("agent-reset")
     assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 0
