@@ -18,9 +18,8 @@ binary handles both.
 
 ## Storage
 
-Per-agent sqlite, on the local filesystem. Default location is
-`~/.harness/agents/<agent_id>.sqlite`; override with `HARNESS_STORAGE_ROOT`
-to point storage somewhere else (the test suite uses this).
+Per-agent sqlite, on the local filesystem. Harness chooses and owns the
+storage location; today that is `~/.harness/agents/<agent_id>.sqlite`.
 
 When the harness itself runs on durable infrastructure (e.g. a Daytona
 sandbox), the sqlite file persists with the host. There's no separate
@@ -91,9 +90,6 @@ A minimal `.env`:
 
 ```bash
 OPENROUTER_API_KEY=...
-
-# Optional: override where per-agent sqlite files live.
-# HARNESS_STORAGE_ROOT=~/.harness/agents
 
 # Optional: enable Bedrock mode. When unset, harness runs standalone.
 BEDROCK_URL=http://127.0.0.1:8000
@@ -269,8 +265,8 @@ Testing expectations:
 
 - Default tests exclude `tests/memory`.
 - LLM-related tests use real OpenRouter calls.
-- Storage runs against per-test tmp dirs via `HARNESS_STORAGE_ROOT`; nothing
-  ever writes into `~/.harness/`.
+- Storage tests patch harness-owned storage internals to per-test tmp dirs;
+  nothing ever writes into `~/.harness/`.
 - If an API key is required and missing, the run fails loudly.
 
 ## Repo Map

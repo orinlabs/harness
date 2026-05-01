@@ -10,14 +10,14 @@ import pytest
 
 @pytest.fixture
 def storage_env(tmp_path, monkeypatch):
-    """Point storage at a tmp dir and reload the module so env vars take effect."""
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
+    """Point private storage internals at a tmp dir for test isolation."""
 
     import importlib
 
     from harness.core import storage as storage_module
 
     importlib.reload(storage_module)
+    monkeypatch.setattr(storage_module, "_STORAGE_ROOT", tmp_path)
     yield storage_module
     storage_module.close()
 
@@ -46,6 +46,21 @@ def test_fresh_db_applies_initial_migration(storage_env, custom_migrations):
     assert "messages" in tables
     assert "one_minute_summaries" in tables
     assert "monthly_summaries" in tables
+
+
+def test_storage_root_is_harness_owned_not_env_configurable(tmp_path, monkeypatch):
+    import importlib
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("HARNESS_STORAGE_ROOT", "/tmp/not-harness-choice")
+
+    from harness.core import storage as storage_module
+
+    importlib.reload(storage_module)
+
+    assert storage_module._storage_root() == fake_home / ".harness" / "agents"
 
 
 def test_messages_survive_reopen(storage_env, custom_migrations):
@@ -192,8 +207,8 @@ def test_load_migrates_legacy_sqlite_into_new_layout(
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
 
-    # Force the storage module to re-read HOME (Path.home() resolves at
-    # call time, but _DEFAULT_STORAGE_ROOT is module-level, so reload).
+    # Force the storage module to re-read HOME (_STORAGE_ROOT is module-level,
+    # so reload).
     import importlib
 
     from harness.core import storage as storage_module

@@ -28,8 +28,6 @@ up). Required secrets:
     OPENROUTER_API_KEY
 
 Optional:
-    HARNESS_STORAGE_ROOT  where per-agent sqlite files live
-                          (default: ~/.harness/agents)
     HARNESS_AGENT_ID      default agent id for `harness boot`
     HARNESS_RUN_ID        default run id for `harness boot`
     HARNESS_COMMIT_SHA    git SHA to check out before booting

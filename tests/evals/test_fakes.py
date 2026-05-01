@@ -36,7 +36,7 @@ def agent_db(tmp_path, monkeypatch):
 
     Test-local: mirrors the eval runner's pre-scenario setup.
     """
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(storage, "_STORAGE_ROOT", tmp_path)
     storage.load("test-agent-fakes")
     apply_migrations()
     try:

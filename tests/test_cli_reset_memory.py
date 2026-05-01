@@ -5,12 +5,12 @@ import importlib
 
 def test_reset_memory_cli_resets_local_memory(tmp_path, monkeypatch, capsys):
     storage_root = tmp_path / "storage"
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(storage_root))
     monkeypatch.chdir(tmp_path)
 
     from harness.core import storage
 
     importlib.reload(storage)
+    monkeypatch.setattr(storage, "_STORAGE_ROOT", storage_root)
     conn = storage.load("agent-cli-reset")
     conn.execute(
         "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",

@@ -14,13 +14,13 @@ NS_PER_MINUTE = 60 * 1_000_000_000
 @pytest.fixture
 def memory_env(tmp_path, monkeypatch, openrouter_key):
     """Fresh sqlite + loaded migrations + clean storage module."""
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
     mig_dir = Path(__file__).parent.parent / "src/harness/memory/migrations"
     monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
 
     from harness.core import storage as storage_module
 
     importlib.reload(storage_module)
+    monkeypatch.setattr(storage_module, "_STORAGE_ROOT", tmp_path)
     storage_module.load("agent-memtest")
     try:
         yield storage_module

@@ -22,13 +22,13 @@ import pytest
 @pytest.fixture
 def storage_env(tmp_path, monkeypatch):
     """Fresh sqlite + applied migrations, scoped to 'agent-test'."""
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
     mig_dir = Path(__file__).parent.parent.parent / "src/harness/memory/migrations"
     monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
 
     from harness.core import storage as storage_module
 
     importlib.reload(storage_module)
+    monkeypatch.setattr(storage_module, "_STORAGE_ROOT", tmp_path)
     storage_module.load("agent-test")
     try:
         yield storage_module

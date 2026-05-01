@@ -28,7 +28,6 @@ CHEAP_MODEL = "openai/gpt-4o-mini"
 @pytest.fixture
 def env(tmp_path, monkeypatch, openrouter_key):
     """Fresh storage + fake platform + core modules reloaded to pick up env."""
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
     mig_dir = Path(__file__).parent.parent.parent / "src/harness/memory/migrations"
     monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
 
@@ -42,6 +41,7 @@ def env(tmp_path, monkeypatch, openrouter_key):
     importlib.reload(storage)
     importlib.reload(tracer)
     importlib.reload(llm)
+    monkeypatch.setattr(storage, "_STORAGE_ROOT", tmp_path)
 
     try:
         yield platform

@@ -23,7 +23,6 @@ CHEAP_THINKING_MODEL = "anthropic/claude-haiku-4.5"
 @pytest.fixture
 def harness_env(tmp_path, monkeypatch, openrouter_key, fake_platform):
     """Full setup: storage root, migrations, platform URL, reloaded modules."""
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
     mig_dir = Path(__file__).parent.parent / "src/harness/memory/migrations"
     monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
 
@@ -32,6 +31,7 @@ def harness_env(tmp_path, monkeypatch, openrouter_key, fake_platform):
     importlib.reload(storage)
     importlib.reload(tracer)
     importlib.reload(llm)
+    monkeypatch.setattr(storage, "_STORAGE_ROOT", tmp_path)
 
     yield fake_platform
 

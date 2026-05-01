@@ -1,15 +1,9 @@
 """Per-agent sqlite storage, local filesystem only.
 
-Each agent gets its own sqlite file at ``<storage_root>/<agent_id>.sqlite``.
-Storage is plain WAL-mode sqlite — no remote backend, no upload/download
-roundtrip on the hot path. The harness itself can be deployed onto fast-
-start infra (e.g. Daytona) without storage having to know.
-
-Storage root precedence:
-
-1. ``HARNESS_STORAGE_ROOT`` env var (used by tests and ops who want to
-   stash agent DBs somewhere specific).
-2. ``~/.harness/agents`` (default for interactive dev / CLI use).
+Each agent gets its own sqlite file in harness-owned storage. Storage is plain
+WAL-mode sqlite — no remote backend, no upload/download roundtrip on the hot
+path. The harness itself can be deployed onto fast-start infra (e.g. Daytona)
+without storage having to know.
 
 Lifecycle:
 
@@ -44,7 +38,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_STORAGE_ROOT = Path.home() / ".harness" / "agents"
+_STORAGE_ROOT = Path.home() / ".harness" / "agents"
 _MIGRATIONS_DIR = Path(__file__).parent.parent / "memory" / "migrations"
 _SAFE_ID_RE = re.compile(r"[^a-z0-9-]+")
 
@@ -111,15 +105,12 @@ def fetch_agent_db(agent_id: str) -> Path:
     Read-only counterpart to ``load()`` — no migrations, no connection,
     no global state. Intended for inspection tooling.
 
-    Raises ``FileNotFoundError`` if the agent has never run (or if
-    ``HARNESS_STORAGE_ROOT`` points somewhere else than the run that
-    wrote the file).
+    Raises ``FileNotFoundError`` if the agent has never run.
     """
     p = _db_path(agent_id)
     if not p.exists():
         raise FileNotFoundError(
-            f"No local sqlite at {p}. Agent {agent_id!r} has never run, "
-            "or HARNESS_STORAGE_ROOT points elsewhere."
+            f"No local sqlite at {p}. Agent {agent_id!r} has never run."
         )
     return p
 
@@ -130,10 +121,8 @@ def fetch_agent_db(agent_id: str) -> Path:
 
 
 def _storage_root() -> Path:
-    raw = os.environ.get("HARNESS_STORAGE_ROOT")
-    p = Path(raw).expanduser() if raw else _DEFAULT_STORAGE_ROOT
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    _STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    return _STORAGE_ROOT
 
 
 def _db_path(agent_id: str) -> Path:
