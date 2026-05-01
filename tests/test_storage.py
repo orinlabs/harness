@@ -170,20 +170,121 @@ def test_delete_local_agent_db_removes_sqlite_and_sidecars(storage_env, custom_m
     assert all(not path.exists() for path in sidecars)
 
 
-def test_archive_agent_sandbox_requires_daytona_env_when_requested(storage_env, monkeypatch):
+def test_load_migrates_legacy_sqlite_into_new_layout(
+    storage_env, custom_migrations, tmp_path, monkeypatch
+):
+    """Pre-PR-#8 sandboxes have ``~/harness.sqlite`` (one file per sandbox).
+    The new harness must rename that into ``~/.harness/agents/<id>.sqlite``
+    on first ``load()`` so existing agents don't appear to start over.
+
+    This is the production migration path for any agent whose Daytona
+    sandbox is reused across the upgrade -- bedrock starts the existing
+    sandbox, exec'd ``harness agent`` boots, and the file lands at the
+    new path before the connection opens. Schema is identical, so we
+    pre-seed real harness data and assert it survives.
+    """
     storage = storage_env
-    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
 
-    with pytest.raises(RuntimeError, match="DAYTONA_API_KEY"):
-        storage.archive_agent_sandbox("agent-delete", require_config=True)
+    # Simulate "running inside the legacy sandbox": HOME is the place the
+    # old harness wrote ``harness.sqlite`` to. We point HOME at a tmp dir
+    # so we don't touch the developer's actual ~/harness.sqlite.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    # Force the storage module to re-read HOME (Path.home() resolves at
+    # call time, but _DEFAULT_STORAGE_ROOT is module-level, so reload).
+    import importlib
+
+    from harness.core import storage as storage_module
+
+    importlib.reload(storage_module)
+    storage = storage_module
+
+    # Build a real legacy sqlite at ~/harness.sqlite with a populated
+    # schema and a recognizable row, plus a WAL sidecar to prove the
+    # sidecar-rename path runs too.
+    legacy_path = fake_home / "harness.sqlite"
+    seed = storage._open_sqlite(legacy_path)
+    storage._apply_migrations(seed)
+    seed.execute(
+        "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+        ("legacy-msg", 42, "user", '{"hello": "from legacy sandbox"}'),
+    )
+    seed.commit()
+    seed.close()
+    Path(f"{legacy_path}-wal").touch()  # crude but adequate for the rename test
+
+    assert legacy_path.exists()
+
+    # Load under a real-looking agent id; the migration should rename in
+    # place and the connection should land on the renamed file.
+    conn = storage.load("agent-legacy")
+    new_path = storage._db_path("agent-legacy")
+
+    assert not legacy_path.exists(), "legacy file must be renamed, not copied"
+    assert not Path(f"{legacy_path}-wal").exists()
+    assert new_path.exists()
+
+    rows = list(conn.execute("SELECT id, content_json FROM messages"))
+    assert len(rows) == 1
+    assert rows[0]["id"] == "legacy-msg"
+    assert "from legacy sandbox" in rows[0]["content_json"]
+
+    # Idempotent: a second load is a no-op (legacy gone, new in place).
+    storage.close()
+    conn2 = storage.load("agent-legacy")
+    assert conn2.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 1
 
 
-def test_purge_agent_sandbox_requires_daytona_env_when_requested(storage_env, monkeypatch):
-    storage = storage_env
-    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
+def test_load_with_legacy_and_new_both_present_does_not_clobber(
+    storage_env, custom_migrations, tmp_path, monkeypatch
+):
+    """If something put both a legacy and a new-layout DB on disk, refuse
+    to overwrite. The new file wins (it's what ``load()`` will open),
+    and the legacy file stays put for human cleanup. This branch should
+    never hit in real life -- legacy was one DB per sandbox -- but
+    silently clobbering would lose data, so we bail."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
 
-    with pytest.raises(RuntimeError, match="DAYTONA_API_KEY"):
-        storage.purge_agent_sandbox("agent-delete", require_config=True)
+    import importlib
+
+    from harness.core import storage as storage_module
+
+    importlib.reload(storage_module)
+    storage = storage_module
+
+    # Legacy file with marker row.
+    legacy_path = fake_home / "harness.sqlite"
+    legacy = storage._open_sqlite(legacy_path)
+    storage._apply_migrations(legacy)
+    legacy.execute(
+        "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+        ("legacy", 1, "user", "{}"),
+    )
+    legacy.commit()
+    legacy.close()
+
+    # New-layout file with a different marker row.
+    new_path = storage._db_path("agent-conflict")
+    new = storage._open_sqlite(new_path)
+    storage._apply_migrations(new)
+    new.execute(
+        "INSERT INTO messages (id, ts_ns, role, content_json) VALUES (?, ?, ?, ?)",
+        ("new", 2, "user", "{}"),
+    )
+    new.commit()
+    new.close()
+
+    conn = storage.load("agent-conflict")
+
+    # Legacy preserved, new opened.
+    assert legacy_path.exists()
+    rows = list(conn.execute("SELECT id FROM messages"))
+    ids = sorted(r["id"] for r in rows)
+    assert ids == ["new"], f"expected only the new-layout row, got {ids}"
 
 
 def test_reset_agent_memory_discards_existing_local_memory(storage_env, custom_migrations):
@@ -202,7 +303,7 @@ def test_reset_agent_memory_discards_existing_local_memory(storage_env, custom_m
     storage.flush()
 
     result = storage.reset_agent_memory("agent-reset")
-    assert result == {"local": True, "remote": False}
+    assert result == {"local": True}
 
     conn = storage.load("agent-reset")
     assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 0

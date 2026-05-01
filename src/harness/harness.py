@@ -218,6 +218,27 @@ class Harness:
             self.memory.update_summaries()
 
         system, messages = self.memory.build_llm_inputs(self.config.system_prompt)
+        # Anthropic disables extended thinking whenever the last message is
+        # NOT a user/tool message (or when there are no user-role messages
+        # at all) -- on turn 0 of a fresh run `messages` is empty and only
+        # a system prompt would be sent, which silently returns
+        # reasoning_tokens=0 on every Claude thinking model we tested.
+        # Inject an ephemeral kick-off user message for the LLM call only
+        # (NOT written to memory) so Claude engages reasoning from turn 0.
+        # No-op when the tail already provides something for the model to
+        # respond to.
+        needs_kickoff = not messages or messages[-1].get("role") == "assistant"
+        if needs_kickoff:
+            messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Proceed with your next action. Think through it, "
+                        "then call the appropriate tool."
+                    ),
+                },
+            ]
         logger.info(
             "turn %d: self.tool_map has %d tool(s) before schema build: %s",
             self.ctx.turn,
@@ -226,10 +247,11 @@ class Harness:
         )
         tools_schema = [t.schema.to_openai() for t in self.tool_map.values()]
         logger.info(
-            "turn %d built inputs: system_chars=%d messages=%d tools=%d",
+            "turn %d built inputs: system_chars=%d messages=%d (kickoff_injected=%s) tools=%d",
             self.ctx.turn,
             len(system or ""),
             len(messages),
+            needs_kickoff,
             len(tools_schema),
         )
         # Defense: tool_map was populated at init but the schema list came
@@ -260,7 +282,22 @@ class Harness:
                     system=system,
                     messages=messages,
                     tools=tools_schema,
-                    tool_choice="required",
+                    # Intentionally `auto`, not `required`. OpenAI's
+                    # `tool_choice: "required"` maps to Anthropic's
+                    # `any`/`tool` modes on OpenRouter, and Anthropic
+                    # disables extended thinking whenever tool use is
+                    # forced -- our Claude 4.x runs were coming back
+                    # with reasoning_tokens=0 every turn because of
+                    # this, no matter how much we tweaked the
+                    # `reasoning` block.
+                    #
+                    # `auto` lets the model think first and still pick
+                    # a tool; when it doesn't call one, the nudge path
+                    # below (`self.memory.nudge()`) prompts it to call
+                    # a tool or sleep on the next turn. That matches
+                    # the ergonomics of every modern agent SDK and
+                    # costs at most one wasted turn per run.
+                    tool_choice="auto",
                     reasoning_effort=self.config.reasoning_effort,
                 )
             except llm.OpenRouterError as e:
@@ -274,7 +311,23 @@ class Harness:
                 )
                 raise
             s.output(json.dumps(resp.raw, default=str)[:20000])
-            s.set_metadata(llm_cost=resp.usage.to_llm_cost_dict())
+            # Surface reasoning on the llm_span itself, not just as a nested
+            # sibling span. Two reasons:
+            #   1. `s.output` is `resp.raw` truncated at 20kB. Anthropic
+            #      streams reasoning as per-token `reasoning_details`
+            #      deltas (one dict per ~1 token), so raw JSON routinely
+            #      blows past 20kB on thinking models and the reasoning
+            #      text gets chopped off the end of the output field.
+            #   2. Clients viewing the span in Bedrock expect a first-
+            #      class `reasoning` / `reasoning_tokens` on the LLM call
+            #      metadata, not to dig into a sibling span's output.
+            reasoning_tokens = resp.usage.reasoning_tokens
+            llm_metadata: dict = {"llm_cost": resp.usage.to_llm_cost_dict()}
+            if resp.reasoning:
+                llm_metadata["reasoning"] = resp.reasoning
+            if reasoning_tokens > 0:
+                llm_metadata["reasoning_tokens"] = reasoning_tokens
+            s.set_metadata(**llm_metadata)
         llm_ended_at = _now_iso()
 
         # Emit a sibling `thinking` span under the turn whenever the model
@@ -284,8 +337,13 @@ class Harness:
         # the trace always shows a visible span right after
         # `openrouter_api_call` confirming reasoning actually happened,
         # not just silent tokens buried in the usage dict.
-        reasoning_tokens = resp.usage.reasoning_tokens
         if resp.reasoning or reasoning_tokens > 0:
+            logger.info(
+                "emitting thinking span: reasoning_tokens=%d has_plaintext=%s text_chars=%d",
+                reasoning_tokens,
+                bool(resp.reasoning),
+                len(resp.reasoning or ""),
+            )
             emit_completed_span(
                 "thinking",
                 span_type=SpanType.TEXT,
@@ -297,6 +355,12 @@ class Harness:
                     "reasoning_tokens": reasoning_tokens,
                     "has_plaintext": bool(resp.reasoning),
                 },
+            )
+        else:
+            logger.info(
+                "no thinking span emitted: reasoning_tokens=0 and no "
+                "plaintext reasoning from model=%s",
+                self.config.model,
             )
 
         # Accumulate onto the turn and the run-level rollup.

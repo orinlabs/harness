@@ -8,14 +8,78 @@ emits traces.
 Harness runs in two modes:
 
 - **Standalone.** Everything in-process; config comes from `./agents/<name>.yaml`.
-  Needs `OPENROUTER_API_KEY`. Nothing talks to any cloud besides OpenRouter
-  (and Daytona, if storage is configured that way).
+  Needs `OPENROUTER_API_KEY`. Nothing talks to any cloud besides OpenRouter.
 - **Cloud (Bedrock).** Config is fetched from Bedrock; traces + sleep go
   back to Bedrock. Triggered automatically when `BEDROCK_URL` and
   `BEDROCK_TOKEN` are set.
 
 The mode is picked per-run based on what's in the environment; the same
 binary handles both.
+
+## Storage
+
+Per-agent sqlite, on the local filesystem. Default location is
+`~/.harness/agents/<agent_id>.sqlite`; override with `HARNESS_STORAGE_ROOT`
+to point storage somewhere else (the test suite uses this).
+
+When the harness itself runs on durable infrastructure (e.g. a Daytona
+sandbox), the sqlite file persists with the host. There's no separate
+storage backend to configure.
+
+## Daytona snapshot
+
+Every commit to `main` builds and publishes a Docker image to GHCR and
+points the Daytona snapshot named `harness-latest` at the new image. See
+[`Dockerfile`](./Dockerfile) for the build; see
+[`.github/workflows/publish-daytona-snapshot.yml`](./.github/workflows/publish-daytona-snapshot.yml)
+for the publish step.
+
+Consumers create sandboxes with `snapshot="harness-latest"` and always
+get the most recent harness — the snapshot name is constant; only the
+image SHA behind it changes.
+
+### Bedrock contract
+
+Bedrock's only job inside the sandbox is to run **`harness boot`** with
+the right env vars. `boot` then handles the rest (git fetch + checkout
+to a target SHA, `uv sync`, exec into `harness agent`).
+
+```python
+from daytona import Daytona, CreateSandboxFromSnapshotParams
+
+sb = Daytona().create(CreateSandboxFromSnapshotParams(snapshot="harness-latest"))
+sb.process.exec(
+    "harness boot",
+    env={
+        "HARNESS_AGENT_ID":   agent_id,
+        "HARNESS_RUN_ID":     run_id,
+        "HARNESS_COMMIT_SHA": target_sha,   # any reachable commit on orinlabs/harness
+        "BEDROCK_URL":        bedrock_url,
+        "BEDROCK_TOKEN":      bedrock_token,
+        "OPENROUTER_API_KEY": openrouter_key,
+    },
+)
+```
+
+The harness repo is public, so no `GITHUB_TOKEN` is needed for the
+fetch. If it ever goes private, `boot` reads `GITHUB_TOKEN` from env
+and uses it for that one fetch only (never persisted to `.git/config`).
+
+`boot` and `agent` are stacked: `boot` is the bedrock-facing
+self-updating wrapper, `agent` is the actual loop. `os.execvp` between
+them is what makes "fetch new code, then run new code" actually pick up
+the new code (the running interpreter is dropped).
+
+**Required repo secrets** (Settings → Secrets → Actions):
+
+- `DAYTONA_API_KEY` — used by the publish workflow to delete + recreate
+  the snapshot.
+- `DAYTONA_API_URL` (optional) — defaults to `https://app.daytona.io/api`.
+
+**One-time Daytona setup:** add a [GHCR registry](https://www.daytona.io/docs/en/snapshots/#github-container-registry-ghcr)
+to your Daytona org so the snapshot can pull from
+`ghcr.io/orinlabs/harness:sha-...`. Or make the GHCR package public and
+skip the registry step.
 
 ## Setup
 
@@ -28,11 +92,8 @@ A minimal `.env`:
 ```bash
 OPENROUTER_API_KEY=...
 
-# Optional: per-agent Daytona sandbox. Without this, storage falls back to
-# a local sqlite file under $HARNESS_STORAGE_ROOT (default /tmp/harness).
-DAYTONA_API_KEY=dtn_...
-DAYTONA_API_URL=https://app.daytona.io/api
-HARNESS_DAYTONA_AUTO_STOP_MINUTES=15
+# Optional: override where per-agent sqlite files live.
+# HARNESS_STORAGE_ROOT=~/.harness/agents
 
 # Optional: enable Bedrock mode. When unset, harness runs standalone.
 BEDROCK_URL=http://127.0.0.1:8000
@@ -42,9 +103,6 @@ BEDROCK_TOKEN=...
 Notes:
 
 - Missing API keys fail loudly; Harness does not silently skip live calls.
-- `DAYTONA_API_KEY` without a running Daytona is fine for standalone dev as
-  long as tests don't touch storage. Tests strip `DAYTONA_*` before
-  touching storage (see `tests/conftest.py`).
 
 ## Standalone Quickstart
 
@@ -150,15 +208,14 @@ uv run harness agent <AGENT_UUID> --local --run-id <RUN_UUID>
 env); standalone mode errors because there's nowhere to put a generated
 config.
 
-### Spin-down / reset
+### Reset
 
 ```bash
-uv run harness delete-agent <AGENT_UUID>
 uv run harness reset-memory <AGENT_UUID>
 ```
 
-These operate on local storage + the Daytona sandbox (when configured).
-They don't require Bedrock.
+Wipes the agent's local sqlite (and WAL/SHM sidecars). The next
+`harness agent` recreates it empty and reapplies migrations.
 
 ## Evals
 
@@ -212,19 +269,19 @@ Testing expectations:
 
 - Default tests exclude `tests/memory`.
 - LLM-related tests use real OpenRouter calls.
-- Tests never talk to a real Daytona sandbox; `tests/conftest.py` strips
-  `DAYTONA_*` from the environment before any storage module loads.
+- Storage runs against per-test tmp dirs via `HARNESS_STORAGE_ROOT`; nothing
+  ever writes into `~/.harness/`.
 - If an API key is required and missing, the run fails loudly.
 
 ## Repo Map
 
 ```text
-src/harness/cli.py                 CLI entrypoint: harness agent / eval / delete-agent / reset-memory
+src/harness/cli.py                 CLI entrypoint: harness agent / eval / reset-memory / inspect
 src/harness/harness.py             Main agent loop
 src/harness/config.py              AgentConfig, ExternalToolSpec, ToolAuth
 src/harness/config_loader.py       Load AgentConfig from ./agents/<name>.yaml
 src/harness/core/llm.py            OpenRouter client
-src/harness/core/storage.py        Per-agent sqlite, optionally backed by Daytona
+src/harness/core/storage.py        Per-agent local sqlite (~/.harness/agents/)
 src/harness/core/tracer.py         Trace/span context manager; delegates HTTP to TraceSink
 src/harness/core/tracing.py        TraceSink protocol + NullTraceSink + InMemoryTraceSink
 src/harness/core/runtime.py        AgentRuntime protocol + LocalAgentRuntime

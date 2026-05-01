@@ -112,7 +112,15 @@ def test_complete_translates_anthropic_slug_before_sending(openrouter_key):
         f"expected openrouter to route to an anthropic model, got {resp.usage.model!r}"
     )
     assert "haiku" in resp.usage.model.lower()
-    assert resp.usage.total_cost > 0
+    # We deliberately do NOT assert total_cost > 0 here. OpenRouter
+    # occasionally canonicalises Haiku 4.5 to a date-pinned variant
+    # (e.g. `anthropic/claude-4.5-haiku-20251001`) whose pricing row
+    # hasn't been populated yet; the call still succeeds and returns
+    # tokens, but `usage.cost` comes back as 0. The dedicated cost
+    # assertion lives in `test_plain_completion_returns_text_and_cost`
+    # against gpt-4o-mini, which has stable pricing.
+    assert resp.usage.prompt_tokens > 0
+    assert resp.usage.completion_tokens > 0
 
 
 def test_multi_turn_message_history(openrouter_key):
