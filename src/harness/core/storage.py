@@ -13,9 +13,11 @@ Storage root precedence:
 
 Lifecycle:
 
-- ``load(agent_id)``        — open/create the sqlite file, apply pending
-                               migrations, install it as the module-level
-                               ``db`` connection.
+- ``load(agent_id)``        — migrate any legacy ``~/harness.sqlite`` file
+                               into the new per-agent path, open/create the
+                               sqlite file, apply pending migrations, and
+                               install it as the module-level ``db``
+                               connection.
 - ``flush()``                — commit any in-flight writes.
 - ``close()``                — close the connection (used by tests to
                                simulate process exit).
@@ -58,6 +60,7 @@ def load(agent_id: str) -> Any:
     """Open the per-agent database and apply any pending migrations."""
     global db, _loaded_agent_id
 
+    _migrate_legacy_db(agent_id)
     conn = _open_local(agent_id)
     _apply_migrations(conn)
 
@@ -146,6 +149,73 @@ def _open_sqlite(path: Path) -> sqlite3.Connection:
 
 def _open_local(agent_id: str) -> sqlite3.Connection:
     return _open_sqlite(_db_path(agent_id))
+
+
+# ---------------------------------------------------------------------------
+# Legacy layout migration
+# ---------------------------------------------------------------------------
+
+
+_LEGACY_DB_NAME = "harness.sqlite"
+
+
+def _legacy_db_path() -> Path:
+    """Pre-PR-#8 location: a single ``~/harness.sqlite`` per Daytona sandbox.
+
+    The old harness ran on the bedrock host and uploaded one sqlite per
+    agent into a per-agent sandbox, so it didn't need to multiplex by
+    agent_id inside the sandbox -- there was always exactly one DB at
+    ``~/harness.sqlite``. The new harness runs *inside* the sandbox and
+    keeps storage under ``~/.harness/agents/<agent_id>.sqlite`` so the
+    layout matches local-dev and tests. This helper points at the old
+    spot so we can rename in place.
+    """
+    return Path.home() / _LEGACY_DB_NAME
+
+
+def _migrate_legacy_db(agent_id: str) -> None:
+    """Move pre-PR-#8 sqlite into the new per-agent path, if present.
+
+    Schema is identical (same migrations dir, same ``applied_migrations``
+    rows); only the path moved. Idempotent: after the first successful
+    rename the legacy file no longer exists, and subsequent loads pay the
+    cost of one ``Path.exists()`` check.
+
+    Bails (logs + leaves both files in place) if both the legacy file and
+    a new-layout file already exist for this agent. That should never
+    happen in practice -- the legacy layout was one DB per sandbox -- but
+    if it does, refusing to clobber is the conservative move.
+    """
+    legacy = _legacy_db_path()
+    if not legacy.exists():
+        return
+
+    new = _db_path(agent_id)
+    if new.exists():
+        logger.warning(
+            "storage: both legacy %s and new %s exist for agent %s; "
+            "leaving legacy in place. Resolve manually if intended.",
+            legacy, new, agent_id,
+        )
+        return
+
+    new.parent.mkdir(parents=True, exist_ok=True)
+    legacy.rename(new)
+    logger.info(
+        "storage: migrated legacy sqlite for agent %s: %s -> %s",
+        agent_id, legacy, new,
+    )
+
+    # Move WAL/SHM sidecars too. A live WAL holds frames sqlite hasn't
+    # checkpointed into the main file yet; leaving it behind would make
+    # the renamed DB look like it's missing the most recent writes.
+    for ext in ("-wal", "-shm"):
+        sidecar = Path(f"{legacy}{ext}")
+        if not sidecar.exists():
+            continue
+        target = Path(f"{new}{ext}")
+        sidecar.rename(target)
+        logger.info("storage: migrated legacy sidecar %s -> %s", sidecar, target)
 
 
 def delete_local_agent_db(agent_id: str) -> bool:
