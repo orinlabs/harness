@@ -34,7 +34,7 @@ Optional:
     HARNESS_REPO_DIR      checkout path (default: /workspace/harness)
     GITHUB_TOKEN          private-repo fetch auth (used by `boot` only)
     MODEL                 override the agent's configured model
-    REASONING_EFFORT      override reasoning_effort (low|medium|high)
+    REASONING_EFFORT      override reasoning_effort (minimal|low|medium|high|xhigh)
     LOG_LEVEL             default: INFO
     BEDROCK_URL           enables Bedrock lookup + tracing to Bedrock
     BEDROCK_TOKEN         bedrock org-scoped API key
@@ -237,14 +237,16 @@ def _resolve_agent_config(args, parser: argparse.ArgumentParser):
                 agent_id,
                 model_override=args.model,
                 reasoning_override=args.reasoning_effort,
+                max_tokens_override=args.max_tokens,
             )
         else:
             # Apply CLI overrides to the locally-loaded config.
-            if args.model or args.reasoning_effort:
+            if args.model or args.reasoning_effort or args.max_tokens is not None:
                 cfg = _apply_runtime_overrides(
                     cfg,
                     model_override=args.model,
                     reasoning_override=args.reasoning_effort,
+                    max_tokens_override=args.max_tokens,
                 )
         return cfg, agent_id
 
@@ -273,17 +275,19 @@ def _resolve_agent_config(args, parser: argparse.ArgumentParser):
         agent_id,
         model_override=args.model,
         reasoning_override=args.reasoning_effort,
+        max_tokens_override=args.max_tokens,
     )
     return cfg, agent_id
 
 
-def _apply_runtime_overrides(cfg, *, model_override, reasoning_override):
+def _apply_runtime_overrides(cfg, *, model_override, reasoning_override, max_tokens_override):
     from dataclasses import replace
 
     return replace(
         cfg,
         model=model_override or cfg.model,
         reasoning_effort=reasoning_override or cfg.reasoning_effort,
+        max_tokens=max_tokens_override if max_tokens_override is not None else cfg.max_tokens,
     )
 
 
@@ -397,6 +401,8 @@ def _build_agent_cmd(agent_id: str, run_id: str | None, args) -> list[str]:
         cmd += ["--model", args.model]
     if getattr(args, "reasoning_effort", None):
         cmd += ["--reasoning-effort", args.reasoning_effort]
+    if getattr(args, "max_tokens", None) is not None:
+        cmd += ["--max-tokens", str(args.max_tokens)]
     if getattr(args, "log_level", None):
         cmd += ["--log-level", args.log_level]
     return cmd
@@ -521,7 +527,20 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
     p.add_argument("--model", default=None, help="Override the model.")
-    p.add_argument("--reasoning-effort", default=None, help="Override reasoning effort.")
+    p.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="Override reasoning effort: minimal|low|medium|high|xhigh.",
+    )
+    p.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Override completion max_tokens. Anthropic effort-based reasoning "
+            "uses this to derive its thinking budget."
+        ),
+    )
     p.add_argument(
         "--template",
         default=None,

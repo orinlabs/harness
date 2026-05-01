@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _client: httpx.Client | None = None
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
 
 
 class OpenRouterError(RuntimeError):
@@ -96,6 +97,86 @@ def _translate_model(model: str) -> str:
         logger.info("translating model slug %r -> %r for openrouter", model, mapped)
         return mapped
     return model
+
+
+def _is_anthropic_model(model: str) -> bool:
+    return model.startswith("anthropic/")
+
+
+def _effective_max_tokens(*, model: str, max_tokens: int | None) -> int | None:
+    """Choose a request max_tokens that keeps Anthropic reasoning valid.
+
+    Anthropic derives reasoning budget from top-level max_tokens when
+    reasoning.effort is used. OpenRouter requires max_tokens to be strictly
+    higher than the resulting reasoning budget; because Anthropic also floors
+    reasoning budgets at 1024, any explicit Anthropic max_tokens must exceed
+    1024.
+    """
+    if max_tokens is not None:
+        if max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+        if _is_anthropic_model(model) and max_tokens <= 1024:
+            raise ValueError(
+                "Anthropic reasoning requires max_tokens > 1024 so the final "
+                f"response has room after the minimum reasoning budget; got {max_tokens}"
+            )
+        return max_tokens
+    if _is_anthropic_model(model):
+        return _DEFAULT_ANTHROPIC_MAX_TOKENS
+    return None
+
+
+def _build_chat_completion_body(
+    *,
+    model: str,
+    system: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    tool_choice: str | dict | None = None,
+    reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
+    model = _translate_model(model)
+    full_messages: list[dict] = []
+    if system:
+        full_messages.append({"role": "system", "content": system})
+    full_messages.extend(_prepare_replay_messages(messages))
+
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": full_messages,
+        "usage": {"include": True},
+    }
+    effective_max_tokens = _effective_max_tokens(model=model, max_tokens=max_tokens)
+    if effective_max_tokens is not None:
+        body["max_tokens"] = effective_max_tokens
+    if tools:
+        body["tools"] = tools
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
+    # Turn reasoning on by default and request plain-text summaries.
+    #
+    # OpenRouter's `reasoning` object is a no-op on non-reasoning models,
+    # so always sending it is safe. But the defaults-per-field matter:
+    #
+    #   - `enabled: true` is required to activate extended thinking on
+    #     Anthropic (Claude 3.7 / 4.x) and Gemini thinking models. Without
+    #     it, those providers return zero reasoning tokens even though the
+    #     model is capable -- which is what caused "Opus 4.7 isn't
+    #     reasoning" until we set this explicitly.
+    #   - `summary: "auto"` opts OpenAI o-series / gpt-5 into a human-
+    #     readable summary instead of the default encrypted blob. Ignored
+    #     by providers that don't encrypt.
+    #   - An explicit `effort` (or the summarizer's `"minimal"` override)
+    #     wins over the implied medium effort from `enabled: true`.
+    #   - Anthropic needs top-level `max_tokens` with effort-based
+    #     reasoning; when callers don't provide one we set a conservative
+    #     default above so OpenRouter can derive a valid reasoning budget.
+    reasoning_cfg: dict[str, Any] = {"enabled": True, "summary": "auto"}
+    if reasoning_effort:
+        reasoning_cfg["effort"] = reasoning_effort
+    body["reasoning"] = reasoning_cfg
+    return body
 
 
 def _http() -> httpx.Client:
@@ -182,6 +263,7 @@ def complete(
     tools: list[dict] | None = None,
     tool_choice: str | dict | None = None,
     reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
     timeout_seconds: float = 120.0,
 ) -> LLMResponse:
     """Send one chat completion request to OpenRouter.
@@ -195,60 +277,37 @@ def complete(
             When `tools` is provided, the harness loop passes "required" so every
             turn emits at least one tool call. Pass None to let the provider
             default (usually "auto") take over.
-        reasoning_effort: optional "low" | "medium" | "high" for reasoning models.
+        reasoning_effort: optional minimal|low|medium|high|xhigh for reasoning models.
+        max_tokens: optional completion token budget. Anthropic reasoning models
+            need this with effort-based reasoning; if omitted, Anthropic requests
+            get a conservative default.
         timeout_seconds: request timeout.
     """
-    # Translate Anthropic/bedrock model IDs (`claude-opus-4-7`) into
-    # OpenRouter slugs (`anthropic/claude-opus-4.7`). OpenRouter 400s on the
-    # un-namespaced form. No-op for OpenAI/Google/etc. slugs.
-    model = _translate_model(model)
+    body = _build_chat_completion_body(
+        model=model,
+        system=system,
+        messages=messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
+    )
+    model = body["model"]
+    full_messages = body["messages"]
 
     logger.info(
         "openrouter complete() received: model=%s messages=%d tools=%s "
-        "tool_choice=%s reasoning_effort=%s",
+        "tool_choice=%s reasoning_effort=%s max_tokens=%s",
         model,
         len(messages),
         "None" if tools is None else f"len={len(tools)}",
         tool_choice,
         reasoning_effort or "-",
+        body.get("max_tokens", "-"),
     )
     if tools:
         tool_names = [((t.get("function") or {}).get("name") or "?") for t in tools]
         logger.info("openrouter complete() tool names: %s", tool_names)
-
-    full_messages: list[dict] = []
-    if system:
-        full_messages.append({"role": "system", "content": system})
-    full_messages.extend(_prepare_replay_messages(messages))
-
-    body: dict[str, Any] = {
-        "model": model,
-        "messages": full_messages,
-        "usage": {"include": True},
-    }
-    if tools:
-        body["tools"] = tools
-        if tool_choice is not None:
-            body["tool_choice"] = tool_choice
-    # Turn reasoning on by default and request plain-text summaries.
-    #
-    # OpenRouter's `reasoning` object is a no-op on non-reasoning models,
-    # so always sending it is safe. But the defaults-per-field matter:
-    #
-    #   - `enabled: true` is required to activate extended thinking on
-    #     Anthropic (Claude 3.7 / 4.x) and Gemini thinking models. Without
-    #     it, those providers return zero reasoning tokens even though the
-    #     model is capable -- which is what caused "Opus 4.7 isn't
-    #     reasoning" until we set this explicitly.
-    #   - `summary: "auto"` opts OpenAI o-series / gpt-5 into a human-
-    #     readable summary instead of the default encrypted blob. Ignored
-    #     by providers that don't encrypt.
-    #   - An explicit `effort` (or the summarizer's `"minimal"` override)
-    #     wins over the implied medium effort from `enabled: true`.
-    reasoning_cfg: dict[str, Any] = {"enabled": True, "summary": "auto"}
-    if reasoning_effort:
-        reasoning_cfg["effort"] = reasoning_effort
-    body["reasoning"] = reasoning_cfg
 
     # Stream the response. Reasoning models (gpt-5 thinking, o1, Claude with
     # extended thinking) commonly take minutes before emitting any non-streaming
@@ -271,11 +330,12 @@ def complete(
     body_bytes = len(json.dumps(body, default=str))
     logger.info(
         "openrouter POST start (stream) model=%s messages=%d tools=%d "
-        "reasoning_effort=%s body_bytes=%d read_timeout=%.1fs",
+        "reasoning_effort=%s max_tokens=%s body_bytes=%d read_timeout=%.1fs",
         model,
         len(full_messages),
         len(tools) if tools else 0,
         reasoning_effort or "-",
+        body.get("max_tokens", "-"),
         body_bytes,
         timeout_seconds,
     )

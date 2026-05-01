@@ -1,10 +1,11 @@
-"""Tests for ``AgentConfig.feature_flags`` plumbing.
+"""Tests for ``AgentConfig`` config plumbing.
 
 Covers:
 - ``AgentConfig.feature_flags`` defaults and ``is_enabled`` semantics
 - ``config_loader`` reading ``feature_flags`` from YAML / dict input
 - The Bedrock-JSON path (``_config_from_bedrock_json``) forwarding
   ``feature_flags`` from the platform's ``harness-config`` payload
+- ``max_tokens`` for Anthropic reasoning budget control
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ def _minimal_data(**overrides):
 def test_feature_flags_defaults_to_empty_dict():
     cfg = AgentConfig(id="a", model="m", system_prompt="s")
     assert cfg.feature_flags == {}
+    assert cfg.max_tokens is None
 
 
 def test_is_enabled_true_only_for_literal_on():
@@ -122,6 +124,17 @@ def test_build_agent_config_rejects_non_mapping_feature_flags():
         build_agent_config(bad_payload)
 
 
+def test_build_agent_config_forwards_max_tokens():
+    cfg = build_agent_config(_minimal_data(max_tokens=8192))
+
+    assert cfg.max_tokens == 8192
+
+
+def test_build_agent_config_rejects_invalid_max_tokens():
+    with pytest.raises(ValueError, match="expected positive integer"):
+        build_agent_config(_minimal_data(max_tokens=0))
+
+
 # ---------------------------------------------------------------------------
 # Bedrock JSON ingest path
 # ---------------------------------------------------------------------------
@@ -137,6 +150,7 @@ def test_bedrock_json_forwards_feature_flags():
         "model": "anthropic/claude-opus-4.7",
         "system_prompt": "hi",
         "reasoning_effort": "medium",
+        "max_tokens": 16384,
         "feature_flags": {"summarizer_v2": "on", "elicitation_v2": "off"},
         "adapters": [
             {
@@ -155,6 +169,7 @@ def test_bedrock_json_forwards_feature_flags():
     }
     cfg = _config_from_bedrock_json(bedrock_payload)
     assert cfg.feature_flags == {"summarizer_v2": "on", "elicitation_v2": "off"}
+    assert cfg.max_tokens == 16384
     assert cfg.is_enabled("summarizer_v2") is True
     assert cfg.is_enabled("elicitation_v2") is False
     # Sanity: tools still flattened.

@@ -179,6 +179,7 @@ def test_build_agent_cmd_minimal():
         local=False,
         model=None,
         reasoning_effort=None,
+        max_tokens=None,
         log_level=None,
     )
     cmd = _build_agent_cmd("agent-xyz", run_id=None, args=args)
@@ -197,6 +198,7 @@ def test_build_agent_cmd_forwards_all_flags():
         local=False,
         model="claude-haiku-4-5",
         reasoning_effort="medium",
+        max_tokens=8192,
         log_level="DEBUG",
     )
     cmd = _build_agent_cmd("agent-xyz", run_id="run-abc", args=args)
@@ -218,6 +220,8 @@ def test_build_agent_cmd_forwards_all_flags():
         "claude-haiku-4-5",
         "--reasoning-effort",
         "medium",
+        "--max-tokens",
+        "8192",
         "--log-level",
         "DEBUG",
     ]
@@ -235,6 +239,7 @@ def test_build_agent_cmd_local_sugar_not_combined_with_bedrock_url():
         local=True,  # ignored when bedrock_url is set
         model=None,
         reasoning_effort=None,
+        max_tokens=None,
         log_level=None,
     )
     cmd = _build_agent_cmd("agent-1", run_id=None, args=args)
