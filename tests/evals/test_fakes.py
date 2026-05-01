@@ -15,6 +15,9 @@ from harness.evals.fakes import (
     FakeContactsAdapter,
     FakeEmailAdapter,
     FakeSMSAdapter,
+    TestContactsAdapter,
+    TestDocumentsAdapter,
+    TestProjectsAdapter,
 )
 from harness.evals.fakes import (
     email as email_fake,
@@ -239,6 +242,140 @@ def test_contacts_missing_id(agent_db):
 
 
 # ---------------------------------------------------------------------------
+# Documents
+# ---------------------------------------------------------------------------
+
+
+def test_documents_crud_and_skills(agent_db):
+    by_name = _by_name(TestDocumentsAdapter.make_tools())
+
+    note_result = by_name["create_document"].call(
+        {"title": "Scratch", "content": "Temporary note."},
+        ctx=None,
+    )
+    assert 'Document created: "Scratch"' in note_result.text
+
+    skill_result = by_name["create_document"].call(
+        {
+            "title": "SOP: Triage",
+            "content": "Read the inbound request before acting.",
+            "kind": "skill",
+        },
+        ctx=None,
+    )
+    assert "Kind: skill" in skill_result.text
+
+    import re
+
+    doc_id_match = re.search(r"Document ID: (sim_doc_\w+)", skill_result.text)
+    assert doc_id_match, skill_result.text
+    document_id = doc_id_match.group(1)
+
+    list_result = by_name["list_documents"].call({}, ctx=None)
+    assert "Scratch" in list_result.text
+    assert "SOP: Triage" in list_result.text
+
+    skills_result = by_name["list_skills"].call({}, ctx=None)
+    assert "SOP: Triage" in skills_result.text
+    assert "Scratch" not in skills_result.text
+
+    get_result = by_name["get_document"].call({"document_id": document_id}, ctx=None)
+    assert "Read the inbound request" in get_result.text
+
+    update_result = by_name["update_document"].call(
+        {"document_id": document_id, "content": "Read first, then decide."},
+        ctx=None,
+    )
+    assert "updated: content" in update_result.text
+
+    delete_result = by_name["delete_document"].call({"document_id": document_id}, ctx=None)
+    assert "deleted successfully" in delete_result.text
+
+
+def test_documents_empty_and_missing(agent_db):
+    by_name = _by_name(TestDocumentsAdapter.make_tools())
+    assert "no documents" in by_name["list_documents"].call({}, ctx=None).text.lower()
+
+    result = by_name["get_document"].call({"document_id": "missing"}, ctx=None)
+    assert "not found" in result.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Projects
+# ---------------------------------------------------------------------------
+
+
+def test_projects_tree_complete_and_delete(agent_db):
+    by_name = _by_name(TestProjectsAdapter.make_tools())
+
+    parent_result = by_name["create_project"].call(
+        {
+            "title": "Launch",
+            "objective": "Ship the launch plan.",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-15",
+            "visibility": "external",
+        },
+        ctx=None,
+    )
+    assert 'Project created: "Launch"' in parent_result.text
+
+    import re
+
+    parent_match = re.search(r"ID: (sim_project_\w+)", parent_result.text)
+    assert parent_match, parent_result.text
+    parent_id = parent_match.group(1)
+
+    child_result = by_name["create_project"].call(
+        {
+            "title": "Draft copy",
+            "objective": "Write the announcement.",
+            "start_date": "2026-05-02",
+            "end_date": "2026-05-05",
+            "parent_project_id": parent_id,
+        },
+        ctx=None,
+    )
+    assert 'Parent project: "Launch"' in child_result.text
+
+    list_result = by_name["list_projects"].call({}, ctx=None)
+    assert "Launch" in list_result.text
+    assert "Sub-projects: 1" in list_result.text
+
+    get_result = by_name["get_project"].call({"project_id": parent_id}, ctx=None)
+    assert "Draft copy" in get_result.text
+
+    update_result = by_name["update_project"].call(
+        {"project_id": parent_id, "status": "complete"},
+        ctx=None,
+    )
+    assert "status to complete" in update_result.text
+
+    complete_result = by_name["complete_project"].call({"project_id": parent_id}, ctx=None)
+    assert "marked as complete" in complete_result.text
+    rows = storage.db.execute("SELECT status FROM fake_project").fetchall()
+    assert {row["status"] for row in rows} == {"complete"}
+
+    delete_result = by_name["delete_project"].call({"project_id": parent_id}, ctx=None)
+    assert "1 sub-project(s) also deleted" in delete_result.text
+    assert storage.db.execute("SELECT COUNT(*) AS c FROM fake_project").fetchone()["c"] == 0
+
+
+def test_projects_empty_and_missing(agent_db):
+    by_name = _by_name(TestProjectsAdapter.make_tools())
+    assert "no projects" in by_name["list_projects"].call({}, ctx=None).text.lower()
+
+    result = by_name["get_project"].call({"project_id": "missing"}, ctx=None)
+    assert "not found" in result.text.lower()
+
+
+def test_test_adapter_names_are_not_production_names():
+    assert TestContactsAdapter.name == "TestContacts"
+    assert TestProjectsAdapter.name == "TestProjects"
+    assert TestDocumentsAdapter.name == "TestDocuments"
+
+
+# ---------------------------------------------------------------------------
 # Computer
 # ---------------------------------------------------------------------------
 
@@ -317,13 +454,17 @@ def test_build_tool_map_with_fakes_and_external_mix(agent_db):
     tm = build_tool_map(
         [
             *FakeEmailAdapter.make_tools(),
-            *FakeContactsAdapter.make_tools(),
+            *TestContactsAdapter.make_tools(),
+            *TestProjectsAdapter.make_tools(),
+            *TestDocumentsAdapter.make_tools(),
             remote_spec,
         ]
     )
-    # Email, contacts, remote, plus the builtin sleep.
+    # Email, test state adapters, remote, plus the builtin sleep.
     assert "send_email" in tm
     assert "create_contact" in tm
+    assert "create_project" in tm
+    assert "create_document" in tm
     assert "remote_op" in tm
     assert "sleep" in tm
 

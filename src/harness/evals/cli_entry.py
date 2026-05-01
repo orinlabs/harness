@@ -119,9 +119,11 @@ def run(args, parser: argparse.ArgumentParser) -> int:
     from harness.config import AgentConfig
     from harness.evals.fakes import (
         FakeComputerAdapter,
-        FakeContactsAdapter,
         FakeEmailAdapter,
         FakeSMSAdapter,
+        TestContactsAdapter,
+        TestDocumentsAdapter,
+        TestProjectsAdapter,
     )
 
     config = AgentConfig(
@@ -132,7 +134,9 @@ def run(args, parser: argparse.ArgumentParser) -> int:
         tools=[
             *FakeEmailAdapter.make_tools(),
             *FakeSMSAdapter.make_tools(),
-            *FakeContactsAdapter.make_tools(),
+            *TestContactsAdapter.make_tools(),
+            *TestProjectsAdapter.make_tools(),
+            *TestDocumentsAdapter.make_tools(),
             *FakeComputerAdapter.make_tools(),
         ],
     )

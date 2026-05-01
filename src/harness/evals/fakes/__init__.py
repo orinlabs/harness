@@ -13,20 +13,29 @@ Migrations:
 """
 from __future__ import annotations
 
-from . import base, computer, contacts, email, sms
+from . import base, computer, contacts, documents, email, projects, sms
 from .computer import FakeComputerAdapter
-from .contacts import FakeContactsAdapter
+from .contacts import FakeContactsAdapter, TestContactsAdapter
+from .documents import FakeDocumentsAdapter, TestDocumentsAdapter
 from .email import FakeEmailAdapter
+from .projects import FakeProjectsAdapter, TestProjectsAdapter
 from .sms import FakeSMSAdapter
 
 __all__ = [
     "FakeComputerAdapter",
     "FakeContactsAdapter",
+    "FakeDocumentsAdapter",
     "FakeEmailAdapter",
+    "FakeProjectsAdapter",
     "FakeSMSAdapter",
+    "TestContactsAdapter",
+    "TestDocumentsAdapter",
+    "TestProjectsAdapter",
     "base",
     "computer",
     "contacts",
+    "documents",
     "email",
+    "projects",
     "sms",
 ]
