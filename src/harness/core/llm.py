@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 _client: httpx.Client | None = None
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
+_REASONING_EFFORT_RATIOS = {
+    "xhigh": 0.95,
+    "high": 0.8,
+    "medium": 0.5,
+    "low": 0.2,
+    "minimal": 0.1,
+}
 
 
 class OpenRouterError(RuntimeError):
@@ -126,6 +133,21 @@ def _effective_max_tokens(*, model: str, max_tokens: int | None) -> int | None:
     return None
 
 
+def _anthropic_reasoning_max_tokens(
+    *, max_tokens: int, reasoning_effort: str | None
+) -> int | None:
+    if reasoning_effort == "none":
+        return None
+    ratio = _REASONING_EFFORT_RATIOS.get(reasoning_effort or "medium")
+    if ratio is None:
+        raise ValueError(
+            "reasoning_effort must be one of minimal|low|medium|high|xhigh|none "
+            f"for Anthropic models, got {reasoning_effort!r}"
+        )
+    budget = int(max_tokens * ratio)
+    return max(min(budget, 128_000), 1024)
+
+
 def _build_chat_completion_body(
     *,
     model: str,
@@ -173,7 +195,16 @@ def _build_chat_completion_body(
     #     reasoning; when callers don't provide one we set a conservative
     #     default above so OpenRouter can derive a valid reasoning budget.
     reasoning_cfg: dict[str, Any] = {"enabled": True, "summary": "auto"}
-    if reasoning_effort:
+    if _is_anthropic_model(model):
+        if reasoning_effort == "none":
+            reasoning_cfg = {"effort": "none"}
+        else:
+            assert effective_max_tokens is not None
+            reasoning_cfg["max_tokens"] = _anthropic_reasoning_max_tokens(
+                max_tokens=effective_max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
+    elif reasoning_effort:
         reasoning_cfg["effort"] = reasoning_effort
     body["reasoning"] = reasoning_cfg
     return body
@@ -566,7 +597,7 @@ def _stream_chat_completion(body: dict, *, timeout: httpx.Timeout, model: str) -
     if reasoning_parts:
         message["reasoning"] = "".join(reasoning_parts)
     if reasoning_details:
-        message["reasoning_details"] = reasoning_details
+        message["reasoning_details"] = _merge_streamed_reasoning_details(reasoning_details)
 
     return {
         "id": response_id,
@@ -574,6 +605,49 @@ def _stream_chat_completion(body: dict, *, timeout: httpx.Timeout, model: str) -
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": usage,
     }
+
+
+def _merge_streamed_reasoning_details(details: list[dict]) -> list[dict]:
+    """Collapse streaming reasoning deltas into replayable reasoning blocks.
+
+    OpenRouter streams Anthropic ``reasoning_details`` as small deltas: several
+    ``reasoning.text`` chunks with the same index, followed by a signature-only
+    chunk. Replaying that fragmented sequence makes Anthropic reject the next
+    tool-continuation request with ``Invalid signature in thinking block``.
+    The chat history needs the same logical block OpenRouter would return from
+    a non-streaming response: concatenated text plus the final signature.
+    """
+    merged: list[dict] = []
+    by_key: dict[tuple[int | None, str | None, str | None], dict] = {}
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        key = (
+            detail.get("index") if isinstance(detail.get("index"), int) else None,
+            detail.get("type") if isinstance(detail.get("type"), str) else None,
+            detail.get("format") if isinstance(detail.get("format"), str) else None,
+        )
+        block = by_key.get(key)
+        if block is None:
+            block = {
+                k: v
+                for k, v in detail.items()
+                if k not in {"text", "summary", "content", "data", "signature"}
+            }
+            by_key[key] = block
+            merged.append(block)
+
+        for text_key in ("text", "summary", "content", "data"):
+            value = detail.get(text_key)
+            if isinstance(value, str) and value:
+                block[text_key] = f"{block.get(text_key, '')}{value}"
+
+        signature = detail.get("signature")
+        if isinstance(signature, str) and signature:
+            block["signature"] = signature
+
+    return merged
 
 
 def _parse_reasoning(msg: dict) -> str | None:
@@ -614,13 +688,12 @@ def _prepare_replay_messages(messages: list[dict]) -> list[dict]:
 
 
 def _strip_provider_reasoning(messages: list[dict]) -> list[dict]:
-    """Remove provider-only thinking fields from replayed assistant messages.
+    """Remove non-replayable thinking fields from assistant messages.
 
-    OpenRouter returns Anthropic/OpenAI reasoning metadata on assistant
-    responses so we can trace it, but those blocks are not stable chat history.
-    Replaying a prior provider signature to a later request can 400 with
-    ``Invalid `signature` in `thinking` block``. Keep the normal transcript
-    surface (content + tool_calls) and drop only reasoning internals.
+    ``reasoning`` is plaintext trace output, not chat history. Preserve
+    ``reasoning_details`` though: OpenRouter's tool-use guidance requires
+    replaying those signed blocks verbatim so Anthropic can continue thinking
+    after tool results.
     """
     sanitized: list[dict] = []
     dropped = 0
@@ -631,10 +704,9 @@ def _strip_provider_reasoning(messages: list[dict]) -> list[dict]:
             continue
 
         clean = dict(msg)
-        for key in ("reasoning", "reasoning_details"):
-            if key in clean:
-                clean.pop(key, None)
-                dropped += 1
+        if "reasoning" in clean:
+            clean.pop("reasoning", None)
+            dropped += 1
 
         content = clean.get("content")
         if isinstance(content, list):
