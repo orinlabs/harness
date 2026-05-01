@@ -38,12 +38,37 @@ Consumers create sandboxes with `snapshot="harness-latest"` and always
 get the most recent harness — the snapshot name is constant; only the
 image SHA behind it changes.
 
+### Bedrock contract
+
+Bedrock's only job inside the sandbox is to run **`harness boot`** with
+the right env vars. `boot` then handles the rest (git fetch + checkout
+to a target SHA, `uv sync`, exec into `harness agent`).
+
 ```python
 from daytona import Daytona, CreateSandboxFromSnapshotParams
 
 sb = Daytona().create(CreateSandboxFromSnapshotParams(snapshot="harness-latest"))
-sb.process.exec("harness agent demo")
+sb.process.exec(
+    "harness boot",
+    env={
+        "HARNESS_AGENT_ID":   agent_id,
+        "HARNESS_RUN_ID":     run_id,
+        "HARNESS_COMMIT_SHA": target_sha,   # any reachable commit on orinlabs/harness
+        "BEDROCK_URL":        bedrock_url,
+        "BEDROCK_TOKEN":      bedrock_token,
+        "OPENROUTER_API_KEY": openrouter_key,
+    },
+)
 ```
+
+The harness repo is public, so no `GITHUB_TOKEN` is needed for the
+fetch. If it ever goes private, `boot` reads `GITHUB_TOKEN` from env
+and uses it for that one fetch only (never persisted to `.git/config`).
+
+`boot` and `agent` are stacked: `boot` is the bedrock-facing
+self-updating wrapper, `agent` is the actual loop. `os.execvp` between
+them is what makes "fetch new code, then run new code" actually pick up
+the new code (the running interpreter is dropped).
 
 **Required repo secrets** (Settings → Secrets → Actions):
 

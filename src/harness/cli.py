@@ -2,6 +2,15 @@
 
 Subcommands:
 
+    harness boot [AGENT_ID]               # In-sandbox bootstrap. Resolves
+                                          # the agent id, run id, and target
+                                          # git SHA from CLI flags or
+                                          # HARNESS_* env vars; updates the
+                                          # local checkout to that SHA, runs
+                                          # `uv sync --frozen`, then execs
+                                          # into `harness agent ...`. The
+                                          # only command bedrock needs to
+                                          # know about.
     harness agent [AGENT_ID_OR_NAME] [options]
                                           # Run a single agent run. Resolves
                                           # local ./agents/<name>.yaml first;
@@ -21,6 +30,11 @@ Environment is loaded from `.env` in cwd if present. Required secrets:
 Optional:
     HARNESS_STORAGE_ROOT  where per-agent sqlite files live
                           (default: ~/.harness/agents)
+    HARNESS_AGENT_ID      default agent id for `harness boot`
+    HARNESS_RUN_ID        default run id for `harness boot`
+    HARNESS_COMMIT_SHA    git SHA to check out before booting
+    HARNESS_REPO_DIR      checkout path (default: /workspace/harness)
+    GITHUB_TOKEN          private-repo fetch auth (used by `boot` only)
     MODEL                 override the agent's configured model
     REASONING_EFFORT      override reasoning_effort (low|medium|high)
     LOG_LEVEL             default: INFO
@@ -278,6 +292,160 @@ def _apply_runtime_overrides(cfg, *, model_override, reasoning_override):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Subcommand: boot
+#
+# The single-command contract bedrock targets in-sandbox. Bedrock's job is:
+#
+#   1. find or create a Daytona sandbox labeled `harness.agent_id=<id>`
+#   2. set HARNESS_AGENT_ID, HARNESS_RUN_ID, HARNESS_COMMIT_SHA in the env
+#      (plus BEDROCK_TOKEN, BEDROCK_URL, OPENROUTER_API_KEY, GITHUB_TOKEN
+#      if the harness repo is private)
+#   3. process.exec("harness boot")
+#
+# Everything else (git checkout, uv sync, agent loop) is the harness's
+# problem. `boot` exec's into `harness agent ...` once the checkout is
+# ready -- that exec is important: any code we just pulled wouldn't be
+# loaded by the running interpreter, so the new process is the only way
+# to actually use the new code.
+# ---------------------------------------------------------------------------
+
+
+def _git(repo_dir: Path, *args: str) -> str:
+    """Run a git command in ``repo_dir`` and return stdout (stripped)."""
+    return subprocess.run(
+        ["git", "-C", str(repo_dir), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _resolve_repo_dir(repo_dir_arg: str | None) -> Path:
+    """Default precedence: --repo-dir > $HARNESS_REPO_DIR > /workspace/harness > cwd.
+
+    /workspace/harness wins when present so an in-sandbox `harness boot`
+    "just works" without flags. cwd is the local-debug fallback.
+    """
+    if repo_dir_arg:
+        return Path(repo_dir_arg).resolve()
+    if env := os.environ.get("HARNESS_REPO_DIR"):
+        return Path(env).resolve()
+    if Path("/workspace/harness/.git").is_dir():
+        return Path("/workspace/harness")
+    return Path.cwd().resolve()
+
+
+def _sync_repo(repo_dir: Path, target_sha: str | None) -> None:
+    """Bring ``repo_dir`` to ``target_sha`` if not already there.
+
+    No-op if ``target_sha`` is None (caller wants HEAD as-is) or if HEAD
+    already matches. Auth: if ``$GITHUB_TOKEN`` is set, the fetch URL is
+    rewritten to include it for that one fetch only -- the persistent
+    ``origin`` URL stays public so a token rotation doesn't strand the
+    sandbox with a stale credential baked into ``.git/config``.
+    """
+    if not target_sha:
+        logger.info("boot: no target SHA -- using current HEAD as-is")
+        return
+
+    head = _git(repo_dir, "rev-parse", "HEAD")
+    if head == target_sha or head.startswith(target_sha):
+        logger.info("boot: HEAD already at %s -- skipping fetch", target_sha)
+        return
+
+    origin = _git(repo_dir, "remote", "get-url", "origin")
+    fetch_url = origin
+    token = os.environ.get("GITHUB_TOKEN")
+    if token and origin.startswith("https://github.com/") and "@" not in origin:
+        fetch_url = origin.replace(
+            "https://", f"https://x-access-token:{token}@", 1
+        )
+
+    logger.info("boot: fetching %s into %s", target_sha, repo_dir)
+    _git(repo_dir, "fetch", "--depth=1", fetch_url, target_sha)
+    _git(repo_dir, "checkout", "--detach", target_sha)
+
+
+def _sync_deps(repo_dir: Path) -> None:
+    """Run ``uv sync --frozen`` in ``repo_dir``. No-op when nothing changed."""
+    logger.info("boot: uv sync --frozen (cwd=%s)", repo_dir)
+    subprocess.run(
+        ["uv", "sync", "--frozen"],
+        cwd=str(repo_dir),
+        check=True,
+    )
+
+
+def _build_agent_cmd(agent_id: str, run_id: str | None, args) -> list[str]:
+    """Construct the argv that ``boot`` will exec into.
+
+    Forwards bedrock/runtime overrides from the boot invocation onto the
+    agent invocation so callers don't have to pass the same flag twice
+    (once to boot, once to agent). ``--bedrock-url`` and ``--local`` are
+    kept distinct: ``--local`` is short for ``--bedrock-url
+    http://127.0.0.1:8000`` and shouldn't be forwarded blindly.
+    """
+    cmd = ["uv", "run", "--frozen", "harness", "agent", agent_id]
+    if run_id:
+        cmd += ["--run-id", run_id]
+    if getattr(args, "bedrock_token", None):
+        cmd += ["--bedrock-token", args.bedrock_token]
+    if getattr(args, "bedrock_url", None):
+        cmd += ["--bedrock-url", args.bedrock_url]
+    elif getattr(args, "local", False):
+        cmd += ["--local"]
+    if getattr(args, "model", None):
+        cmd += ["--model", args.model]
+    if getattr(args, "reasoning_effort", None):
+        cmd += ["--reasoning-effort", args.reasoning_effort]
+    if getattr(args, "log_level", None):
+        cmd += ["--log-level", args.log_level]
+    return cmd
+
+
+def _cmd_boot(args, parser: argparse.ArgumentParser) -> int:
+    _load_env()
+
+    agent_id = args.agent_id or os.environ.get("HARNESS_AGENT_ID")
+    if not agent_id:
+        parser.exit(
+            2,
+            "boot: agent_id required (positional arg or $HARNESS_AGENT_ID)\n",
+        )
+
+    run_id = args.run_id or os.environ.get("HARNESS_RUN_ID")
+    target_sha = args.commit or os.environ.get("HARNESS_COMMIT_SHA")
+    repo_dir = _resolve_repo_dir(args.repo_dir)
+
+    if not (repo_dir / ".git").is_dir():
+        parser.exit(
+            1,
+            f"boot: {repo_dir} is not a git checkout. Set --repo-dir or "
+            "$HARNESS_REPO_DIR.\n",
+        )
+
+    try:
+        _sync_repo(repo_dir, target_sha)
+        _sync_deps(repo_dir)
+    except subprocess.CalledProcessError as e:
+        cmd = " ".join(map(str, e.cmd or [])) or "<unknown>"
+        stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr or b"").decode(
+            errors="replace"
+        )
+        parser.exit(
+            1,
+            f"boot: command failed (exit {e.returncode}): {cmd}\nstderr: {stderr}\n",
+        )
+
+    cmd = _build_agent_cmd(agent_id, run_id, args)
+    logger.info("boot: exec %s", " ".join(cmd))
+    os.chdir(str(repo_dir))
+    os.execvp(cmd[0], cmd)
+    # execvp does not return; appease the type-checker.
+    return 0
+
+
 def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
     _load_env()
     for k, v in DEFAULT_ENV.items():
@@ -391,6 +559,58 @@ def main(argv: list[str] | None = None) -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    boot_p = subparsers.add_parser(
+        "boot",
+        help="In-sandbox bootstrap: update checkout, uv sync, exec into "
+             "`harness agent`.",
+        description=(
+            "The single command bedrock invokes inside a Daytona sandbox. "
+            "Bedrock's only job is: (1) find or create the sandbox by "
+            "`harness.agent_id=<id>` label, (2) call `process.exec` with "
+            "the env contract below set, (3) wait for exit. Everything "
+            "else (git checkout, uv sync, agent loop) is the harness's "
+            "responsibility.\n\n"
+            "Env contract bedrock should set on the exec call:\n"
+            "  HARNESS_AGENT_ID    (required) agent UUID to run\n"
+            "  HARNESS_RUN_ID      run UUID for tracing/logging\n"
+            "  HARNESS_COMMIT_SHA  git SHA to check out before running\n"
+            "  HARNESS_REPO_DIR    checkout path, default /workspace/harness\n"
+            "  BEDROCK_URL         bedrock endpoint\n"
+            "  BEDROCK_TOKEN       bedrock product API key\n"
+            "  OPENROUTER_API_KEY  forwarded to the harness loop\n"
+            "  GITHUB_TOKEN        only needed if the harness repo is "
+            "private (currently public; safe to omit).\n\n"
+            "Steps: resolve agent_id/run_id/target SHA from flags or env, "
+            "fetch + `git checkout --detach <sha>` if HEAD differs (no-op "
+            "otherwise), run `uv sync --frozen` to align deps, then exec "
+            "into `uv run --frozen harness agent ...`. The exec is what "
+            "ensures any code we just pulled is actually loaded -- the "
+            "old interpreter is gone after this point."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    boot_p.add_argument(
+        "agent_id", nargs="?", default=None,
+        help="Agent UUID. Falls back to $HARNESS_AGENT_ID.",
+    )
+    boot_p.add_argument(
+        "--commit", default=None,
+        help="Target git SHA to check out before running. Falls back to "
+             "$HARNESS_COMMIT_SHA. If unset, uses the current HEAD as-is "
+             "(no fetch).",
+    )
+    boot_p.add_argument(
+        "--run-id", default=None,
+        help="Run UUID. Falls back to $HARNESS_RUN_ID. If still unset, "
+             "the agent subcommand will allocate a fresh uuid4.",
+    )
+    boot_p.add_argument(
+        "--repo-dir", default=None,
+        help="Path to the harness checkout. Falls back to $HARNESS_REPO_DIR, "
+             "then /workspace/harness, then cwd.",
+    )
+    _add_common_flags(boot_p)
+
     agent_p = subparsers.add_parser(
         "agent",
         help="Run a single agent run.",
@@ -463,6 +683,8 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.log_level)
     _install_shutdown_handlers()
 
+    if args.command == "boot":
+        return _cmd_boot(args, boot_p)
     if args.command == "agent":
         return _cmd_agent(args, agent_p)
     if args.command == "reset-memory":
