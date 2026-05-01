@@ -209,3 +209,69 @@ def test_drop_orphan_tool_messages_passthrough_when_paired():
     filtered = llm._drop_orphan_tool_messages(messages)
 
     assert filtered == messages
+
+
+def test_prepare_replay_messages_strips_provider_reasoning_but_keeps_tool_calls():
+    """Assistant reasoning metadata is trace output, not replayable chat input.
+
+    Regression: OpenRouter returned Anthropic ``reasoning_details`` blocks
+    containing provider signatures. Persisting and replaying that assistant
+    message on the next turn caused Azure/OpenRouter to reject the request with
+    ``Invalid `signature` in `thinking` block`` before the agent could continue.
+    """
+    from harness.core import llm
+
+    messages = [
+        {"role": "user", "content": "check state"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning": "I should inspect notifications.",
+            "reasoning_details": [
+                {"type": "reasoning.text", "text": "I should inspect notifications."},
+                {"type": "reasoning.text", "signature": "provider-signature"},
+            ],
+            "tool_calls": [
+                {
+                    "id": "toolu_123",
+                    "type": "function",
+                    "function": {"name": "list_notifications", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "toolu_123", "content": "none"},
+    ]
+
+    filtered = llm._prepare_replay_messages(messages)
+
+    assert filtered[1] == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "toolu_123",
+                "type": "function",
+                "function": {"name": "list_notifications", "arguments": "{}"},
+            }
+        ],
+    }
+    assert filtered[2]["tool_call_id"] == "toolu_123"
+
+
+def test_prepare_replay_messages_strips_anthropic_thinking_content_blocks():
+    """Anthropic thinking blocks can also appear inside message content lists."""
+    from harness.core import llm
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "secret", "signature": "bad"},
+                {"type": "text", "text": "Visible answer"},
+            ],
+        }
+    ]
+
+    assert llm._prepare_replay_messages(messages) == [
+        {"role": "assistant", "content": [{"type": "text", "text": "Visible answer"}]}
+    ]

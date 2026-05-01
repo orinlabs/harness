@@ -367,7 +367,7 @@ class Harness:
         turn_span.set_metadata(usage=resp.usage.to_dict())
         self._accumulate_usage(resp.usage)
 
-        assistant_msg = resp.raw["choices"][0]["message"]
+        assistant_msg = llm._strip_provider_reasoning([resp.raw["choices"][0]["message"]])[0]
         self.memory.log_messages([assistant_msg])
 
         logger.info(

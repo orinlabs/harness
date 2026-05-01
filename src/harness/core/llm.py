@@ -219,7 +219,7 @@ def complete(
     full_messages: list[dict] = []
     if system:
         full_messages.append({"role": "system", "content": system})
-    full_messages.extend(_drop_orphan_tool_messages(messages))
+    full_messages.extend(_prepare_replay_messages(messages))
 
     body: dict[str, Any] = {
         "model": model,
@@ -546,6 +546,59 @@ def _parse_reasoning(msg: dict) -> str | None:
     if summaries:
         return "\n\n".join(summaries)
     return None
+
+
+def _prepare_replay_messages(messages: list[dict]) -> list[dict]:
+    """Return chat messages safe to replay into a new OpenRouter request."""
+    return _drop_orphan_tool_messages(_strip_provider_reasoning(messages))
+
+
+def _strip_provider_reasoning(messages: list[dict]) -> list[dict]:
+    """Remove provider-only thinking fields from replayed assistant messages.
+
+    OpenRouter returns Anthropic/OpenAI reasoning metadata on assistant
+    responses so we can trace it, but those blocks are not stable chat history.
+    Replaying a prior provider signature to a later request can 400 with
+    ``Invalid `signature` in `thinking` block``. Keep the normal transcript
+    surface (content + tool_calls) and drop only reasoning internals.
+    """
+    sanitized: list[dict] = []
+    dropped = 0
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            sanitized.append(msg)
+            continue
+
+        clean = dict(msg)
+        for key in ("reasoning", "reasoning_details"):
+            if key in clean:
+                clean.pop(key, None)
+                dropped += 1
+
+        content = clean.get("content")
+        if isinstance(content, list):
+            filtered_content = [
+                block
+                for block in content
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in {"thinking", "redacted_thinking", "reasoning"}
+                )
+            ]
+            if len(filtered_content) != len(content):
+                clean["content"] = filtered_content
+                dropped += len(content) - len(filtered_content)
+
+        sanitized.append(clean)
+
+    if dropped:
+        logger.warning(
+            "Stripped %d provider reasoning field/block(s) from replay context",
+            dropped,
+        )
+
+    return sanitized
 
 
 def _drop_orphan_tool_messages(messages: list[dict]) -> list[dict]:
