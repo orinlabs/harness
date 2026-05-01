@@ -2,6 +2,7 @@
 adjacent bucket in the same tier (so a new summary pass can see the bucket
 immediately before the one it's about to write).
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime

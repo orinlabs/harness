@@ -1,4 +1,5 @@
 """Chunk 4 verification: real OpenRouter API calls."""
+
 from __future__ import annotations
 
 CHEAP_MODEL = "openai/gpt-4o-mini"
@@ -72,21 +73,12 @@ def test_translate_model_maps_bedrock_ids_to_openrouter_slugs():
 
     # Dated bedrock aliases (what you get back from the Claude API /models
     # endpoint and from AWS Bedrock sometimes) still resolve.
-    assert (
-        llm._translate_model("claude-sonnet-4-5-20250929")
-        == "anthropic/claude-sonnet-4.5"
-    )
-    assert (
-        llm._translate_model("claude-opus-4-1-20250805")
-        == "anthropic/claude-opus-4.1"
-    )
+    assert llm._translate_model("claude-sonnet-4-5-20250929") == "anthropic/claude-sonnet-4.5"
+    assert llm._translate_model("claude-opus-4-1-20250805") == "anthropic/claude-opus-4.1"
 
     # Already-namespaced slugs are pass-through (don't re-prefix).
     assert llm._translate_model("openai/gpt-4o-mini") == "openai/gpt-4o-mini"
-    assert (
-        llm._translate_model("anthropic/claude-opus-4.7")
-        == "anthropic/claude-opus-4.7"
-    )
+    assert llm._translate_model("anthropic/claude-opus-4.7") == "anthropic/claude-opus-4.7"
     assert llm._translate_model("google/gemini-2.0-flash") == "google/gemini-2.0-flash"
 
     # Unknown / non-Anthropic bare slugs are also pass-through; let

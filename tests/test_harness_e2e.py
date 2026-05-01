@@ -3,6 +3,7 @@
 Real OpenRouter + real SQLite + fake platform (HTTP). The one test that catches
 regressions across the whole system.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -51,18 +52,10 @@ def test_harness_runs_and_sleeps(harness_env):
 
     Harness(config, run_id="run-e2e-1").run()
 
-    run_spans = [
-        s for s in harness_env.spans_open.values() if s["name"] == "run_agent"
-    ]
-    turn_spans = [
-        s for s in harness_env.spans_open.values() if s["name"].startswith("turn_")
-    ]
-    llm_spans = [
-        s for s in harness_env.spans_open.values() if s["span_type"] == "llm"
-    ]
-    tool_spans = [
-        s for s in harness_env.spans_open.values() if s["span_type"] == "tool"
-    ]
+    run_spans = [s for s in harness_env.spans_open.values() if s["name"] == "run_agent"]
+    turn_spans = [s for s in harness_env.spans_open.values() if s["name"].startswith("turn_")]
+    llm_spans = [s for s in harness_env.spans_open.values() if s["span_type"] == "llm"]
+    tool_spans = [s for s in harness_env.spans_open.values() if s["span_type"] == "tool"]
 
     assert len(run_spans) == 1
     assert len(turn_spans) >= 1
@@ -92,9 +85,7 @@ def test_harness_runs_and_sleeps(harness_env):
     assert run_closed["metadata"]["usage"]["model_breakdown"], "model_breakdown empty"
 
     sleep_tool_spans = [
-        closed[s["id"]]
-        for s in tool_spans
-        if s["name"] == "sleep" and s["id"] in closed
+        closed[s["id"]] for s in tool_spans if s["name"] == "sleep" and s["id"] in closed
     ]
     assert sleep_tool_spans, "no tool span named 'sleep'"
 
@@ -106,9 +97,7 @@ def test_harness_runs_and_sleeps(harness_env):
     from harness.core import storage
 
     storage.load("agent-e2e")
-    rows = storage.db.execute(
-        "SELECT role, content_json FROM messages ORDER BY ts_ns"
-    ).fetchall()
+    rows = storage.db.execute("SELECT role, content_json FROM messages ORDER BY ts_ns").fetchall()
     storage.close()
 
     roles = [r["role"] for r in rows]
@@ -196,15 +185,11 @@ def test_harness_surfaces_reasoning_on_llm_span_and_sibling_thinking_span(
 
     Harness(config, run_id="run-thinking-1").run()
 
-    llm_open = [
-        s for s in harness_env.spans_open.values() if s["span_type"] == "llm"
-    ]
+    llm_open = [s for s in harness_env.spans_open.values() if s["span_type"] == "llm"]
     assert llm_open, "no llm spans captured on thinking-model run"
 
     llm_closed = [
-        harness_env.spans_closed[s["id"]]
-        for s in llm_open
-        if s["id"] in harness_env.spans_closed
+        harness_env.spans_closed[s["id"]] for s in llm_open if s["id"] in harness_env.spans_closed
     ]
     assert llm_closed, "llm spans were opened but never closed"
 
@@ -213,9 +198,9 @@ def test_harness_surfaces_reasoning_on_llm_span_and_sibling_thinking_span(
     # what Bedrock persists as final. Both `reasoning` (plaintext) and
     # `reasoning_tokens` (int > 0) must be present on thinking models.
     with_reasoning = [
-        c for c in llm_closed
-        if c["metadata"].get("reasoning")
-        and c["metadata"].get("reasoning_tokens", 0) > 0
+        c
+        for c in llm_closed
+        if c["metadata"].get("reasoning") and c["metadata"].get("reasoning_tokens", 0) > 0
     ]
     assert with_reasoning, (
         "no llm_span exposed top-level `reasoning` + `reasoning_tokens` "
@@ -229,9 +214,7 @@ def test_harness_surfaces_reasoning_on_llm_span_and_sibling_thinking_span(
 
     # Sibling `thinking` span must exist, be TEXT-typed, share the
     # trace, and carry the reasoning plaintext in output_text.
-    thinking_open = [
-        s for s in harness_env.spans_open.values() if s["name"] == "thinking"
-    ]
+    thinking_open = [s for s in harness_env.spans_open.values() if s["name"] == "thinking"]
     assert thinking_open, (
         "no sibling `thinking` span was emitted even though reasoning "
         "tokens were used. Span names opened: "

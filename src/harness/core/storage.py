@@ -31,6 +31,7 @@ Module-level ``db`` is the currently open DB-API 2.0 connection. Memory
 code calls ``db.execute(...)``, ``db.executemany(...)``, etc. directly
 against this real ``sqlite3.Connection`` — no adapter layer.
 """
+
 from __future__ import annotations
 
 import logging
@@ -195,7 +196,9 @@ def _migrate_legacy_db(agent_id: str) -> None:
         logger.warning(
             "storage: both legacy %s and new %s exist for agent %s; "
             "leaving legacy in place. Resolve manually if intended.",
-            legacy, new, agent_id,
+            legacy,
+            new,
+            agent_id,
         )
         return
 
@@ -203,7 +206,9 @@ def _migrate_legacy_db(agent_id: str) -> None:
     legacy.rename(new)
     logger.info(
         "storage: migrated legacy sqlite for agent %s: %s -> %s",
-        agent_id, legacy, new,
+        agent_id,
+        legacy,
+        new,
     )
 
     # Move WAL/SHM sidecars too. A live WAL holds frames sqlite hasn't
@@ -236,9 +241,7 @@ def delete_local_agent_db(agent_id: str) -> bool:
         except FileNotFoundError:
             continue
         except OSError as e:
-            raise RuntimeError(
-                f"Could not delete local storage file {candidate}: {e}"
-            ) from e
+            raise RuntimeError(f"Could not delete local storage file {candidate}: {e}") from e
     return deleted
 
 
@@ -265,9 +268,7 @@ def _apply_migrations(conn) -> None:
         "name TEXT PRIMARY KEY, applied_at_ns INTEGER NOT NULL)"
     )
 
-    applied = {
-        row["name"] for row in conn.execute("SELECT name FROM applied_migrations")
-    }
+    applied = {row["name"] for row in conn.execute("SELECT name FROM applied_migrations")}
     pending = _pending_migrations(applied)
     for name, sql in pending:
         _apply_migration(conn, name, sql)

@@ -8,6 +8,7 @@ needed — harness code builds plain dicts for `messages` and `tools`.
 
 To swap in a different LLM provider, branch the repo and rewrite this file.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,9 +39,7 @@ class OpenRouterError(RuntimeError):
         self.status_code = status_code
         self.body = body
         self.model = model
-        super().__init__(
-            f"openrouter HTTP {status_code} for model {model}: {body}"
-        )
+        super().__init__(f"openrouter HTTP {status_code} for model {model}: {body}")
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +110,7 @@ def _http() -> httpx.Client:
 def _api_key() -> str:
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is not set. LLM calls need it to reach OpenRouter."
-        )
+        raise RuntimeError("OPENROUTER_API_KEY is not set. LLM calls need it to reach OpenRouter.")
     return key
 
 
@@ -216,9 +213,7 @@ def complete(
         reasoning_effort or "-",
     )
     if tools:
-        tool_names = [
-            ((t.get("function") or {}).get("name") or "?") for t in tools
-        ]
+        tool_names = [((t.get("function") or {}).get("name") or "?") for t in tools]
         logger.info("openrouter complete() tool names: %s", tool_names)
 
     full_messages: list[dict] = []
@@ -326,9 +321,7 @@ def complete(
         except json.JSONDecodeError:
             logger.warning("tool_call had unparseable arguments: %r", raw_args)
             args = {"_raw": raw_args}
-        tool_calls.append(
-            ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), args=args)
-        )
+        tool_calls.append(ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), args=args))
 
     usage_data = data.get("usage") or {}
     completion_details = usage_data.get("completion_tokens_details") or {}
@@ -367,9 +360,7 @@ def complete(
     )
 
 
-def _stream_chat_completion(
-    body: dict, *, timeout: httpx.Timeout, model: str
-) -> dict:
+def _stream_chat_completion(body: dict, *, timeout: httpx.Timeout, model: str) -> dict:
     """POST with `stream: true` and reassemble SSE deltas into a dict that
     matches the non-streaming response shape the rest of `complete()` expects.
 
@@ -520,9 +511,7 @@ def _stream_chat_completion(
     return {
         "id": response_id,
         "model": response_model,
-        "choices": [
-            {"index": 0, "message": message, "finish_reason": finish_reason}
-        ],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": usage,
     }
 

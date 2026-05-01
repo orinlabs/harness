@@ -38,6 +38,7 @@ Bedrock serves its config with a nested ``adapters: [{name, tools: [...]}]``
 shape. ``harness.cloud.bedrock.config.fetch_harness_config`` flattens that
 on ingest -- only this (flat) schema reaches ``AgentConfig``.
 """
+
 from __future__ import annotations
 
 import json
@@ -85,9 +86,7 @@ def load_agent_config_by_name(name: str) -> AgentConfig:
         if p.exists():
             return load_agent_config_from_path(p)
     tried = "\n  ".join(str(p) for p in candidates)
-    raise FileNotFoundError(
-        f"no local agent config found for '{name}'. Tried:\n  {tried}"
-    )
+    raise FileNotFoundError(f"no local agent config found for '{name}'. Tried:\n  {tried}")
 
 
 def build_agent_config(data: dict[str, Any]) -> AgentConfig:

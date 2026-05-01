@@ -4,6 +4,7 @@ Owns every call to ``/api/cloud/agents/*`` and ``/api/products/products/``.
 Returns already-parsed Python types (``AgentConfig``, ``dict``) so the CLI
 layer never has to know Bedrock's JSON shape.
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,9 +44,7 @@ def _flatten_and_stamp(cfg: dict[str, Any]) -> dict[str, Any]:
     flat: list[dict[str, Any]] = []
     for adapter in cfg.get("adapters", []) or []:
         for tool in adapter.get("tools", []) or []:
-            tool.setdefault(
-                "auth", {"kind": "bearer_env", "token_env": "BEDROCK_TOKEN"}
-            )
+            tool.setdefault("auth", {"kind": "bearer_env", "token_env": "BEDROCK_TOKEN"})
             tool.setdefault("forward_trace_context", True)
             flat.append(tool)
     cfg["tools"] = flat
@@ -138,8 +137,7 @@ def create_dev_agent(
         body["system_prompt"] = system_prompt
     if template:
         logger.warning(
-            "# TODO(Phase 2): template not yet implemented server-side; "
-            "ignoring --template=%s",
+            "# TODO(Phase 2): template not yet implemented server-side; ignoring --template=%s",
             template,
         )
     url = f"{platform_url()}/api/cloud/agents/"
@@ -180,8 +178,7 @@ def create_eval_agent(
     }
     if template:
         logger.warning(
-            "# TODO(Phase 2): template not yet implemented server-side; "
-            "ignoring --template=%s",
+            "# TODO(Phase 2): template not yet implemented server-side; ignoring --template=%s",
             template,
         )
     url = f"{platform_url()}/api/cloud/agents/"

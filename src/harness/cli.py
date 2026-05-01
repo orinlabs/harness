@@ -41,6 +41,7 @@ Optional:
     BEDROCK_URL           enables Bedrock lookup + tracing to Bedrock
     BEDROCK_TOKEN         bedrock product API key
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,9 +59,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ENV: dict[str, str] = {}
 
-REQUIRED_ENV = (
-    "OPENROUTER_API_KEY",
-)
+REQUIRED_ENV = ("OPENROUTER_API_KEY",)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +180,9 @@ def _git_branch() -> str:
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return r.stdout.strip() or "unknown"
     except Exception:
@@ -192,7 +193,9 @@ def _git_sha() -> str:
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return r.stdout.strip()[:40] or "unknown"
     except Exception:
@@ -358,9 +361,7 @@ def _sync_repo(repo_dir: Path, target_sha: str | None) -> None:
     fetch_url = origin
     token = os.environ.get("GITHUB_TOKEN")
     if token and origin.startswith("https://github.com/") and "@" not in origin:
-        fetch_url = origin.replace(
-            "https://", f"https://x-access-token:{token}@", 1
-        )
+        fetch_url = origin.replace("https://", f"https://x-access-token:{token}@", 1)
 
     logger.info("boot: fetching %s into %s", target_sha, repo_dir)
     _git(repo_dir, "fetch", "--depth=1", fetch_url, target_sha)
@@ -421,8 +422,7 @@ def _cmd_boot(args, parser: argparse.ArgumentParser) -> int:
     if not (repo_dir / ".git").is_dir():
         parser.exit(
             1,
-            f"boot: {repo_dir} is not a git checkout. Set --repo-dir or "
-            "$HARNESS_REPO_DIR.\n",
+            f"boot: {repo_dir} is not a git checkout. Set --repo-dir or $HARNESS_REPO_DIR.\n",
         )
 
     try:
@@ -430,8 +430,8 @@ def _cmd_boot(args, parser: argparse.ArgumentParser) -> int:
         _sync_deps(repo_dir)
     except subprocess.CalledProcessError as e:
         cmd = " ".join(map(str, e.cmd or [])) or "<unknown>"
-        stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr or b"").decode(
-            errors="replace"
+        stderr = (
+            e.stderr if isinstance(e.stderr, str) else (e.stderr or b"").decode(errors="replace")
         )
         parser.exit(
             1,
@@ -458,9 +458,11 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
 
     tool_names = [getattr(t, "name", "<unnamed>") for t in config.tools]
     logger.info(
-        "built agent config: id=%s model=%s tools=%d (%s) "
-        "(built-ins added separately)",
-        config.id, config.model, len(config.tools), tool_names,
+        "built agent config: id=%s model=%s tools=%d (%s) (built-ins added separately)",
+        config.id,
+        config.model,
+        len(config.tools),
+        tool_names,
     )
 
     from harness import Harness
@@ -518,7 +520,8 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
 
     logger.info(
         "reset agent memory: id=%s local=%s",
-        args.agent_id, result["local"],
+        args.agent_id,
+        result["local"],
     )
     print(
         f"reset agent memory: id={args.agent_id} local={result['local']}",
@@ -533,23 +536,29 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
 
 
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--bedrock-url", default=None,
-                   help="Override $BEDROCK_URL (CLI wins).")
-    p.add_argument("--local", action="store_true",
-                   help="Sugar for --bedrock-url http://127.0.0.1:8000.")
-    p.add_argument("--bedrock-token", default=None,
-                   help="Bedrock product API key. Defaults to $BEDROCK_TOKEN.")
-    p.add_argument("--log-level",
-                   default=os.environ.get("LOG_LEVEL", "INFO"),
-                   help="Log level: DEBUG|INFO|WARNING|ERROR.")
+    p.add_argument("--bedrock-url", default=None, help="Override $BEDROCK_URL (CLI wins).")
+    p.add_argument(
+        "--local", action="store_true", help="Sugar for --bedrock-url http://127.0.0.1:8000."
+    )
+    p.add_argument(
+        "--bedrock-token", default=None, help="Bedrock product API key. Defaults to $BEDROCK_TOKEN."
+    )
+    p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
     p.add_argument("--model", default=None, help="Override the model.")
-    p.add_argument("--reasoning-effort", default=None,
-                   help="Override reasoning effort.")
-    p.add_argument("--template", default=None,
-                   help="Template uuid-or-name (forward-compat; Phase 2).")
-    p.add_argument("--product", default=None,
-                   help="Product UUID for auto-created agents. If omitted the "
-                        "single product visible to the API key is used.")
+    p.add_argument("--reasoning-effort", default=None, help="Override reasoning effort.")
+    p.add_argument(
+        "--template", default=None, help="Template uuid-or-name (forward-compat; Phase 2)."
+    )
+    p.add_argument(
+        "--product",
+        default=None,
+        help="Product UUID for auto-created agents. If omitted the "
+        "single product visible to the API key is used.",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -561,8 +570,7 @@ def main(argv: list[str] | None = None) -> int:
 
     boot_p = subparsers.add_parser(
         "boot",
-        help="In-sandbox bootstrap: update checkout, uv sync, exec into "
-             "`harness agent`.",
+        help="In-sandbox bootstrap: update checkout, uv sync, exec into `harness agent`.",
         description=(
             "The single command bedrock invokes inside a Daytona sandbox. "
             "Bedrock's only job is: (1) find or create the sandbox by "
@@ -590,24 +598,29 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     boot_p.add_argument(
-        "agent_id", nargs="?", default=None,
+        "agent_id",
+        nargs="?",
+        default=None,
         help="Agent UUID. Falls back to $HARNESS_AGENT_ID.",
     )
     boot_p.add_argument(
-        "--commit", default=None,
+        "--commit",
+        default=None,
         help="Target git SHA to check out before running. Falls back to "
-             "$HARNESS_COMMIT_SHA. If unset, uses the current HEAD as-is "
-             "(no fetch).",
+        "$HARNESS_COMMIT_SHA. If unset, uses the current HEAD as-is "
+        "(no fetch).",
     )
     boot_p.add_argument(
-        "--run-id", default=None,
+        "--run-id",
+        default=None,
         help="Run UUID. Falls back to $HARNESS_RUN_ID. If still unset, "
-             "the agent subcommand will allocate a fresh uuid4.",
+        "the agent subcommand will allocate a fresh uuid4.",
     )
     boot_p.add_argument(
-        "--repo-dir", default=None,
+        "--repo-dir",
+        default=None,
         help="Path to the harness checkout. Falls back to $HARNESS_REPO_DIR, "
-             "then /workspace/harness, then cwd.",
+        "then /workspace/harness, then cwd.",
     )
     _add_common_flags(boot_p)
 
@@ -622,14 +635,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     agent_p.add_argument(
-        "agent_id", nargs="?", default=os.environ.get("AGENT_ID"),
-        help="Agent UUID or local config name. Omit to auto-create a dev "
-             "agent on Bedrock.",
+        "agent_id",
+        nargs="?",
+        default=os.environ.get("AGENT_ID"),
+        help="Agent UUID or local config name. Omit to auto-create a dev agent on Bedrock.",
     )
-    agent_p.add_argument("--run-id", default=None,
-                         help="Run UUID. Defaults to a fresh uuid4.")
-    agent_p.add_argument("--system-prompt", default=None,
-                         help="System prompt override (Bedrock dev auto-create only).")
+    agent_p.add_argument("--run-id", default=None, help="Run UUID. Defaults to a fresh uuid4.")
+    agent_p.add_argument(
+        "--system-prompt",
+        default=None,
+        help="System prompt override (Bedrock dev auto-create only).",
+    )
     _add_common_flags(agent_p)
 
     reset_p = subparsers.add_parser(
@@ -637,9 +653,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Reset memory storage for an agent.",
     )
     reset_p.add_argument("agent_id", help="Agent UUID to reset memory for.")
-    reset_p.add_argument("--log-level",
-                         default=os.environ.get("LOG_LEVEL", "INFO"),
-                         help="Log level: DEBUG|INFO|WARNING|ERROR.")
+    reset_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
 
     inspect_p = subparsers.add_parser(
         "inspect",
@@ -652,30 +670,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     inspect_p.add_argument("agent_id", help="Agent UUID or local config name.")
     inspect_p.add_argument(
-        "--python", action="store_true",
+        "--python",
+        action="store_true",
         help="Drop into a Python REPL (with db/sql/messages/summaries helpers) "
-             "instead of the sqlite3 shell.",
+        "instead of the sqlite3 shell.",
     )
     inspect_p.add_argument(
-        "--summary-only", action="store_true",
+        "--summary-only",
+        action="store_true",
         help="Print the summary and exit without opening an interactive shell.",
     )
     inspect_p.add_argument(
-        "--path", action="store_true",
-        help="Print the sqlite file path and exit. Useful for piping into "
-             "sqlite3/datasette/etc.",
+        "--path",
+        action="store_true",
+        help="Print the sqlite file path and exit. Useful for piping into sqlite3/datasette/etc.",
     )
     inspect_p.add_argument(
-        "--limit", type=int, default=5,
+        "--limit",
+        type=int,
+        default=5,
         help="How many recent messages to preview in the summary (default: 5).",
     )
-    inspect_p.add_argument("--log-level",
-                           default=os.environ.get("LOG_LEVEL", "INFO"),
-                           help="Log level: DEBUG|INFO|WARNING|ERROR.")
+    inspect_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
 
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
-    eval_p.add_argument("scenario",
-                        help="Scenario name (matches Simulation.name).")
+    eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
 
     args = parser.parse_args(argv)

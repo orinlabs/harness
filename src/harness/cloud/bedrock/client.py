@@ -3,6 +3,7 @@
 All Bedrock HTTP goes through this module so there's exactly one place that
 reads ``BEDROCK_URL`` / ``BEDROCK_TOKEN`` and owns the shared ``httpx.Client``.
 """
+
 from __future__ import annotations
 
 import os

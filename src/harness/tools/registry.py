@@ -3,6 +3,7 @@
 Built-in tools first, then every tool from the config. Name collisions raise --
 no silent override.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,9 +42,7 @@ def build_tool_map(tools: list[ExternalToolSpec | Tool]) -> dict[str, Tool]:
         # in-process; no HTTP wrapping needed.
         if isinstance(entry, ExternalToolSpec):
             if entry.name in tool_map:
-                raise ValueError(
-                    f"tool name collision: {entry.name!r} already registered"
-                )
+                raise ValueError(f"tool name collision: {entry.name!r} already registered")
             tool_map[entry.name] = ExternalTool(entry)
         else:
             name = getattr(entry, "name", None)
@@ -54,9 +53,7 @@ def build_tool_map(tools: list[ExternalToolSpec | Tool]) -> dict[str, Tool]:
                     f"ExternalToolSpec nor a Tool instance: {entry!r}"
                 )
             if name in tool_map:
-                raise ValueError(
-                    f"tool name collision: {name!r} already registered"
-                )
+                raise ValueError(f"tool name collision: {name!r} already registered")
             tool_map[name] = entry
 
     logger.info(

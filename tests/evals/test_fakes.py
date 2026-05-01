@@ -4,6 +4,7 @@ No mocks: every test opens a real per-agent sqlite DB under a tmp_path,
 runs the fake adapter migrations, and exercises the Tool.call contract
 end-to-end. This mirrors how an eval scenario invokes them at runtime.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -160,23 +161,17 @@ def test_sms_roundtrip(agent_db):
     assert "+15551234567" in list_result.text
     assert "yo" in list_result.text
 
-    get_result = by_name["get_conversation"].call(
-        {"phone": "+15551234567"}, ctx=None
-    )
+    get_result = by_name["get_conversation"].call({"phone": "+15551234567"}, ctx=None)
     assert "yo" in get_result.text
 
 
 def test_sms_send_persists_outbound(agent_db):
     by_name = _by_name(FakeSMSAdapter.make_tools())
 
-    result = by_name["send_sms"].call(
-        {"phone": "+15559999999", "body": "on my way"}, ctx=None
-    )
+    result = by_name["send_sms"].call({"phone": "+15559999999", "body": "on my way"}, ctx=None)
     assert "SMS sent to +15559999999" in result.text
 
-    rows = storage.db.execute(
-        "SELECT direction, body FROM fake_sms_message"
-    ).fetchall()
+    rows = storage.db.execute("SELECT direction, body FROM fake_sms_message").fetchall()
     assert len(rows) == 1
     assert rows[0]["direction"] == "outbound"
     assert rows[0]["body"] == "on my way"
@@ -270,20 +265,14 @@ def test_computer_list_and_exec(agent_db):
     by_name = _by_name(FakeComputerAdapter.make_tools())
     ctx = _StubCtx(agent_db)
 
-    by_name["computer_write_file"].call(
-        {"path": "/workspace/a.txt", "content": "a"}, ctx=ctx
-    )
-    by_name["computer_write_file"].call(
-        {"path": "/workspace/b.txt", "content": "b"}, ctx=ctx
-    )
+    by_name["computer_write_file"].call({"path": "/workspace/a.txt", "content": "a"}, ctx=ctx)
+    by_name["computer_write_file"].call({"path": "/workspace/b.txt", "content": "b"}, ctx=ctx)
 
     ls_result = by_name["computer_list_files"].call({"path": "/workspace"}, ctx=ctx)
     assert "a.txt" in ls_result.text
     assert "b.txt" in ls_result.text
 
-    exec_result = by_name["computer_exec"].call(
-        {"command": "echo hello"}, ctx=ctx
-    )
+    exec_result = by_name["computer_exec"].call({"command": "echo hello"}, ctx=ctx)
     assert "Exit code: 0" in exec_result.text
     assert "hello" in exec_result.text
 

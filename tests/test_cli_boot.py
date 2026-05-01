@@ -14,6 +14,7 @@ replace the test process), so those parts are tested separately:
 between the helpers + the subcommand is exercised via the helper-level
 tests below.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -114,7 +115,8 @@ def test_sync_repo_fetches_and_detaches_to_target_sha(real_repo):
     # Detached HEAD: no branch should be checked out.
     branch = subprocess.run(
         ["git", "-C", str(work), "symbolic-ref", "-q", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert branch.returncode != 0, "expected detached HEAD after checkout --detach"
 
@@ -122,9 +124,7 @@ def test_sync_repo_fetches_and_detaches_to_target_sha(real_repo):
     assert (work / "README").read_text() == "commit 2\n"
 
 
-def test_sync_repo_keeps_origin_url_clean_even_with_github_token_set(
-    real_repo, monkeypatch
-):
+def test_sync_repo_keeps_origin_url_clean_even_with_github_token_set(real_repo, monkeypatch):
     """The harness repo is public, so $GITHUB_TOKEN won't usually be set
     in production -- but if it ever is (e.g. the repo goes private
     later, or someone leaks it via env), ``_sync_repo`` must NOT persist
@@ -174,8 +174,12 @@ def test_build_agent_cmd_minimal():
     from harness.cli import _build_agent_cmd
 
     args = argparse.Namespace(
-        bedrock_token=None, bedrock_url=None, local=False,
-        model=None, reasoning_effort=None, log_level=None,
+        bedrock_token=None,
+        bedrock_url=None,
+        local=False,
+        model=None,
+        reasoning_effort=None,
+        log_level=None,
     )
     cmd = _build_agent_cmd("agent-xyz", run_id=None, args=args)
 
@@ -188,19 +192,34 @@ def test_build_agent_cmd_forwards_all_flags():
     from harness.cli import _build_agent_cmd
 
     args = argparse.Namespace(
-        bedrock_token="bt-123", bedrock_url="http://b.example.com", local=False,
-        model="claude-haiku-4-5", reasoning_effort="medium", log_level="DEBUG",
+        bedrock_token="bt-123",
+        bedrock_url="http://b.example.com",
+        local=False,
+        model="claude-haiku-4-5",
+        reasoning_effort="medium",
+        log_level="DEBUG",
     )
     cmd = _build_agent_cmd("agent-xyz", run_id="run-abc", args=args)
 
     assert cmd == [
-        "uv", "run", "--frozen", "harness", "agent", "agent-xyz",
-        "--run-id", "run-abc",
-        "--bedrock-token", "bt-123",
-        "--bedrock-url", "http://b.example.com",
-        "--model", "claude-haiku-4-5",
-        "--reasoning-effort", "medium",
-        "--log-level", "DEBUG",
+        "uv",
+        "run",
+        "--frozen",
+        "harness",
+        "agent",
+        "agent-xyz",
+        "--run-id",
+        "run-abc",
+        "--bedrock-token",
+        "bt-123",
+        "--bedrock-url",
+        "http://b.example.com",
+        "--model",
+        "claude-haiku-4-5",
+        "--reasoning-effort",
+        "medium",
+        "--log-level",
+        "DEBUG",
     ]
 
 
@@ -214,7 +233,9 @@ def test_build_agent_cmd_local_sugar_not_combined_with_bedrock_url():
         bedrock_token=None,
         bedrock_url="https://b.example.com",
         local=True,  # ignored when bedrock_url is set
-        model=None, reasoning_effort=None, log_level=None,
+        model=None,
+        reasoning_effort=None,
+        log_level=None,
     )
     cmd = _build_agent_cmd("agent-1", run_id=None, args=args)
 
@@ -244,9 +265,7 @@ def test_cmd_boot_errors_when_agent_id_missing(monkeypatch, tmp_path):
     assert excinfo.value.code == 2
 
 
-def test_cmd_boot_errors_when_repo_dir_is_not_a_git_checkout(
-    monkeypatch, tmp_path, capsys
-):
+def test_cmd_boot_errors_when_repo_dir_is_not_a_git_checkout(monkeypatch, tmp_path, capsys):
     """If --repo-dir / $HARNESS_REPO_DIR points at a non-git directory,
     fail loudly before doing anything destructive (no git fetch on a
     random folder, no `uv sync` in the wrong place)."""
@@ -268,9 +287,7 @@ def test_cmd_boot_errors_when_repo_dir_is_not_a_git_checkout(
 @pytest.mark.skipif(
     sys.platform == "win32", reason="execvp + os.chdir + uv subprocess; unix-only path"
 )
-def test_cmd_boot_execs_into_agent_when_everything_is_in_place(
-    real_repo, monkeypatch, tmp_path
-):
+def test_cmd_boot_execs_into_agent_when_everything_is_in_place(real_repo, monkeypatch, tmp_path):
     """End-to-end: a real git repo, sync_repo advances HEAD, sync_deps is
     short-circuited to a known invocation, and execvp is captured via a
     fake. The point of this test is to assert ``boot`` does the steps

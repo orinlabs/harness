@@ -13,6 +13,7 @@ Why a separate migration runner?
     use a parallel mechanism keyed off ``applied_migrations`` with a
     distinct migration name prefix.
 """
+
 from __future__ import annotations
 
 import time

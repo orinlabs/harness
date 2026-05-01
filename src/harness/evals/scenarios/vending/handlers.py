@@ -170,9 +170,7 @@ def collect_cash(args: dict, agent, tool) -> str:
     collected = state.uncollected_cash
     state.money_balance += collected
     state.uncollected_cash = 0.0
-    return (
-        f"Collected ${collected:.2f} from the machine. " f"New balance: ${state.money_balance:.2f}."
-    )
+    return f"Collected ${collected:.2f} from the machine. New balance: ${state.money_balance:.2f}."
 
 
 # ---------------------------------------------------------------------------

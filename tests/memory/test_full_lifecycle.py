@@ -5,6 +5,7 @@ This test is slower than the rest (dozens of real OpenRouter calls to build
 summaries) but exercises the full memory + harness stack the way production
 will. Budget ~$0.01-0.03 per run on openai/gpt-4o-mini.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -258,8 +259,7 @@ def test_agent_recalls_fact_from_summarized_memory(env):
     print(f"[lifecycle] agent replied: {reply_body!r}")
 
     assert SECRET_CODE in reply_body, (
-        f"agent failed to recall the secret code from summarized memory. "
-        f"Reply: {reply_body!r}"
+        f"agent failed to recall the secret code from summarized memory. Reply: {reply_body!r}"
     )
 
     assert env.sleep_requests, "agent never called sleep"

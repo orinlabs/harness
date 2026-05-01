@@ -10,6 +10,7 @@ Takes an `AgentConfig` + a `run_id` and runs the main loop:
 Every side effect goes through the `core/` modules so the infra platform can
 own storage, tracing, LLM routing, and lifecycle without the harness knowing.
 """
+
 from __future__ import annotations
 
 import json
@@ -149,8 +150,7 @@ class Harness:
                         **self._run_usage,
                         "cost_usd": self._run_usage["total_cost_usd"],
                         "cache_hit_rate": (
-                            self._run_usage["cached_tokens"]
-                            / self._run_usage["input_tokens"]
+                            self._run_usage["cached_tokens"] / self._run_usage["input_tokens"]
                             if self._run_usage["input_tokens"] > 0
                             else 0.0
                         ),
@@ -239,8 +239,7 @@ class Harness:
         )
         tools_schema = [t.schema.to_openai() for t in self.tool_map.values()]
         logger.info(
-            "turn %d built inputs: system_chars=%d messages=%d "
-            "(kickoff_injected=%s) tools=%d",
+            "turn %d built inputs: system_chars=%d messages=%d (kickoff_injected=%s) tools=%d",
             self.ctx.turn,
             len(system or ""),
             len(messages),
@@ -332,8 +331,7 @@ class Harness:
         # not just silent tokens buried in the usage dict.
         if resp.reasoning or reasoning_tokens > 0:
             logger.info(
-                "emitting thinking span: reasoning_tokens=%d has_plaintext=%s "
-                "text_chars=%d",
+                "emitting thinking span: reasoning_tokens=%d has_plaintext=%s text_chars=%d",
                 reasoning_tokens,
                 bool(resp.reasoning),
                 len(resp.reasoning or ""),
