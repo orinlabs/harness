@@ -6,6 +6,7 @@ number since we deliberately do not depend on the contacts fake at the
 schema level (scenarios that enable both adapters still work; scenarios
 that enable only SMS still work).
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

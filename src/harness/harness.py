@@ -10,6 +10,7 @@ Takes an `AgentConfig` + a `run_id` and runs the main loop:
 Every side effect goes through the `core/` modules so the infra platform can
 own storage, tracing, LLM routing, and lifecycle without the harness knowing.
 """
+
 from __future__ import annotations
 
 import json
@@ -94,9 +95,9 @@ class Harness:
         # generic feature_flags dict (Bedrock + new YAMLs). Either path
         # turns the v2 path on; both off (the default) keeps the legacy
         # cascade-summarizer behavior.
-        summarizer_v2_enabled = bool(
-            getattr(config, "summarizer_v2", False)
-        ) or config.is_enabled("summarizer_v2")
+        summarizer_v2_enabled = bool(getattr(config, "summarizer_v2", False)) or config.is_enabled(
+            "summarizer_v2"
+        )
         self.memory = MemoryService(
             agent_id=config.id,
             model=summary_model,
@@ -157,8 +158,7 @@ class Harness:
                         **self._run_usage,
                         "cost_usd": self._run_usage["total_cost_usd"],
                         "cache_hit_rate": (
-                            self._run_usage["cached_tokens"]
-                            / self._run_usage["input_tokens"]
+                            self._run_usage["cached_tokens"] / self._run_usage["input_tokens"]
                             if self._run_usage["input_tokens"] > 0
                             else 0.0
                         ),

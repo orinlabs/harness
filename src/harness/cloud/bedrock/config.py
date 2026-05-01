@@ -4,6 +4,7 @@ Owns every call to ``/api/cloud/agents/*`` and ``/api/templates/``.
 Returns already-parsed Python types (``AgentConfig``, ``dict``) so the CLI
 layer never has to know Bedrock's JSON shape.
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,9 +44,7 @@ def _flatten_and_stamp(cfg: dict[str, Any]) -> dict[str, Any]:
     flat: list[dict[str, Any]] = []
     for adapter in cfg.get("adapters", []) or []:
         for tool in adapter.get("tools", []) or []:
-            tool.setdefault(
-                "auth", {"kind": "bearer_env", "token_env": "BEDROCK_TOKEN"}
-            )
+            tool.setdefault("auth", {"kind": "bearer_env", "token_env": "BEDROCK_TOKEN"})
             tool.setdefault("forward_trace_context", True)
             flat.append(tool)
     cfg["tools"] = flat
@@ -126,9 +125,7 @@ def resolve_template(explicit: str | None) -> str | None:
     if not matches:
         raise SystemExit(f"no template named {explicit!r} visible to this API key")
     if len(matches) > 1:
-        raise SystemExit(
-            f"multiple templates named {explicit!r}; pass --template <uuid>"
-        )
+        raise SystemExit(f"multiple templates named {explicit!r}; pass --template <uuid>")
     return matches[0]["id"]
 
 

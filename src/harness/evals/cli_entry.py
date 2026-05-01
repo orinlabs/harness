@@ -13,6 +13,7 @@ spans are visible under whatever agent_id we synthesize locally. Users who
 want a dedicated Bedrock eval agent should create one via the Bedrock API
 and pass its id via ``AGENT_ID`` env (TODO).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -75,9 +76,7 @@ def _find_scenario(name: str):
         if cls.name == name:
             return cls
     available = sorted({cls.name for _m, cls in candidates if cls.name})
-    raise SystemExit(
-        f"scenario {name!r} not found. available: {', '.join(available) or '(none)'}"
-    )
+    raise SystemExit(f"scenario {name!r} not found. available: {', '.join(available) or '(none)'}")
 
 
 # ---------------------------------------------------------------------------
@@ -97,16 +96,10 @@ def run(args, parser: argparse.ArgumentParser) -> int:
     scenario_cls = _find_scenario(args.scenario)
     logger.info("found scenario %s from %s", scenario_cls.name, scenario_cls.__module__)
 
-    model = (
-        args.model
-        or scenario_cls.agent_overrides.model
-        or "claude-haiku-4-5"
-    )
+    model = args.model or scenario_cls.agent_overrides.model or "claude-haiku-4-5"
     system_prompt = scenario_cls.agent_overrides.system_prompt or ""
     reasoning_effort = (
-        args.reasoning_effort
-        or scenario_cls.agent_overrides.reasoning_effort
-        or None
+        args.reasoning_effort or scenario_cls.agent_overrides.reasoning_effort or None
     )
 
     # No Bedrock agent row is created. Spans flow to Bedrock via the

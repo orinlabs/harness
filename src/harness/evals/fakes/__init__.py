@@ -11,6 +11,7 @@ Migrations:
     ``harness.core.storage.load(agent_id)``. The production
     ``storage.load()`` path intentionally does not apply these migrations.
 """
+
 from __future__ import annotations
 
 from . import base, computer, contacts, email, sms

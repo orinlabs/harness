@@ -40,6 +40,7 @@ Module-level ``db`` is the currently open DB-API 2.0 connection. Memory code
 calls ``db.execute(...)``, ``db.executemany(...)``, etc. Both backends are
 real ``sqlite3.Connection`` objects — there's no adapter layer.
 """
+
 from __future__ import annotations
 
 import logging
@@ -166,9 +167,7 @@ def delete_agent_storage(
     }
 
 
-def reset_agent_memory(
-    agent_id: str, *, require_remote: bool = False
-) -> dict[str, bool]:
+def reset_agent_memory(agent_id: str, *, require_remote: bool = False) -> dict[str, bool]:
     """Reset an agent's memory so the next run starts from an empty DB.
 
     Leaves the Daytona sandbox in place (cheap to keep) but wipes the sqlite
@@ -229,9 +228,7 @@ def delete_local_agent_db(agent_id: str) -> bool:
             except FileNotFoundError:
                 continue
             except OSError as e:
-                raise RuntimeError(
-                    f"Could not delete local storage file {candidate}: {e}"
-                ) from e
+                raise RuntimeError(f"Could not delete local storage file {candidate}: {e}") from e
     return deleted
 
 
@@ -268,8 +265,7 @@ def _find_agent_sandbox(client: Any, safe_id: str) -> Any | None:
         result = client.list(labels={_SANDBOX_LABEL_KEY: safe_id}, limit=1)
     except Exception as e:
         raise RuntimeError(
-            f"Daytona list() failed while looking up sandbox for agent "
-            f"{safe_id!r}: {e}"
+            f"Daytona list() failed while looking up sandbox for agent {safe_id!r}: {e}"
         ) from e
 
     items = getattr(result, "items", None)
@@ -322,9 +318,7 @@ def _create_agent_sandbox(client: Any, safe_id: str) -> Any:
         try:
             params_kwargs["auto_stop_interval"] = int(raw)
         except ValueError:
-            logger.warning(
-                "HARNESS_DAYTONA_AUTO_STOP_MINUTES=%r is not an int; ignoring.", raw
-            )
+            logger.warning("HARNESS_DAYTONA_AUTO_STOP_MINUTES=%r is not an int; ignoring.", raw)
 
     logger.info("storage: creating Daytona sandbox for agent %s", safe_id)
     sandbox = client.create(CreateSandboxFromImageParams(**params_kwargs))
@@ -355,9 +349,7 @@ def _download_db_from_sandbox(sandbox: Any, local_path: Path) -> None:
                 except FileNotFoundError:
                     pass
             return
-        raise RuntimeError(
-            f"Daytona download_file({_SANDBOX_DB_PATH!r}) failed: {e}"
-        ) from e
+        raise RuntimeError(f"Daytona download_file({_SANDBOX_DB_PATH!r}) failed: {e}") from e
 
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_bytes(data)
@@ -397,9 +389,7 @@ def _open_daytona(agent_id: str) -> tuple[sqlite3.Connection, Any, Path]:
     return conn, sandbox, local_path
 
 
-def _resolve_sandbox_for_teardown(
-    agent_id: str, *, require_config: bool
-) -> tuple[Any, Any] | None:
+def _resolve_sandbox_for_teardown(agent_id: str, *, require_config: bool) -> tuple[Any, Any] | None:
     """Return ``(client, sandbox)`` for an agent, or None when nothing to do.
 
     Returns None when Daytona isn't configured (and ``require_config`` is
@@ -408,9 +398,7 @@ def _resolve_sandbox_for_teardown(
     """
     if not os.environ.get("DAYTONA_API_KEY"):
         if require_config:
-            raise RuntimeError(
-                "Cannot touch remote agent storage; DAYTONA_API_KEY is not set."
-            )
+            raise RuntimeError("Cannot touch remote agent storage; DAYTONA_API_KEY is not set.")
         return None
 
     safe_id = _sanitize(agent_id)
@@ -426,9 +414,7 @@ def _resolve_sandbox_for_teardown(
     return client, sandbox
 
 
-def archive_agent_sandbox(
-    agent_id: str, *, require_config: bool = False
-) -> bool:
+def archive_agent_sandbox(agent_id: str, *, require_config: bool = False) -> bool:
     """Archive the agent's Daytona sandbox. The sandbox is stopped first if
     needed (archive() requires a stopped sandbox).
 
@@ -443,9 +429,7 @@ def archive_agent_sandbox(
     """
     if not os.environ.get("DAYTONA_API_KEY"):
         if require_config:
-            raise RuntimeError(
-                "Cannot archive remote agent storage; DAYTONA_API_KEY is not set."
-            )
+            raise RuntimeError("Cannot archive remote agent storage; DAYTONA_API_KEY is not set.")
         return False
 
     resolved = _resolve_sandbox_for_teardown(agent_id, require_config=require_config)
@@ -482,15 +466,11 @@ def archive_agent_sandbox(
     return True
 
 
-def purge_agent_sandbox(
-    agent_id: str, *, require_config: bool = False
-) -> bool:
+def purge_agent_sandbox(agent_id: str, *, require_config: bool = False) -> bool:
     """Fully delete the agent's Daytona sandbox. No recovery afterwards."""
     if not os.environ.get("DAYTONA_API_KEY"):
         if require_config:
-            raise RuntimeError(
-                "Cannot purge remote agent storage; DAYTONA_API_KEY is not set."
-            )
+            raise RuntimeError("Cannot purge remote agent storage; DAYTONA_API_KEY is not set.")
         return False
 
     resolved = _resolve_sandbox_for_teardown(agent_id, require_config=require_config)
@@ -514,9 +494,7 @@ def purge_agent_sandbox(
     return True
 
 
-def clear_agent_sandbox_db(
-    agent_id: str, *, require_config: bool = False
-) -> bool:
+def clear_agent_sandbox_db(agent_id: str, *, require_config: bool = False) -> bool:
     """Remove just ``harness.sqlite`` inside the agent's sandbox.
 
     Leaves the sandbox running so the next ``storage.load(agent_id)`` starts
@@ -524,9 +502,7 @@ def clear_agent_sandbox_db(
     """
     if not os.environ.get("DAYTONA_API_KEY"):
         if require_config:
-            raise RuntimeError(
-                "Cannot clear remote agent storage; DAYTONA_API_KEY is not set."
-            )
+            raise RuntimeError("Cannot clear remote agent storage; DAYTONA_API_KEY is not set.")
         return False
 
     resolved = _resolve_sandbox_for_teardown(agent_id, require_config=require_config)
@@ -594,9 +570,7 @@ def _apply_migrations(conn) -> None:
         "name TEXT PRIMARY KEY, applied_at_ns INTEGER NOT NULL)"
     )
 
-    applied = {
-        row["name"] for row in conn.execute("SELECT name FROM applied_migrations")
-    }
+    applied = {row["name"] for row in conn.execute("SELECT name FROM applied_migrations")}
     pending = _pending_migrations(applied)
     for name, sql in pending:
         _apply_migration(conn, name, sql)

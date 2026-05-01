@@ -6,6 +6,7 @@ plain text responses shaped like the production handlers so scenarios
 that grep agent output (or check ``_checkpoint_trace_events``) work
 without change.
 """
+
 from __future__ import annotations
 
 import json
@@ -157,9 +158,7 @@ def inject_inbound(
             ),
         )
     else:
-        participants = _merge_participants(
-            _thread_participants(thread_id), [from_email], to_addrs
-        )
+        participants = _merge_participants(_thread_participants(thread_id), [from_email], to_addrs)
         db.execute(
             "UPDATE fake_email_thread SET participants = ?, updated_at = ? WHERE id = ?",
             (json.dumps(participants), ts, thread_id),
@@ -396,8 +395,7 @@ class SendEmailTool(_ToolBase):
 class ReplyToEmailTool(_ToolBase):
     name = "reply_to_email"
     description = (
-        "Reply to an existing email message in a thread. Use to continue "
-        "an existing conversation."
+        "Reply to an existing email message in a thread. Use to continue an existing conversation."
     )
     parameters = {
         "type": "object",
@@ -433,9 +431,7 @@ class ReplyToEmailTool(_ToolBase):
         thread_id = parent["thread_id"]
         parent_subject = parent["subject"] or ""
         reply_subject = (
-            parent_subject
-            if parent_subject.lower().startswith("re:")
-            else f"Re: {parent_subject}"
+            parent_subject if parent_subject.lower().startswith("re:") else f"Re: {parent_subject}"
         )
         _record_outbound_message(
             thread_id=thread_id,

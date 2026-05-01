@@ -5,6 +5,7 @@ returns a `MemoryContextBuilder` bound to that file. The `insert_*` helpers
 write rows directly via SQL so tests can seed specific bucket keys without
 going through the summarizer.
 """
+
 from __future__ import annotations
 
 import importlib

@@ -1,4 +1,5 @@
 """Chunk 2 verification: SQLite storage + migrations, real filesystem only."""
+
 from __future__ import annotations
 
 import time
@@ -41,10 +42,7 @@ def test_fresh_db_applies_initial_migration(storage_env, custom_migrations):
     rows = list(conn.execute("SELECT name FROM applied_migrations ORDER BY name"))
     assert [r["name"] for r in rows] == ["0001_initial"]
 
-    tables = {
-        r["name"]
-        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "messages" in tables
     assert "one_minute_summaries" in tables
     assert "monthly_summaries" in tables
@@ -80,10 +78,7 @@ def test_new_migration_applied_on_next_load(storage_env, custom_migrations):
     )
 
     conn = storage.load("agent-1")
-    applied = [
-        r["name"]
-        for r in conn.execute("SELECT name FROM applied_migrations ORDER BY name")
-    ]
+    applied = [r["name"] for r in conn.execute("SELECT name FROM applied_migrations ORDER BY name")]
     assert applied == ["0001_initial", "0002_add_tags"]
 
     conn.execute("INSERT INTO tags (id, label) VALUES (?, ?)", ("t1", "hello"))

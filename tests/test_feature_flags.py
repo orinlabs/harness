@@ -6,6 +6,7 @@ Covers:
 - The Bedrock-JSON path (``_config_from_bedrock_json``) forwarding
   ``feature_flags`` from the platform's ``harness-config`` payload
 """
+
 from __future__ import annotations
 
 import pytest

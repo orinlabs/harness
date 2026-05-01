@@ -4,6 +4,7 @@ Proves the full platform-injected tool path: AgentConfig.adapters -> tool_map ->
 model tool_call -> HTTP POST to fake_platform -> handler -> result back into
 memory -> next turn sees the tool-result and proceeds.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -60,10 +61,10 @@ def test_external_adapter_tool_end_to_end(harness_env):
         id="agent-adapter",
         model=CHEAP_MODEL,
         system_prompt=(
-            'You have two tools: `echo(text)` and `sleep`. On your FIRST turn, call '
+            "You have two tools: `echo(text)` and `sleep`. On your FIRST turn, call "
             '`echo` with text="hello". On your NEXT turn, read the echo result and '
             'then call `sleep` with until="2099-01-01T00:00:00Z" and reason equal '
-            'to the exact echo result you received.'
+            "to the exact echo result you received."
         ),
         tools=[echo_spec],
     )
@@ -77,16 +78,12 @@ def test_external_adapter_tool_end_to_end(harness_env):
     assert call["envelope"]["run_id"] == "run-adapter"
 
     echo_posts = [
-        r
-        for r in harness_env.requests
-        if r.method == "POST" and r.path == "/fake_tools/echo"
+        r for r in harness_env.requests if r.method == "POST" and r.path == "/fake_tools/echo"
     ]
     assert len(echo_posts) == 1
     assert echo_posts[0].headers.get("Authorization") == "Bearer test-token"
 
-    tool_spans = [
-        s for s in harness_env.spans_open.values() if s["span_type"] == "tool"
-    ]
+    tool_spans = [s for s in harness_env.spans_open.values() if s["span_type"] == "tool"]
     echo_spans = [s for s in tool_spans if s["name"] == "echo"]
     assert len(echo_spans) == 1
 
@@ -99,9 +96,7 @@ def test_external_adapter_tool_end_to_end(harness_env):
     from harness.core import storage
 
     storage.load("agent-adapter")
-    rows = storage.db.execute(
-        "SELECT role, content_json FROM messages ORDER BY ts_ns"
-    ).fetchall()
+    rows = storage.db.execute("SELECT role, content_json FROM messages ORDER BY ts_ns").fetchall()
     storage.close()
 
     tool_msgs = [r for r in rows if r["role"] == "tool"]

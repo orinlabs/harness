@@ -570,9 +570,7 @@ class SimulationRunner:
         try:
             Harness(self._agent_config, run_id=run_id).run()
         except Exception:
-            logger.exception(
-                "Harness run failed during sim %s; continuing timeline", sim.name
-            )
+            logger.exception("Harness run failed during sim %s; continuing timeline", sim.name)
 
         # Harness.run() closed storage in its own `finally`. Re-open so
         # the fakes can be queried for new outbound messages and so any
@@ -584,9 +582,7 @@ class SimulationRunner:
 
         tally = sim.process_new_outbound()
         if tally["emails"] or tally["sms"]:
-            logger.info(
-                "processed outbound: emails=%d sms=%d", tally["emails"], tally["sms"]
-            )
+            logger.info("processed outbound: emails=%d sms=%d", tally["emails"], tally["sms"])
 
     def _process_pending_replies(
         self,
@@ -715,4 +711,3 @@ class SimulationRunner:
                 "simulated_end": run.simulated_end.isoformat() if run.simulated_end else None,
             },
         )
-

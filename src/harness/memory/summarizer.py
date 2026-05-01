@@ -11,6 +11,7 @@ migration 0002_drop_one_minute_summaries). It was firing an LLM call
 per completed minute which dominated per-turn cost without
 meaningfully improving recall over the 5m tier.
 """
+
 from __future__ import annotations
 
 import json
@@ -205,9 +206,7 @@ class SummaryUpdater:
 
         existing_keys = {
             (row["date"], row["hour"], row["minute"])
-            for row in db.execute(
-                "SELECT date, hour, minute FROM five_minute_summaries"
-            )
+            for row in db.execute("SELECT date, hour, minute FROM five_minute_summaries")
         }
 
         # Lower-bound the message scan at the latest 5m summary's bucket
@@ -251,9 +250,7 @@ class SummaryUpdater:
             bucket_end = bucket_start + timedelta(minutes=5)
             if bucket_end > timezone_now:
                 continue
-            buckets.setdefault(bucket_start, []).append(
-                json.loads(row["content_json"])
-            )
+            buckets.setdefault(bucket_start, []).append(json.loads(row["content_json"]))
 
         pending: list[tuple[tuple[str, int, int], list[dict]]] = []
         for bucket_start, bucket_messages in buckets.items():
@@ -271,16 +268,16 @@ class SummaryUpdater:
 
         logger.info(
             "summarizer: tier=5m pending=%d -> making %d LLM call(s) via %s",
-            len(pending), len(pending), self.model,
+            len(pending),
+            len(pending),
+            self.model,
         )
         created: list[tuple] = []
         for (date_key, hour_key, minute_key), bucket_messages in sorted(
             pending, key=lambda x: (x[0][0], x[0][1], x[0][2])
         ):
             content = json.dumps(bucket_messages)
-            summary_text = self._create_summary(
-                content=content, period_type=PeriodType.FIVE_MINUTE
-            )
+            summary_text = self._create_summary(content=content, period_type=PeriodType.FIVE_MINUTE)
             if not summary_text or not summary_text.strip():
                 logger.error(
                     "Failed to create 5-minute summary for %s %02d:%02d - empty, skipping",
@@ -332,8 +329,7 @@ class SummaryUpdater:
                 continue
             if (summary_date, hour) not in existing_keys and summaries_5m:
                 parts = [
-                    f"[{s['hour']:02d}:{s['minute']:02d}] {s['summary']}"
-                    for s in summaries_5m
+                    f"[{s['hour']:02d}:{s['minute']:02d}] {s['summary']}" for s in summaries_5m
                 ]
                 combined_content = "\n\n".join(parts)
                 total_messages = sum(s["message_count"] for s in summaries_5m)
@@ -344,7 +340,9 @@ class SummaryUpdater:
 
         logger.info(
             "summarizer: tier=hourly pending=%d -> making %d LLM call(s) via %s",
-            len(pending), len(pending), self.model,
+            len(pending),
+            len(pending),
+            self.model,
         )
         created = []
         for (summary_date, hour), content, total_messages in sorted(
@@ -375,10 +373,7 @@ class SummaryUpdater:
         timezone_now = force_timezone(current_time, self.timezone_name)
         today = timezone_now.date().isoformat()
 
-        existing_keys = {
-            row["date"]
-            for row in db.execute("SELECT date FROM daily_summaries")
-        }
+        existing_keys = {row["date"] for row in db.execute("SELECT date FROM daily_summaries")}
 
         all_hourly = db.execute(
             "SELECT date, hour, summary, message_count FROM hourly_summaries "
@@ -403,7 +398,9 @@ class SummaryUpdater:
 
         logger.info(
             "summarizer: tier=daily pending=%d -> making %d LLM call(s) via %s",
-            len(pending), len(pending), self.model,
+            len(pending),
+            len(pending),
+            self.model,
         )
         created = []
         for day, content, total_messages in sorted(pending, key=lambda x: x[0]):
@@ -462,7 +459,9 @@ class SummaryUpdater:
 
         logger.info(
             "summarizer: tier=weekly pending=%d -> making %d LLM call(s) via %s",
-            len(pending), len(pending), self.model,
+            len(pending),
+            len(pending),
+            self.model,
         )
         created = []
         for week, content, total_messages in sorted(pending, key=lambda x: x[0]):
@@ -513,8 +512,7 @@ class SummaryUpdater:
         for (year, month), weeklies_in_month in monthly_groups.items():
             if (year, month) not in existing_keys and weeklies_in_month:
                 parts = [
-                    f"[Week of {w['week_start_date']}] {w['summary']}"
-                    for w in weeklies_in_month
+                    f"[Week of {w['week_start_date']}] {w['summary']}" for w in weeklies_in_month
                 ]
                 combined_content = "\n\n".join(parts)
                 total_messages = sum(w["message_count"] for w in weeklies_in_month)
@@ -525,7 +523,9 @@ class SummaryUpdater:
 
         logger.info(
             "summarizer: tier=monthly pending=%d -> making %d LLM call(s) via %s",
-            len(pending), len(pending), self.model,
+            len(pending),
+            len(pending),
+            self.model,
         )
         created = []
         for (year, month), content, total_messages in sorted(
@@ -659,9 +659,7 @@ class SummaryUpdater:
         db = storage.db
 
         def _count(table: str) -> int:
-            return db.execute(
-                f"SELECT COUNT(*) AS c FROM {table}"
-            ).fetchone()["c"]
+            return db.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
 
         return {
             "messages": _count("messages"),

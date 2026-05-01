@@ -4,6 +4,7 @@ The mark computation itself is tested in `test_marks.py`. These tests verify
 that `fetch_data` uses those marks as DB query boundaries and respects
 `min_resolution` gating.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta

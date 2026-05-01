@@ -3,6 +3,7 @@
 Mirrors the production ``defaults.contacts`` tools. CRUD against the
 ``fake_contact`` table in the per-agent sqlite DB.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -159,9 +160,7 @@ class ListContactsTool(_ToolBase):
                 return ToolResult(text=f'No contacts found matching "{search}".')
             return ToolResult(text="You have no contacts.")
 
-        header = f"Found {len(rows)} contact(s):" + (
-            f' (matching "{search}")' if search else ""
-        )
+        header = f"Found {len(rows)} contact(s):" + (f' (matching "{search}")' if search else "")
         lines = [header, ""]
         for row in rows:
             lines.append(f"• {row['name']}")
@@ -179,10 +178,7 @@ class ListContactsTool(_ToolBase):
 
 class UpdateContactTool(_ToolBase):
     name = "update_contact"
-    description = (
-        "Update an existing contact's information. Only provided fields "
-        "will be updated."
-    )
+    description = "Update an existing contact's information. Only provided fields will be updated."
     parameters = {
         "type": "object",
         "properties": {
@@ -226,9 +222,7 @@ class UpdateContactTool(_ToolBase):
             params,
         )
         changed = [u.split(" = ")[0] for u in updates]
-        return ToolResult(
-            text=f'Contact "{existing["name"]}" updated: {", ".join(changed)}.'
-        )
+        return ToolResult(text=f'Contact "{existing["name"]}" updated: {", ".join(changed)}.')
 
 
 class DeleteContactTool(_ToolBase):

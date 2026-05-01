@@ -3,6 +3,7 @@
 Real OpenRouter + real SQLite + fake platform (HTTP). The one test that catches
 regressions across the whole system.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -45,18 +46,10 @@ def test_harness_runs_and_sleeps(harness_env):
 
     Harness(config, run_id="run-e2e-1").run()
 
-    run_spans = [
-        s for s in harness_env.spans_open.values() if s["name"] == "run_agent"
-    ]
-    turn_spans = [
-        s for s in harness_env.spans_open.values() if s["name"].startswith("turn_")
-    ]
-    llm_spans = [
-        s for s in harness_env.spans_open.values() if s["span_type"] == "llm"
-    ]
-    tool_spans = [
-        s for s in harness_env.spans_open.values() if s["span_type"] == "tool"
-    ]
+    run_spans = [s for s in harness_env.spans_open.values() if s["name"] == "run_agent"]
+    turn_spans = [s for s in harness_env.spans_open.values() if s["name"].startswith("turn_")]
+    llm_spans = [s for s in harness_env.spans_open.values() if s["span_type"] == "llm"]
+    tool_spans = [s for s in harness_env.spans_open.values() if s["span_type"] == "tool"]
 
     assert len(run_spans) == 1
     assert len(turn_spans) >= 1
@@ -86,9 +79,7 @@ def test_harness_runs_and_sleeps(harness_env):
     assert run_closed["metadata"]["usage"]["model_breakdown"], "model_breakdown empty"
 
     sleep_tool_spans = [
-        closed[s["id"]]
-        for s in tool_spans
-        if s["name"] == "sleep" and s["id"] in closed
+        closed[s["id"]] for s in tool_spans if s["name"] == "sleep" and s["id"] in closed
     ]
     assert sleep_tool_spans, "no tool span named 'sleep'"
 
@@ -100,9 +91,7 @@ def test_harness_runs_and_sleeps(harness_env):
     from harness.core import storage
 
     storage.load("agent-e2e")
-    rows = storage.db.execute(
-        "SELECT role, content_json FROM messages ORDER BY ts_ns"
-    ).fetchall()
+    rows = storage.db.execute("SELECT role, content_json FROM messages ORDER BY ts_ns").fetchall()
     storage.close()
 
     roles = [r["role"] for r in rows]

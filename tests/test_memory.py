@@ -1,4 +1,5 @@
 """MemoryService end-to-end: real SQLite + real OpenRouter."""
+
 from __future__ import annotations
 
 import importlib
@@ -121,9 +122,7 @@ def test_summaries_not_regenerated_for_current_five_minute_bucket(memory_env):
     m = _make()
     m.log_messages([{"role": "user", "content": "just happened"}])
 
-    count = memory_env.db.execute(
-        "SELECT COUNT(*) AS c FROM five_minute_summaries"
-    ).fetchone()["c"]
+    count = memory_env.db.execute("SELECT COUNT(*) AS c FROM five_minute_summaries").fetchone()["c"]
     assert count == 0
 
 
@@ -149,6 +148,4 @@ def test_build_llm_inputs_renders_summary_block(memory_env):
     assert "5-MINUTE SUMMARIES" in system or "HOURLY SUMMARIES" in system, (
         f"expected a tier header in rendered system, got: {system!r}"
     )
-    assert "kumquat" in system.lower(), (
-        f"summary did not preserve the kumquat fact: {system!r}"
-    )
+    assert "kumquat" in system.lower(), f"summary did not preserve the kumquat fact: {system!r}"

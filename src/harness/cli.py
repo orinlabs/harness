@@ -32,6 +32,7 @@ Optional:
     BEDROCK_URL           enables Bedrock lookup + tracing to Bedrock
     BEDROCK_TOKEN         bedrock org-scoped API key
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,9 +49,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ENV: dict[str, str] = {}
 
-REQUIRED_ENV = (
-    "OPENROUTER_API_KEY",
-)
+REQUIRED_ENV = ("OPENROUTER_API_KEY",)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +170,9 @@ def _git_branch() -> str:
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return r.stdout.strip() or "unknown"
     except Exception:
@@ -182,7 +183,9 @@ def _git_sha() -> str:
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return r.stdout.strip()[:40] or "unknown"
     except Exception:
@@ -293,9 +296,11 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
 
     tool_names = [getattr(t, "name", "<unnamed>") for t in config.tools]
     logger.info(
-        "built agent config: id=%s model=%s tools=%d (%s) "
-        "(built-ins added separately)",
-        config.id, config.model, len(config.tools), tool_names,
+        "built agent config: id=%s model=%s tools=%d (%s) (built-ins added separately)",
+        config.id,
+        config.model,
+        len(config.tools),
+        tool_names,
     )
 
     from harness import Harness
@@ -331,7 +336,10 @@ def _cmd_delete_agent(args, parser: argparse.ArgumentParser) -> int:
     mode = "purged" if args.purge else "archived"
     logger.info(
         "deleted agent storage (%s): id=%s local=%s remote=%s",
-        mode, args.agent_id, result["local"], result["remote"],
+        mode,
+        args.agent_id,
+        result["local"],
+        result["remote"],
     )
     print(
         f"deleted agent storage ({mode}): "
@@ -356,11 +364,12 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
 
     logger.info(
         "reset agent memory: id=%s local=%s remote=%s",
-        args.agent_id, result["local"], result["remote"],
+        args.agent_id,
+        result["local"],
+        result["remote"],
     )
     print(
-        "reset agent memory: "
-        f"id={args.agent_id} local={result['local']} remote={result['remote']}",
+        f"reset agent memory: id={args.agent_id} local={result['local']} remote={result['remote']}",
         file=sys.stderr,
     )
     return 0
@@ -372,22 +381,29 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
 
 
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--bedrock-url", default=None,
-                   help="Override $BEDROCK_URL (CLI wins).")
-    p.add_argument("--local", action="store_true",
-                   help="Sugar for --bedrock-url http://127.0.0.1:8000.")
-    p.add_argument("--bedrock-token", default=None,
-                   help="Bedrock org-scoped API key. Defaults to $BEDROCK_TOKEN.")
-    p.add_argument("--log-level",
-                   default=os.environ.get("LOG_LEVEL", "INFO"),
-                   help="Log level: DEBUG|INFO|WARNING|ERROR.")
+    p.add_argument("--bedrock-url", default=None, help="Override $BEDROCK_URL (CLI wins).")
+    p.add_argument(
+        "--local", action="store_true", help="Sugar for --bedrock-url http://127.0.0.1:8000."
+    )
+    p.add_argument(
+        "--bedrock-token",
+        default=None,
+        help="Bedrock org-scoped API key. Defaults to $BEDROCK_TOKEN.",
+    )
+    p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
     p.add_argument("--model", default=None, help="Override the model.")
-    p.add_argument("--reasoning-effort", default=None,
-                   help="Override reasoning effort.")
-    p.add_argument("--template", default=None,
-                   help="Optional AgentTemplate uuid-or-name to base auto-created "
-                        "agents on. Omit to create a templateless agent (Bedrock "
-                        "infers organization from $BEDROCK_TOKEN).")
+    p.add_argument("--reasoning-effort", default=None, help="Override reasoning effort.")
+    p.add_argument(
+        "--template",
+        default=None,
+        help="Optional AgentTemplate uuid-or-name to base auto-created "
+        "agents on. Omit to create a templateless agent (Bedrock "
+        "infers organization from $BEDROCK_TOKEN).",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -408,14 +424,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     agent_p.add_argument(
-        "agent_id", nargs="?", default=os.environ.get("AGENT_ID"),
-        help="Agent UUID or local config name. Omit to auto-create a dev "
-             "agent on Bedrock.",
+        "agent_id",
+        nargs="?",
+        default=os.environ.get("AGENT_ID"),
+        help="Agent UUID or local config name. Omit to auto-create a dev agent on Bedrock.",
     )
-    agent_p.add_argument("--run-id", default=None,
-                         help="Run UUID. Defaults to a fresh uuid4.")
-    agent_p.add_argument("--system-prompt", default=None,
-                         help="System prompt override (Bedrock dev auto-create only).")
+    agent_p.add_argument("--run-id", default=None, help="Run UUID. Defaults to a fresh uuid4.")
+    agent_p.add_argument(
+        "--system-prompt",
+        default=None,
+        help="System prompt override (Bedrock dev auto-create only).",
+    )
     _add_common_flags(agent_p)
 
     delete_p = subparsers.add_parser(
@@ -427,25 +446,28 @@ def main(argv: list[str] | None = None) -> int:
         "--purge",
         action="store_true",
         help="Fully delete the Daytona sandbox (no recovery). Default is to "
-             "archive, which moves state to cheap object storage and lets the "
-             "next `harness agent` resurrect it.",
+        "archive, which moves state to cheap object storage and lets the "
+        "next `harness agent` resurrect it.",
     )
-    delete_p.add_argument("--log-level",
-                          default=os.environ.get("LOG_LEVEL", "INFO"),
-                          help="Log level: DEBUG|INFO|WARNING|ERROR.")
+    delete_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
 
     reset_p = subparsers.add_parser(
         "reset-memory",
         help="Reset memory storage for an agent.",
     )
     reset_p.add_argument("agent_id", help="Agent UUID to reset memory for.")
-    reset_p.add_argument("--log-level",
-                         default=os.environ.get("LOG_LEVEL", "INFO"),
-                         help="Log level: DEBUG|INFO|WARNING|ERROR.")
+    reset_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
 
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
-    eval_p.add_argument("scenario",
-                        help="Scenario name (matches Simulation.name).")
+    eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
 
     args = parser.parse_args(argv)

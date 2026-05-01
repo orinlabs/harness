@@ -31,6 +31,7 @@ Flags:
                     Daytona sandbox for them)
     --dry-run       list what would be migrated without touching Daytona
 """
+
 from __future__ import annotations
 
 import argparse
@@ -83,9 +84,7 @@ def banner(text: str) -> None:
 
 def list_turso_dbs(org: str, platform_token: str) -> list[dict]:
     url = f"https://api.turso.tech/v1/organizations/{org}/databases"
-    r = httpx.get(
-        url, headers={"Authorization": f"Bearer {platform_token}"}, timeout=30.0
-    )
+    r = httpx.get(url, headers={"Authorization": f"Bearer {platform_token}"}, timeout=30.0)
     r.raise_for_status()
     return r.json().get("databases", [])
 
@@ -161,9 +160,7 @@ def migrate_agent(
     # 1. Pull a row count from Turso first so we can cheaply skip empty DBs.
     turso_conn = open_turso(agent_id, org, db_token)
     try:
-        msg_count = turso_conn.execute(
-            "SELECT COUNT(*) FROM messages"
-        ).fetchone()[0]
+        msg_count = turso_conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     except Exception as e:
         msg = str(e).lower()
         if "no such table" in msg:
@@ -209,7 +206,9 @@ def migrate_agent(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None, help="only migrate first N agents")
-    ap.add_argument("--only", action="append", default=[], help="migrate only these agent_ids (repeatable)")
+    ap.add_argument(
+        "--only", action="append", default=[], help="migrate only these agent_ids (repeatable)"
+    )
     ap.add_argument("--skip-empty", action="store_true", help="skip Turso DBs with zero messages")
     ap.add_argument("--dry-run", action="store_true", help="list and exit")
     args = ap.parse_args()
@@ -279,9 +278,7 @@ def main() -> int:
         banner(f"[{i}/{len(agent_ids)}] agent={aid}")
         t0 = time.perf_counter()
         try:
-            counts = migrate_agent(
-                aid, org, db_token, skip_empty=args.skip_empty
-            )
+            counts = migrate_agent(aid, org, db_token, skip_empty=args.skip_empty)
         except Exception as e:
             traceback.print_exc()
             failures.append((aid, str(e)))
