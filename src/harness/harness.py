@@ -299,6 +299,7 @@ class Harness:
                     # costs at most one wasted turn per run.
                     tool_choice="auto",
                     reasoning_effort=self.config.reasoning_effort,
+                    max_tokens=self.config.max_tokens,
                 )
             except llm.OpenRouterError as e:
                 # Surface the upstream body in the span's output_text so the

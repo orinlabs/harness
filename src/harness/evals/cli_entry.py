@@ -101,6 +101,9 @@ def run(args, parser: argparse.ArgumentParser) -> int:
     reasoning_effort = (
         args.reasoning_effort or scenario_cls.agent_overrides.reasoning_effort or None
     )
+    max_tokens = (
+        args.max_tokens if args.max_tokens is not None else scenario_cls.agent_overrides.max_tokens
+    )
 
     # No Bedrock agent row is created. Spans flow to Bedrock via the
     # autoconfigured trace sink when the env is set; the agent_id below is
@@ -122,6 +125,7 @@ def run(args, parser: argparse.ArgumentParser) -> int:
         model=model,
         system_prompt=system_prompt,
         reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
         tools=[
             *FakeEmailAdapter.make_tools(),
             *FakeSMSAdapter.make_tools(),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 CHEAP_MODEL = "openai/gpt-4o-mini"
 
 
@@ -84,6 +86,72 @@ def test_translate_model_maps_bedrock_ids_to_openrouter_slugs():
     # Unknown / non-Anthropic bare slugs are also pass-through; let
     # OpenRouter decide whether they resolve.
     assert llm._translate_model("gpt-4o-mini") == "gpt-4o-mini"
+
+
+def test_anthropic_reasoning_requests_set_default_max_tokens():
+    """Anthropic effort-based reasoning needs top-level max_tokens.
+
+    Without this, OpenRouter has to infer the reasoning budget from provider
+    defaults, and Anthropic can reject or silently under-budget thinking.
+    """
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model="claude-haiku-4-5",
+        system="",
+        messages=[{"role": "user", "content": "think"}],
+        reasoning_effort="high",
+    )
+
+    assert body["model"] == "anthropic/claude-haiku-4.5"
+    assert body["max_tokens"] == 8192
+    assert body["reasoning"] == {
+        "enabled": True,
+        "summary": "auto",
+        "effort": "high",
+    }
+
+
+def test_anthropic_reasoning_requests_honor_configured_max_tokens():
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model="anthropic/claude-opus-4.7",
+        system="",
+        messages=[{"role": "user", "content": "think"}],
+        reasoning_effort="xhigh",
+        max_tokens=32768,
+    )
+
+    assert body["max_tokens"] == 32768
+    assert body["reasoning"]["effort"] == "xhigh"
+
+
+def test_anthropic_reasoning_rejects_max_tokens_at_minimum_budget():
+    from harness.core import llm
+
+    with pytest.raises(ValueError, match="requires max_tokens > 1024"):
+        llm._build_chat_completion_body(
+            model="anthropic/claude-sonnet-4.6",
+            system="",
+            messages=[{"role": "user", "content": "think"}],
+            reasoning_effort="low",
+            max_tokens=1024,
+        )
+
+
+def test_non_anthropic_reasoning_does_not_invent_max_tokens():
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model=CHEAP_MODEL,
+        system="",
+        messages=[{"role": "user", "content": "think"}],
+        reasoning_effort="minimal",
+    )
+
+    assert "max_tokens" not in body
+    assert body["reasoning"]["effort"] == "minimal"
 
 
 def test_complete_translates_anthropic_slug_before_sending(openrouter_key):
