@@ -108,7 +108,7 @@ def test_anthropic_reasoning_requests_set_default_max_tokens():
     assert body["reasoning"] == {
         "enabled": True,
         "summary": "auto",
-        "effort": "high",
+        "max_tokens": 6553,
     }
 
 
@@ -124,7 +124,7 @@ def test_anthropic_reasoning_requests_honor_configured_max_tokens():
     )
 
     assert body["max_tokens"] == 32768
-    assert body["reasoning"]["effort"] == "xhigh"
+    assert body["reasoning"]["max_tokens"] == 31129
 
 
 def test_anthropic_reasoning_rejects_max_tokens_at_minimum_budget():
@@ -279,13 +279,12 @@ def test_drop_orphan_tool_messages_passthrough_when_paired():
     assert filtered == messages
 
 
-def test_prepare_replay_messages_strips_provider_reasoning_but_keeps_tool_calls():
-    """Assistant reasoning metadata is trace output, not replayable chat input.
+def test_prepare_replay_messages_preserves_reasoning_details_for_tool_replay():
+    """Signed reasoning_details are required for Anthropic tool continuations.
 
-    Regression: OpenRouter returned Anthropic ``reasoning_details`` blocks
-    containing provider signatures. Persisting and replaying that assistant
-    message on the next turn caused Azure/OpenRouter to reject the request with
-    ``Invalid `signature` in `thinking` block`` before the agent could continue.
+    Top-level ``reasoning`` is trace output and should not be replayed, but
+    OpenRouter documents ``reasoning_details`` as the continuity mechanism for
+    reasoning models when a tool call pauses the response.
     """
     from harness.core import llm
 
@@ -315,6 +314,10 @@ def test_prepare_replay_messages_strips_provider_reasoning_but_keeps_tool_calls(
     assert filtered[1] == {
         "role": "assistant",
         "content": None,
+        "reasoning_details": [
+            {"type": "reasoning.text", "text": "I should inspect notifications."},
+            {"type": "reasoning.text", "signature": "provider-signature"},
+        ],
         "tool_calls": [
             {
                 "id": "toolu_123",
@@ -324,6 +327,43 @@ def test_prepare_replay_messages_strips_provider_reasoning_but_keeps_tool_calls(
         ],
     }
     assert filtered[2]["tool_call_id"] == "toolu_123"
+
+
+def test_merge_streamed_reasoning_details_combines_text_with_signature():
+    from harness.core import llm
+
+    merged = llm._merge_streamed_reasoning_details(
+        [
+            {
+                "type": "reasoning.text",
+                "text": "first ",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+            },
+            {
+                "type": "reasoning.text",
+                "text": "second",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+            },
+            {
+                "type": "reasoning.text",
+                "signature": "signed",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+            },
+        ]
+    )
+
+    assert merged == [
+        {
+            "type": "reasoning.text",
+            "format": "anthropic-claude-v1",
+            "index": 0,
+            "text": "first second",
+            "signature": "signed",
+        }
+    ]
 
 
 def test_prepare_replay_messages_strips_anthropic_thinking_content_blocks():

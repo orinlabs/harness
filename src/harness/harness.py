@@ -218,16 +218,22 @@ class Harness:
             self.memory.update_summaries()
 
         system, messages = self.memory.build_llm_inputs(self.config.system_prompt)
-        # Anthropic disables extended thinking whenever the last message is
-        # NOT a user/tool message (or when there are no user-role messages
-        # at all) -- on turn 0 of a fresh run `messages` is empty and only
-        # a system prompt would be sent, which silently returns
-        # reasoning_tokens=0 on every Claude thinking model we tested.
-        # Inject an ephemeral kick-off user message for the LLM call only
-        # (NOT written to memory) so Claude engages reasoning from turn 0.
-        # No-op when the tail already provides something for the model to
-        # respond to.
-        needs_kickoff = not messages or messages[-1].get("role") == "assistant"
+        # Anthropic extended thinking is sensitive to the message tail. On
+        # turn 0 a bare system prompt returns reasoning_tokens=0, and
+        # OpenRouter Claude post-tool continuations often execute correctly
+        # but emit no fresh thinking unless the next request starts a normal
+        # user continuation. Inject an ephemeral user message for the LLM call
+        # only (NOT written to memory) in those cases.
+        tail_role = messages[-1].get("role") if messages else None
+        is_anthropic_reasoning = (
+            self.config.model.startswith("claude-")
+            or self.config.model.startswith("anthropic/")
+        ) and self.config.reasoning_effort != "none"
+        needs_kickoff = (
+            not messages
+            or tail_role == "assistant"
+            or (tail_role == "tool" and is_anthropic_reasoning)
+        )
         if needs_kickoff:
             messages = [
                 *messages,
