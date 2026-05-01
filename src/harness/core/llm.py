@@ -219,7 +219,7 @@ def complete(
     full_messages: list[dict] = []
     if system:
         full_messages.append({"role": "system", "content": system})
-    full_messages.extend(messages)
+    full_messages.extend(_drop_orphan_tool_messages(messages))
 
     body: dict[str, Any] = {
         "model": model,
@@ -546,3 +546,63 @@ def _parse_reasoning(msg: dict) -> str | None:
     if summaries:
         return "\n\n".join(summaries)
     return None
+
+
+def _drop_orphan_tool_messages(messages: list[dict]) -> list[dict]:
+    """Remove ``role: tool`` messages whose ``tool_call_id`` has no prior call.
+
+    OpenAI Chat Completions (and OpenRouter, which speaks the same shape) is
+    strict about tool-call/tool-result pairing: every ``role: tool`` message
+    must reference a ``tool_calls[*].id`` from an earlier ``role: assistant``
+    message in the same request, or the API rejects the whole call with
+    ``messages.*.tool_call_id: tool message has no matching tool call``.
+
+    Memory replay can violate that invariant in two ways:
+      - Summarisation/trimming drops the assistant turn that issued the
+        original ``tool_calls`` while the matching ``tool`` row is still
+        within the recent-message window.
+      - Provider switches (Claude tool_use blocks ↔ OpenAI tool_calls)
+        leave historical results whose original call shape is no longer
+        replayable.
+
+    Dropping only the orphan ``tool`` rows preserves every valid tool
+    exchange and keeps replay robust across context windows. The orphan
+    set is logged at warn so the underlying summariser/trimming bug stays
+    visible if it ever spikes.
+    """
+    seen_call_ids: set[str] = set()
+    filtered: list[dict] = []
+    dropped = 0
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            filtered.append(msg)
+            continue
+
+        role = msg.get("role")
+        if role == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                tc_id = tc.get("id") if isinstance(tc, dict) else None
+                if isinstance(tc_id, str) and tc_id:
+                    seen_call_ids.add(tc_id)
+            filtered.append(msg)
+            continue
+
+        if role == "tool":
+            tool_call_id = msg.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id in seen_call_ids:
+                filtered.append(msg)
+            else:
+                dropped += 1
+            continue
+
+        filtered.append(msg)
+
+    if dropped:
+        logger.warning(
+            "Dropped %d orphan tool message(s) from replay context "
+            "(no matching assistant.tool_calls[].id earlier in the window)",
+            dropped,
+        )
+
+    return filtered

@@ -90,10 +90,18 @@ class Harness:
             summary_model,
             config.model,
         )
+        # ``summarizer_v2`` may arrive from either source: the legacy
+        # explicit AgentConfig.summarizer_v2 bool (older YAMLs) or the
+        # generic feature_flags dict (Bedrock + new YAMLs). Either path
+        # turns the v2 path on; both off (the default) keeps the legacy
+        # cascade-summarizer behavior.
+        summarizer_v2_enabled = bool(getattr(config, "summarizer_v2", False)) or config.is_enabled(
+            "summarizer_v2"
+        )
         self.memory = MemoryService(
             agent_id=config.id,
             model=summary_model,
-            summarizer_v2=getattr(config, "summarizer_v2", False),
+            summarizer_v2=summarizer_v2_enabled,
         )
         # Per-run accumulator: totals (summed) + per-model breakdown (for the
         # run_agent span's final `usage.model_breakdown`).

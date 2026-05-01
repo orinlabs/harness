@@ -139,3 +139,73 @@ def test_multi_turn_message_history(openrouter_key):
 
     assert "42" in resp.text
     assert resp.usage.total_cost > 0
+
+
+def test_drop_orphan_tool_messages_filters_unmatched_results():
+    """`role: tool` rows whose ``tool_call_id`` isn't in any prior
+    ``assistant.tool_calls[].id`` get filtered out, while the rest of the
+    log is preserved untouched.
+
+    Regression: when summarisation/trimming evicts the assistant turn
+    that issued ``tool_calls``, the matching ``role: tool`` row becomes
+    an orphan. OpenRouter (and OpenAI Chat Completions) reject the entire
+    request with ``messages.*.tool_call_id: tool message has no matching
+    tool call``. Dropping only the orphan preserves valid exchanges.
+    """
+    from harness.core import llm
+
+    messages = [
+        {"role": "tool", "tool_call_id": "missing_call", "content": "stale"},
+        {"role": "user", "content": "continue"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "think", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_123", "content": "ok"},
+    ]
+
+    filtered = llm._drop_orphan_tool_messages(messages)
+
+    assert [m["role"] for m in filtered] == ["user", "assistant", "tool"]
+    assert filtered[0]["content"] == "continue"
+    assert filtered[2]["tool_call_id"] == "call_123"
+
+
+def test_drop_orphan_tool_messages_passthrough_when_paired():
+    """Sanity check: a well-formed log with paired tool calls/results is
+    returned unchanged."""
+    from harness.core import llm
+
+    messages = [
+        {"role": "user", "content": "do the thing"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "x", "arguments": "{}"},
+                },
+                {
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {"name": "y", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_a", "content": "x done"},
+        {"role": "tool", "tool_call_id": "call_b", "content": "y done"},
+        {"role": "assistant", "content": "all done"},
+    ]
+
+    filtered = llm._drop_orphan_tool_messages(messages)
+
+    assert filtered == messages

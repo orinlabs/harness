@@ -20,11 +20,11 @@ Subcommands:
                                           # Auto-creates a dev agent on
                                           # Bedrock when no id is provided.
     harness reset-memory AGENT_ID         # Reset agent memory storage.
-    harness inspect AGENT_ID [options]    # Open the agent's sqlite in a
-                                          # read-only exploration shell.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
-Environment is loaded from `.env` in cwd if present. Required secrets:
+Environment is loaded from the first `.env` found by walking up from cwd
+(so a per-repo `.env` shadows an org-level `.env` one or more directories
+up). Required secrets:
     OPENROUTER_API_KEY
 
 Optional:
@@ -39,7 +39,7 @@ Optional:
     REASONING_EFFORT      override reasoning_effort (low|medium|high)
     LOG_LEVEL             default: INFO
     BEDROCK_URL           enables Bedrock lookup + tracing to Bedrock
-    BEDROCK_TOKEN         bedrock product API key
+    BEDROCK_TOKEN         bedrock org-scoped API key
 """
 
 from __future__ import annotations
@@ -116,12 +116,12 @@ def _install_shutdown_handlers() -> None:
 
 def _load_env() -> None:
     try:
-        from dotenv import load_dotenv
+        from dotenv import find_dotenv, load_dotenv
     except ImportError:
         logger.debug("python-dotenv not installed; skipping .env load")
         return
-    env_path = Path.cwd() / ".env"
-    if env_path.exists():
+    env_path = find_dotenv(usecwd=True)
+    if env_path:
         logger.debug("loading env from %s", env_path)
         load_dotenv(env_path)
 
@@ -258,15 +258,14 @@ def _resolve_agent_config(args, parser: argparse.ArgumentParser):
             "./agents/<name>.yaml, or set BEDROCK_URL + BEDROCK_TOKEN to "
             "auto-create a dev agent on the platform.\n",
         )
-    from harness.cloud.bedrock import create_dev_agent, fetch_harness_config, resolve_product
+    from harness.cloud.bedrock import create_dev_agent, fetch_harness_config, resolve_template
 
-    product_id = resolve_product(args.product)
+    template_id = resolve_template(args.template)
     model = args.model or "claude-haiku-4-5"
     created = create_dev_agent(
-        product_id=product_id,
+        template_id=template_id,
         model=model,
         system_prompt=args.system_prompt,
-        template=args.template,
         branch=_git_branch(),
         sha=_git_sha(),
     )
@@ -481,33 +480,6 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
-def _cmd_inspect(args, parser: argparse.ArgumentParser) -> int:
-    _load_env()
-
-    from harness import inspect as inspect_mod
-    from harness.core import storage
-
-    try:
-        path = storage.fetch_agent_db(args.agent_id)
-    except FileNotFoundError as e:
-        parser.exit(1, f"inspect: {e}\n")
-    except RuntimeError as e:
-        parser.exit(1, f"inspect: {e}\n")
-
-    if args.path:
-        print(path)
-        return 0
-
-    summary = inspect_mod.collect_summary(path, recent_limit=args.limit)
-    inspect_mod.print_summary(summary)
-
-    if args.summary_only:
-        return 0
-    if args.python:
-        return inspect_mod.open_python_shell(path, args.agent_id)
-    return inspect_mod.open_sqlite_shell(path)
-
-
 def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
     _load_env()
 
@@ -541,7 +513,9 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         "--local", action="store_true", help="Sugar for --bedrock-url http://127.0.0.1:8000."
     )
     p.add_argument(
-        "--bedrock-token", default=None, help="Bedrock product API key. Defaults to $BEDROCK_TOKEN."
+        "--bedrock-token",
+        default=None,
+        help="Bedrock org-scoped API key. Defaults to $BEDROCK_TOKEN.",
     )
     p.add_argument(
         "--log-level",
@@ -551,13 +525,11 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--model", default=None, help="Override the model.")
     p.add_argument("--reasoning-effort", default=None, help="Override reasoning effort.")
     p.add_argument(
-        "--template", default=None, help="Template uuid-or-name (forward-compat; Phase 2)."
-    )
-    p.add_argument(
-        "--product",
+        "--template",
         default=None,
-        help="Product UUID for auto-created agents. If omitted the "
-        "single product visible to the API key is used.",
+        help="Optional AgentTemplate uuid-or-name to base auto-created "
+        "agents on. Omit to create a templateless agent (Bedrock "
+        "infers organization from $BEDROCK_TOKEN).",
     )
 
 
@@ -659,44 +631,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
 
-    inspect_p = subparsers.add_parser(
-        "inspect",
-        help="Open an agent's sqlite memory in a read-only shell.",
-        description=(
-            "Open the agent's local sqlite file in an interactive "
-            "exploration shell. Read-only; safe to run while the agent "
-            "is live."
-        ),
-    )
-    inspect_p.add_argument("agent_id", help="Agent UUID or local config name.")
-    inspect_p.add_argument(
-        "--python",
-        action="store_true",
-        help="Drop into a Python REPL (with db/sql/messages/summaries helpers) "
-        "instead of the sqlite3 shell.",
-    )
-    inspect_p.add_argument(
-        "--summary-only",
-        action="store_true",
-        help="Print the summary and exit without opening an interactive shell.",
-    )
-    inspect_p.add_argument(
-        "--path",
-        action="store_true",
-        help="Print the sqlite file path and exit. Useful for piping into sqlite3/datasette/etc.",
-    )
-    inspect_p.add_argument(
-        "--limit",
-        type=int,
-        default=5,
-        help="How many recent messages to preview in the summary (default: 5).",
-    )
-    inspect_p.add_argument(
-        "--log-level",
-        default=os.environ.get("LOG_LEVEL", "INFO"),
-        help="Log level: DEBUG|INFO|WARNING|ERROR.",
-    )
-
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
@@ -712,8 +646,6 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_agent(args, agent_p)
     if args.command == "reset-memory":
         return _cmd_reset_memory(args, reset_p)
-    if args.command == "inspect":
-        return _cmd_inspect(args, inspect_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval

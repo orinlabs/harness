@@ -183,10 +183,12 @@ uv run harness agent <AGENT_UUID> --bedrock-url https://your-bedrock.example.com
 Create a temporary dev agent (Bedrock auto-creates the row):
 
 ```bash
-uv run harness agent --local --product <PRODUCT_UUID> --system-prompt "You are helpful."
+uv run harness agent --local --system-prompt "You are helpful."
 ```
 
-If your API key can see exactly one product, `--product` is optional.
+The agent is auto-scoped to whichever organization issued `$BEDROCK_TOKEN`.
+Pass `--template <UUID_OR_NAME>` to base the new agent on an existing
+`AgentTemplate` (otherwise it's created without one).
 
 Useful flags:
 

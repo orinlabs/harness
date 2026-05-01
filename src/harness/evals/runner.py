@@ -10,8 +10,9 @@ models and installed Celery/Django patches, this version:
   ``/api/tracing/spans/`` (``span_type=checkpoint`` and friends).
 * Leaves the fake-adapter I/O injection to T6 (``patch_external_clients``
   does not exist in harness).
-* Replaces ``override_product_id`` with ``override_template_id`` for
-  forward compatibility with T7's product/template HTTP lookup.
+* Uses ``override_template_id`` to scope eval agents to an
+  ``AgentTemplate``; T7 will do the HTTP lookup to resolve it into a
+  template snapshot.
 
 The bits that *are* ported:
 
@@ -121,8 +122,7 @@ class SimulationRunner:
         agent_id: str | None = None,
         agent_config=None,
         override_model: str | None = None,
-        # Bedrock's `override_product_id` is replaced with `override_template_id`
-        # — T7 will do the HTTP lookup to resolve it into a template snapshot.
+        # T7 will do the HTTP lookup to resolve this into a template snapshot.
         override_template_id: str | None = None,
         override_feature_flags: dict[str, str] | None = None,
         override_reasoning_effort: str = "",
@@ -165,11 +165,24 @@ class SimulationRunner:
 
         sim_cls.ensure_tools()
 
-        # Feature-flag overrides are currently logged only; the harness core
-        # does not yet apply them to the running agent.
+        # Merge scenario-declared feature flags with any runtime overrides
+        # the caller supplied; runtime wins. The merged dict gets stamped
+        # onto ``self._agent_config.feature_flags`` below so ``Harness``
+        # picks them up via ``AgentConfig.is_enabled(...)`` exactly as it
+        # would on a Bedrock-backed run.
         merged_feature_flags = {**sim_cls.feature_flags, **self._override_feature_flags}
         if merged_feature_flags:
-            logger.info("Ignoring feature flags for now: %s", merged_feature_flags)
+            logger.info("Applying feature flags: %s", merged_feature_flags)
+            if self._agent_config is not None:
+                from dataclasses import replace as _dc_replace
+
+                merged_with_existing = {
+                    **(self._agent_config.feature_flags or {}),
+                    **merged_feature_flags,
+                }
+                self._agent_config = _dc_replace(
+                    self._agent_config, feature_flags=merged_with_existing
+                )
 
         content_hash = _simulation_hash(sim_cls)
         # stdout for local eval runs; HarnessRun trace stream is the durable artifact.
