@@ -13,6 +13,7 @@ own storage, tracing, LLM routing, and lifecycle without the harness knowing.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -39,6 +40,105 @@ logger = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Tool-result image plumbing
+# ---------------------------------------------------------------------------
+#
+# ``ExternalTool`` parses the wire response into ``ToolResult(text, images)``
+# where ``images`` is a list of base64-encoded image strings (see
+# ``tools/external.py:_parse_success``). Before this helper landed, the
+# main loop only logged ``result.text`` into memory and silently discarded
+# ``result.images`` — every subsequent LLM turn saw ``image_tokens: 0`` and
+# the model would loop trying to "open" the image it had supposedly
+# already received.
+#
+# OpenAI Chat Completions (and OpenRouter, which speaks the same shape) is
+# strict about ``role: tool`` content: many providers only accept a string
+# there, never multipart parts. So we don't try to put the image inside the
+# tool message. Instead we log the tool message with text only — preserving
+# the ``tool_call_id`` pairing every provider validates — and then append
+# a synthetic ``role: user`` message right after it whose ``content`` is
+# OpenAI multipart (``[{"type": "text"}, {"type": "image_url"}]``). Vision-
+# capable models (Claude, GPT-4o, Gemini) accept images in ``user`` content
+# universally, so the image reaches the model on the very next turn.
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_GIF87A = b"GIF87a"
+_GIF89A = b"GIF89a"
+_RIFF = b"RIFF"
+_WEBP = b"WEBP"
+
+
+def _sniff_image_mime(image_bytes: bytes) -> str:
+    """Pick a MIME type for an image based on its leading magic bytes.
+
+    Provider vision endpoints generally tolerate a mismatched ``data:`` URL
+    media type (they sniff bytes themselves), but tagging accurately keeps
+    the trace readable and lets pickier providers do less work. Falls back
+    to ``image/png`` when the bytes don't match a known signature — that's
+    what the bedrock-api invoke endpoint produces today for the images it
+    forwards through ``image_to_image_block``.
+    """
+    if image_bytes.startswith(_PNG_MAGIC):
+        return "image/png"
+    if image_bytes.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    if image_bytes.startswith(_GIF87A) or image_bytes.startswith(_GIF89A):
+        return "image/gif"
+    # WebP: ``RIFF????WEBP``.
+    if (
+        len(image_bytes) >= 12
+        and image_bytes[:4] == _RIFF
+        and image_bytes[8:12] == _WEBP
+    ):
+        return "image/webp"
+    return "image/png"
+
+
+def _build_image_followup_message(
+    *, tool_name: str, images: list[str]
+) -> dict | None:
+    """Build a synthetic ``role: user`` message carrying tool-emitted images.
+
+    Returns ``None`` if there are no usable images so callers can short-
+    circuit before logging anything. Bad payloads (non-strings, undecodable
+    base64) are skipped individually and logged at warn so a partial batch
+    still delivers the images we *can* decode.
+    """
+    parts: list[dict] = []
+    for raw in images or []:
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            decoded = base64.b64decode(raw, validate=False)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "tool %s emitted image bytes that aren't valid base64; skipping",
+                tool_name,
+            )
+            continue
+        mime = _sniff_image_mime(decoded)
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{raw}"},
+            }
+        )
+
+    if not parts:
+        return None
+
+    label_text = (
+        f"[Image attachment from tool '{tool_name}'. View it as if "
+        "you had received it directly from the user.]"
+    )
+    return {
+        "role": "user",
+        "content": [{"type": "text", "text": label_text}, *parts],
+    }
 
 
 class Harness:
@@ -396,6 +496,7 @@ class Harness:
                 args_preview,
             )
             t0 = time.monotonic()
+            result_images: list[str] | None = None
             with tool_span(
                 tc.name,
                 input=json.dumps({"args": tc.args, "tool_call_id": tc.id}),
@@ -409,23 +510,47 @@ class Harness:
                     try:
                         result = tool.call(tc.args, self.ctx)
                         result_text = result.text
+                        result_images = result.images
                         s.output(result_text)
+                        if result_images:
+                            # Surface in the trace that the tool produced
+                            # image bytes — silent image discard was the
+                            # exact symptom we were chasing before this
+                            # plumbing landed, so make it visible.
+                            s.set_metadata(image_count=len(result_images))
                     except Exception as e:
                         logger.exception("tool %s raised", tc.name)
                         s.set_metadata(error=f"{type(e).__name__}: {e}")
                         result_text = f"Tool {tc.name} raised: {type(e).__name__}: {e}"
             logger.info(
-                "tool_call[%d/%d] done name=%s elapsed=%.2fs result_chars=%d",
+                "tool_call[%d/%d] done name=%s elapsed=%.2fs result_chars=%d "
+                "image_count=%d",
                 i + 1,
                 len(resp.tool_calls),
                 tc.name,
                 time.monotonic() - t0,
                 len(result_text),
+                len(result_images) if result_images else 0,
             )
 
+            # Always log the tool message first so the ``tool_call_id``
+            # pairing every provider validates is intact.
             self.memory.log_messages(
                 [{"role": "tool", "tool_call_id": tc.id, "content": result_text}]
             )
+
+            # If the tool emitted image bytes, append a synthetic user
+            # message carrying them so the next LLM turn actually sees
+            # the pixels. See ``_build_image_followup_message`` for the
+            # rationale (provider tool-content schemas are too restrictive
+            # to put images in the tool message itself).
+            if result_images:
+                followup = _build_image_followup_message(
+                    tool_name=tc.name,
+                    images=result_images,
+                )
+                if followup is not None:
+                    self.memory.log_messages([followup])
 
         if self.ctx.sleep_requested:
             logger.info("turn %d sleep_requested -> exiting loop", self.ctx.turn)
