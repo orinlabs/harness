@@ -420,7 +420,7 @@ def complete(
         prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
         completion_tokens=int(usage_data.get("completion_tokens") or 0),
         total_tokens=int(usage_data.get("total_tokens") or 0),
-        total_cost=float(usage_data.get("cost") or 0.0),
+        total_cost=_extract_total_cost(usage_data),
         cached_tokens=int(
             (usage_data.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
         ),
@@ -648,6 +648,38 @@ def _merge_streamed_reasoning_details(details: list[dict]) -> list[dict]:
             block["signature"] = signature
 
     return merged
+
+
+def _extract_total_cost(usage_data: dict) -> float:
+    """Pick the right USD cost field from an OpenRouter usage payload.
+
+    OpenRouter reports cost differently depending on how the request was
+    billed:
+
+    - **Platform-billed (``is_byok: false``).** ``cost`` is the total USD
+      drawn from the user's OpenRouter credits and includes any provider
+      markup. ``cost_details.upstream_inference_cost`` mirrors the same
+      number minus the markup.
+    - **BYOK (``is_byok: true``).** The user paid the upstream provider
+      directly with their own key, so OpenRouter reports ``cost: 0`` --
+      it didn't bill anything. The actual spend with the upstream
+      provider is in ``cost_details.upstream_inference_cost``. Reading
+      only the top-level ``cost`` made every BYOK turn report ``$0`` on
+      both the per-call ``llm_cost`` span metadata and the run-level
+      usage rollup, which silently zeroed out cost tracking on any
+      account using BYOK for one of its providers (e.g. an Anthropic
+      key plumbed in via OpenRouter).
+
+    Prefer the top-level ``cost`` when it's positive (so platform-billed
+    calls keep including the OpenRouter markup), otherwise fall back to
+    ``cost_details.upstream_inference_cost`` so BYOK runs still surface
+    real spend.
+    """
+    direct = float(usage_data.get("cost") or 0.0)
+    if direct > 0:
+        return direct
+    cost_details = usage_data.get("cost_details") or {}
+    return float(cost_details.get("upstream_inference_cost") or 0.0)
 
 
 def _parse_reasoning(msg: dict) -> str | None:
