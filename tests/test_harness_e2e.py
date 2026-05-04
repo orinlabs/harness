@@ -212,6 +212,19 @@ def test_harness_surfaces_reasoning_on_llm_span_and_sibling_thinking_span(
     assert isinstance(md["reasoning_tokens"], int)
     assert md["reasoning_tokens"] > 0
 
+    # Cost regression: BYOK Anthropic responses report ``cost: 0`` at the
+    # top of the OpenRouter usage payload and put the real upstream spend
+    # under ``cost_details.upstream_inference_cost``. The llm client must
+    # fall back to that field so every llm_span on a BYOK Anthropic run
+    # still surfaces a non-zero ``llm_cost.total_cost_usd`` -- otherwise
+    # the trace UI shows $0 on every Claude turn and the run-level usage
+    # rollup silently zeroes out spend.
+    assert md["llm_cost"]["total_cost_usd"] > 0, (
+        "BYOK Anthropic llm_span reported $0 cost; the cost_details "
+        "upstream-inference fallback is not wired up. Got llm_cost: "
+        f"{md['llm_cost']}"
+    )
+
     # Sibling `thinking` span must exist, be TEXT-typed, share the
     # trace, and carry the reasoning plaintext in output_text.
     thinking_open = [s for s in harness_env.spans_open.values() if s["name"] == "thinking"]

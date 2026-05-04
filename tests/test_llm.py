@@ -180,15 +180,16 @@ def test_complete_translates_anthropic_slug_before_sending(openrouter_key):
         f"expected openrouter to route to an anthropic model, got {resp.usage.model!r}"
     )
     assert "haiku" in resp.usage.model.lower()
-    # We deliberately do NOT assert total_cost > 0 here. OpenRouter
-    # occasionally canonicalises Haiku 4.5 to a date-pinned variant
-    # (e.g. `anthropic/claude-4.5-haiku-20251001`) whose pricing row
-    # hasn't been populated yet; the call still succeeds and returns
-    # tokens, but `usage.cost` comes back as 0. The dedicated cost
-    # assertion lives in `test_plain_completion_returns_text_and_cost`
-    # against gpt-4o-mini, which has stable pricing.
     assert resp.usage.prompt_tokens > 0
     assert resp.usage.completion_tokens > 0
+    # Anthropic on this account is currently routed BYOK, so OpenRouter
+    # returns ``cost: 0`` and reports the real spend under
+    # ``cost_details.upstream_inference_cost``. ``Usage.total_cost`` must
+    # surface that fallback so cost rollups are non-zero on BYOK runs.
+    assert resp.usage.total_cost > 0, (
+        "Anthropic call returned cost=0; the BYOK fallback to "
+        "cost_details.upstream_inference_cost is not wired up"
+    )
 
 
 def test_multi_turn_message_history(openrouter_key):
@@ -207,6 +208,76 @@ def test_multi_turn_message_history(openrouter_key):
 
     assert "42" in resp.text
     assert resp.usage.total_cost > 0
+
+
+def test_extract_total_cost_prefers_top_level_cost_when_positive():
+    """Platform-billed (`is_byok: false`) responses already report cost in USD
+    at the top level; the helper must not double-count by also adding the
+    upstream cost.
+    """
+    from harness.core import llm
+
+    usage = {
+        "prompt_tokens": 9,
+        "completion_tokens": 3,
+        "total_tokens": 12,
+        "cost": 3.15e-06,
+        "is_byok": False,
+        "cost_details": {
+            "upstream_inference_cost": 3.15e-06,
+            "upstream_inference_prompt_cost": 1.35e-06,
+            "upstream_inference_completions_cost": 1.8e-06,
+        },
+    }
+
+    assert llm._extract_total_cost(usage) == 3.15e-06
+
+
+def test_extract_total_cost_falls_back_to_upstream_inference_cost_for_byok():
+    """Regression: BYOK responses come back with ``cost: 0`` because the
+    user paid the upstream provider directly. The real spend lives on
+    ``cost_details.upstream_inference_cost`` and we have to surface it,
+    or every span/usage rollup reports $0 on BYOK accounts.
+
+    This is the exact shape OpenRouter returns for an Anthropic streaming
+    call that was routed through a BYOK provider key.
+    """
+    from harness.core import llm
+
+    usage = {
+        "prompt_tokens": 47,
+        "completion_tokens": 129,
+        "total_tokens": 176,
+        "cost": 0,
+        "is_byok": True,
+        "cost_details": {
+            "upstream_inference_cost": 0.000692,
+            "upstream_inference_prompt_cost": 4.7e-05,
+            "upstream_inference_completions_cost": 0.000645,
+        },
+    }
+
+    assert llm._extract_total_cost(usage) == 0.000692
+
+
+def test_extract_total_cost_returns_zero_when_provider_omits_pricing():
+    """OpenRouter occasionally omits both fields (e.g. brand-new model
+    canonicalisations whose pricing row hasn't been populated). The
+    helper must degrade to 0.0 instead of raising.
+    """
+    from harness.core import llm
+
+    assert (
+        llm._extract_total_cost(
+            {
+                "prompt_tokens": 47,
+                "completion_tokens": 129,
+                "total_tokens": 176,
+            }
+        )
+        == 0.0
+    )
+    assert llm._extract_total_cost({"cost": None, "cost_details": None}) == 0.0
 
 
 def test_drop_orphan_tool_messages_filters_unmatched_results():
