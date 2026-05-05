@@ -259,9 +259,9 @@ class DeleteContactTool(_ToolBase):
 # ---------------------------------------------------------------------------
 
 
-class FakeContactsAdapter:
-    name = "FakeContacts"
-    description = "In-process contacts adapter for evals (sqlite-backed)."
+class TestContactsAdapter:
+    name = "TestContacts"
+    description = "In-process test contacts adapter for evals (sqlite-backed)."
     TOOLS = [
         CreateContactTool,
         GetContactTool,
@@ -273,3 +273,7 @@ class FakeContactsAdapter:
     @classmethod
     def make_tools(cls) -> list[Tool]:
         return [T() for T in cls.TOOLS]
+
+
+class FakeContactsAdapter(TestContactsAdapter):
+    """Backward-compatible fake naming for existing eval imports."""
