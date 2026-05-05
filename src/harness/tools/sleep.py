@@ -12,6 +12,7 @@ agent should address / clear each item before going idle. This is
 implemented as a cross-tool call so the harness doesn't need its own
 notifications API client.
 """
+
 from __future__ import annotations
 
 import logging

@@ -15,6 +15,7 @@ to go idle. Backends vary by environment:
   the sleep request to the platform, which then takes responsibility for
   SIGTERM-ing this process and spawning a fresh one at wake time.
 """
+
 from __future__ import annotations
 
 import logging

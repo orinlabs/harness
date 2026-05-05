@@ -109,3 +109,4 @@ class AgentOverrides:
     summarizer_model: str = ""
     adapters: list[str] = field(default_factory=list)
     reasoning_effort: str = ""
+    max_tokens: int | None = None

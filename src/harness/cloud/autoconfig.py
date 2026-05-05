@@ -6,6 +6,7 @@ Bedrock-backed implementations; otherwise return the no-op / local defaults.
 Callers that want explicit control construct their sink/runtime directly and
 pass them into ``Harness(..., trace_sink=..., runtime=...)``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -37,7 +38,5 @@ def autoconfigure() -> tuple[TraceSink, AgentRuntime]:
         logger.info("autoconfigure: using Bedrock trace sink + runtime")
         return BedrockTraceSink(), BedrockAgentRuntime()
 
-    logger.info(
-        "autoconfigure: Bedrock env not set, using NullTraceSink + LocalAgentRuntime"
-    )
+    logger.info("autoconfigure: Bedrock env not set, using NullTraceSink + LocalAgentRuntime")
     return NullTraceSink(), LocalAgentRuntime()

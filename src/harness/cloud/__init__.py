@@ -9,6 +9,7 @@ backend-specific sink when the corresponding env vars are present).
 
 Currently only Bedrock is implemented.
 """
+
 from harness.cloud.autoconfig import autoconfigure
 
 __all__ = ["autoconfigure"]

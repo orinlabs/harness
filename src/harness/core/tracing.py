@@ -13,6 +13,7 @@ Two built-in sinks live here because they have no external deps:
   Useful when a test wants to assert on tracer behavior without spinning up
   a fake HTTP server.
 """
+
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable

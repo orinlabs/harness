@@ -1,4 +1,5 @@
 """Chunk 5 verification: tool contract, SleepTool, ExternalTool, build_tool_map."""
+
 from __future__ import annotations
 
 import time
@@ -37,9 +38,7 @@ def test_external_tool_bedrock_style_posts_and_returns_text(fake_platform):
     """Bedrock-shaped spec: bearer auth from env + trace_id/parent_span_id in body."""
     from harness.tools.external import ExternalTool
 
-    fake_platform.register_tool(
-        "echo", lambda args, env: {"text": str(args["x"]).upper()}
-    )
+    fake_platform.register_tool("echo", lambda args, env: {"text": str(args["x"]).upper()})
     spec = _bedrock_spec(
         name="echo",
         description="upper-case echo",
@@ -51,9 +50,7 @@ def test_external_tool_bedrock_style_posts_and_returns_text(fake_platform):
     result = tool.call({"x": "hi"}, _ctx())
     assert result.text == "HI"
 
-    posts = [
-        r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/echo")
-    ]
+    posts = [r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/echo")]
     assert len(posts) == 1
     req = posts[0]
     # trace_id/parent_span_id are None when not inside a tracer span context.
@@ -86,9 +83,7 @@ def test_external_tool_standalone_default_omits_auth_and_trace_fields(fake_platf
     result = tool.call({"name": "alice"}, _ctx())
     assert result.text == "hello alice"
 
-    posts = [
-        r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/bare")
-    ]
+    posts = [r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/bare")]
     req = posts[0]
     assert req.body == {
         "args": {"name": "alice"},
@@ -113,9 +108,7 @@ def test_external_tool_custom_headers_auth(fake_platform):
     )
     ExternalTool(spec).call({}, _ctx())
 
-    req = next(
-        r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/api")
-    )
+    req = next(r for r in fake_platform.requests if r.method == "POST" and r.path.endswith("/api"))
     # Preserve the caller's header case through httpx -> BaseHTTPRequestHandler.
     assert req.headers.get("X-API-Key") == "secret-123"
 
@@ -185,9 +178,7 @@ def test_sleep_tool_posts_and_flags_ctx(fake_platform):
     ctx = _ctx(agent_id="agent-7", run_id="run-x")
     tool = SleepTool()
 
-    result = tool.call(
-        {"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx
-    )
+    result = tool.call({"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx)
 
     assert "2099-01-01T00:00:00Z" in result.text
     assert ctx.sleep_requested is True
@@ -243,9 +234,7 @@ def test_sleep_tool_blocks_when_notifications_pending(fake_platform):
         "   Source: sms\n"
         "   Details: bring it in by 5pm\n"
     )
-    fake_platform.register_tool(
-        "list_notifications", lambda args, env: {"text": fake_response}
-    )
+    fake_platform.register_tool("list_notifications", lambda args, env: {"text": fake_response})
     list_tool = ExternalTool(
         ExternalToolSpec(
             name="list_notifications",

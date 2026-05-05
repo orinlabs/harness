@@ -17,6 +17,7 @@ Tests use `FakePlatform` as a context manager or via the `fake_platform` pytest
 fixture. Call `.record` to inspect received requests, and `.register_tool` to
 bind a handler function to a tool name.
 """
+
 from __future__ import annotations
 
 import json
@@ -164,19 +165,14 @@ def _make_handler(platform: FakePlatform):
                 self._write(200, {"ok": True})
                 return
 
-            if (
-                self.path.startswith("/api/cloud/agents/")
-                and self.path.endswith("/sleep/")
-            ):
-                agent_id = self.path[
-                    len("/api/cloud/agents/"):-len("/sleep/")
-                ]
+            if self.path.startswith("/api/cloud/agents/") and self.path.endswith("/sleep/"):
+                agent_id = self.path[len("/api/cloud/agents/") : -len("/sleep/")]
                 platform.sleep_requests.append({"agent_id": agent_id, **(body or {})})
                 self._write(200, {"ok": True})
                 return
 
             if self.path.startswith("/fake_tools/"):
-                name = self.path[len("/fake_tools/"):]
+                name = self.path[len("/fake_tools/") :]
                 handler = platform.tool_handlers.get(name)
                 if handler is None:
                     self._write(404, {"error": f"no handler for {name}"})
@@ -209,7 +205,7 @@ def _make_handler(platform: FakePlatform):
                 and self.path.endswith("/")
                 and self.path.count("/") == 5
             ):
-                trace_id = self.path[len("/api/tracing/traces/"):-1]
+                trace_id = self.path[len("/api/tracing/traces/") : -1]
                 platform.traces_closed[trace_id] = body
                 self._write(200, {"ok": True})
                 return
@@ -219,7 +215,7 @@ def _make_handler(platform: FakePlatform):
                 and self.path.endswith("/")
                 and self.path.count("/") == 5
             ):
-                span_id = self.path[len("/api/tracing/spans/"):-1]
+                span_id = self.path[len("/api/tracing/spans/") : -1]
                 platform.spans_closed[span_id] = body
                 self._write(200, {"ok": True})
                 return

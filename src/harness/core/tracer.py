@@ -11,6 +11,7 @@ the env is set, else ``NullTraceSink``). Callers that want explicit control
 (most notably ``Harness.__init__`` when the user passed ``trace_sink=...``)
 call ``set_trace_sink(sink)`` before the first span opens.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,15 +42,9 @@ class SpanType(StrEnum):
 # ---------------------------------------------------------------------------
 
 _current_trace_id: ContextVar[str | None] = ContextVar("harness_trace_id", default=None)
-_current_trace_name: ContextVar[str | None] = ContextVar(
-    "harness_trace_name", default=None
-)
-_current_trace_agent_id: ContextVar[str | None] = ContextVar(
-    "harness_trace_agent_id", default=None
-)
-_current_parent_span_id: ContextVar[str | None] = ContextVar(
-    "harness_parent_span_id", default=None
-)
+_current_trace_name: ContextVar[str | None] = ContextVar("harness_trace_name", default=None)
+_current_trace_agent_id: ContextVar[str | None] = ContextVar("harness_trace_agent_id", default=None)
+_current_parent_span_id: ContextVar[str | None] = ContextVar("harness_parent_span_id", default=None)
 
 # Emergency registry of still-open traces/spans.
 #

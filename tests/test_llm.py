@@ -1,5 +1,8 @@
 """Chunk 4 verification: real OpenRouter API calls."""
+
 from __future__ import annotations
+
+import pytest
 
 CHEAP_MODEL = "openai/gpt-4o-mini"
 
@@ -72,26 +75,83 @@ def test_translate_model_maps_bedrock_ids_to_openrouter_slugs():
 
     # Dated bedrock aliases (what you get back from the Claude API /models
     # endpoint and from AWS Bedrock sometimes) still resolve.
-    assert (
-        llm._translate_model("claude-sonnet-4-5-20250929")
-        == "anthropic/claude-sonnet-4.5"
-    )
-    assert (
-        llm._translate_model("claude-opus-4-1-20250805")
-        == "anthropic/claude-opus-4.1"
-    )
+    assert llm._translate_model("claude-sonnet-4-5-20250929") == "anthropic/claude-sonnet-4.5"
+    assert llm._translate_model("claude-opus-4-1-20250805") == "anthropic/claude-opus-4.1"
 
     # Already-namespaced slugs are pass-through (don't re-prefix).
     assert llm._translate_model("openai/gpt-4o-mini") == "openai/gpt-4o-mini"
-    assert (
-        llm._translate_model("anthropic/claude-opus-4.7")
-        == "anthropic/claude-opus-4.7"
-    )
+    assert llm._translate_model("anthropic/claude-opus-4.7") == "anthropic/claude-opus-4.7"
     assert llm._translate_model("google/gemini-2.0-flash") == "google/gemini-2.0-flash"
 
     # Unknown / non-Anthropic bare slugs are also pass-through; let
     # OpenRouter decide whether they resolve.
     assert llm._translate_model("gpt-4o-mini") == "gpt-4o-mini"
+
+
+def test_anthropic_reasoning_requests_set_default_max_tokens():
+    """Anthropic effort-based reasoning needs top-level max_tokens.
+
+    Without this, OpenRouter has to infer the reasoning budget from provider
+    defaults, and Anthropic can reject or silently under-budget thinking.
+    """
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model="claude-haiku-4-5",
+        system="",
+        messages=[{"role": "user", "content": "think"}],
+        reasoning_effort="high",
+    )
+
+    assert body["model"] == "anthropic/claude-haiku-4.5"
+    assert body["max_tokens"] == 8192
+    assert body["reasoning"] == {
+        "enabled": True,
+        "summary": "auto",
+        "max_tokens": 6553,
+    }
+
+
+def test_anthropic_reasoning_requests_honor_configured_max_tokens():
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model="anthropic/claude-opus-4.7",
+        system="",
+        messages=[{"role": "user", "content": "think"}],
+        reasoning_effort="xhigh",
+        max_tokens=32768,
+    )
+
+    assert body["max_tokens"] == 32768
+    assert body["reasoning"]["max_tokens"] == 31129
+
+
+def test_anthropic_reasoning_rejects_max_tokens_at_minimum_budget():
+    from harness.core import llm
+
+    with pytest.raises(ValueError, match="requires max_tokens > 1024"):
+        llm._build_chat_completion_body(
+            model="anthropic/claude-sonnet-4.6",
+            system="",
+            messages=[{"role": "user", "content": "think"}],
+            reasoning_effort="low",
+            max_tokens=1024,
+        )
+
+
+def test_non_anthropic_reasoning_does_not_invent_max_tokens():
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model=CHEAP_MODEL,
+        system="",
+        messages=[{"role": "user", "content": "think"}],
+        reasoning_effort="minimal",
+    )
+
+    assert "max_tokens" not in body
+    assert body["reasoning"]["effort"] == "minimal"
 
 
 def test_complete_translates_anthropic_slug_before_sending(openrouter_key):
@@ -120,7 +180,16 @@ def test_complete_translates_anthropic_slug_before_sending(openrouter_key):
         f"expected openrouter to route to an anthropic model, got {resp.usage.model!r}"
     )
     assert "haiku" in resp.usage.model.lower()
-    assert resp.usage.total_cost > 0
+    assert resp.usage.prompt_tokens > 0
+    assert resp.usage.completion_tokens > 0
+    # Anthropic on this account is currently routed BYOK, so OpenRouter
+    # returns ``cost: 0`` and reports the real spend under
+    # ``cost_details.upstream_inference_cost``. ``Usage.total_cost`` must
+    # surface that fallback so cost rollups are non-zero on BYOK runs.
+    assert resp.usage.total_cost > 0, (
+        "Anthropic call returned cost=0; the BYOK fallback to "
+        "cost_details.upstream_inference_cost is not wired up"
+    )
 
 
 def test_multi_turn_message_history(openrouter_key):
@@ -139,6 +208,76 @@ def test_multi_turn_message_history(openrouter_key):
 
     assert "42" in resp.text
     assert resp.usage.total_cost > 0
+
+
+def test_extract_total_cost_prefers_top_level_cost_when_positive():
+    """Platform-billed (`is_byok: false`) responses already report cost in USD
+    at the top level; the helper must not double-count by also adding the
+    upstream cost.
+    """
+    from harness.core import llm
+
+    usage = {
+        "prompt_tokens": 9,
+        "completion_tokens": 3,
+        "total_tokens": 12,
+        "cost": 3.15e-06,
+        "is_byok": False,
+        "cost_details": {
+            "upstream_inference_cost": 3.15e-06,
+            "upstream_inference_prompt_cost": 1.35e-06,
+            "upstream_inference_completions_cost": 1.8e-06,
+        },
+    }
+
+    assert llm._extract_total_cost(usage) == 3.15e-06
+
+
+def test_extract_total_cost_falls_back_to_upstream_inference_cost_for_byok():
+    """Regression: BYOK responses come back with ``cost: 0`` because the
+    user paid the upstream provider directly. The real spend lives on
+    ``cost_details.upstream_inference_cost`` and we have to surface it,
+    or every span/usage rollup reports $0 on BYOK accounts.
+
+    This is the exact shape OpenRouter returns for an Anthropic streaming
+    call that was routed through a BYOK provider key.
+    """
+    from harness.core import llm
+
+    usage = {
+        "prompt_tokens": 47,
+        "completion_tokens": 129,
+        "total_tokens": 176,
+        "cost": 0,
+        "is_byok": True,
+        "cost_details": {
+            "upstream_inference_cost": 0.000692,
+            "upstream_inference_prompt_cost": 4.7e-05,
+            "upstream_inference_completions_cost": 0.000645,
+        },
+    }
+
+    assert llm._extract_total_cost(usage) == 0.000692
+
+
+def test_extract_total_cost_returns_zero_when_provider_omits_pricing():
+    """OpenRouter occasionally omits both fields (e.g. brand-new model
+    canonicalisations whose pricing row hasn't been populated). The
+    helper must degrade to 0.0 instead of raising.
+    """
+    from harness.core import llm
+
+    assert (
+        llm._extract_total_cost(
+            {
+                "prompt_tokens": 47,
+                "completion_tokens": 129,
+                "total_tokens": 176,
+            }
+        )
+        == 0.0
+    )
+    assert llm._extract_total_cost({"cost": None, "cost_details": None}) == 0.0
 
 
 def test_drop_orphan_tool_messages_filters_unmatched_results():
@@ -209,3 +348,109 @@ def test_drop_orphan_tool_messages_passthrough_when_paired():
     filtered = llm._drop_orphan_tool_messages(messages)
 
     assert filtered == messages
+
+
+def test_prepare_replay_messages_preserves_reasoning_details_for_tool_replay():
+    """Signed reasoning_details are required for Anthropic tool continuations.
+
+    Top-level ``reasoning`` is trace output and should not be replayed, but
+    OpenRouter documents ``reasoning_details`` as the continuity mechanism for
+    reasoning models when a tool call pauses the response.
+    """
+    from harness.core import llm
+
+    messages = [
+        {"role": "user", "content": "check state"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning": "I should inspect notifications.",
+            "reasoning_details": [
+                {"type": "reasoning.text", "text": "I should inspect notifications."},
+                {"type": "reasoning.text", "signature": "provider-signature"},
+            ],
+            "tool_calls": [
+                {
+                    "id": "toolu_123",
+                    "type": "function",
+                    "function": {"name": "list_notifications", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "toolu_123", "content": "none"},
+    ]
+
+    filtered = llm._prepare_replay_messages(messages)
+
+    assert filtered[1] == {
+        "role": "assistant",
+        "content": None,
+        "reasoning_details": [
+            {"type": "reasoning.text", "text": "I should inspect notifications."},
+            {"type": "reasoning.text", "signature": "provider-signature"},
+        ],
+        "tool_calls": [
+            {
+                "id": "toolu_123",
+                "type": "function",
+                "function": {"name": "list_notifications", "arguments": "{}"},
+            }
+        ],
+    }
+    assert filtered[2]["tool_call_id"] == "toolu_123"
+
+
+def test_merge_streamed_reasoning_details_combines_text_with_signature():
+    from harness.core import llm
+
+    merged = llm._merge_streamed_reasoning_details(
+        [
+            {
+                "type": "reasoning.text",
+                "text": "first ",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+            },
+            {
+                "type": "reasoning.text",
+                "text": "second",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+            },
+            {
+                "type": "reasoning.text",
+                "signature": "signed",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+            },
+        ]
+    )
+
+    assert merged == [
+        {
+            "type": "reasoning.text",
+            "format": "anthropic-claude-v1",
+            "index": 0,
+            "text": "first second",
+            "signature": "signed",
+        }
+    ]
+
+
+def test_prepare_replay_messages_strips_anthropic_thinking_content_blocks():
+    """Anthropic thinking blocks can also appear inside message content lists."""
+    from harness.core import llm
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "secret", "signature": "bad"},
+                {"type": "text", "text": "Visible answer"},
+            ],
+        }
+    ]
+
+    assert llm._prepare_replay_messages(messages) == [
+        {"role": "assistant", "content": [{"type": "text", "text": "Visible answer"}]}
+    ]

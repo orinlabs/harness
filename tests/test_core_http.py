@@ -4,6 +4,7 @@ These tests exercise the BedrockTraceSink + BedrockAgentRuntime via the
 public tracer API. fake_platform sets BEDROCK_URL / BEDROCK_TOKEN at its
 URL, so the tracer's autoconfig selects the Bedrock-backed sink.
 """
+
 from __future__ import annotations
 
 
@@ -152,8 +153,7 @@ def test_tracer_close_all_open_flushes_dangling_spans(fake_platform):
 
     # Output we set before the abort is preserved.
     tool_closed = next(
-        c for c in fake_platform.spans_closed.values()
-        if c["output_text"] == "partial"
+        c for c in fake_platform.spans_closed.values() if c["output_text"] == "partial"
     )
     assert tool_closed is not None
 
@@ -247,9 +247,7 @@ def test_tracer_normal_close_removes_from_registry(fake_platform):
 def test_bedrock_agent_runtime_sleep(fake_platform):
     from harness.cloud.bedrock import BedrockAgentRuntime
 
-    BedrockAgentRuntime().sleep(
-        "agent-7", until="2099-01-01T00:00:00Z", reason="testing"
-    )
+    BedrockAgentRuntime().sleep("agent-7", until="2099-01-01T00:00:00Z", reason="testing")
 
     assert len(fake_platform.sleep_requests) == 1
     sr = fake_platform.sleep_requests[0]

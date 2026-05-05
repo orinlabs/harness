@@ -1,4 +1,5 @@
 """Chunk 1 verification: package imports cleanly, config constructs, import is cheap."""
+
 import subprocess
 import sys
 

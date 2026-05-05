@@ -3,6 +3,7 @@
 These are what `MemoryContextBuilder.fetch_data` returns and what tests
 assert against.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

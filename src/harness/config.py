@@ -74,6 +74,7 @@ class AgentConfig:
     system_prompt: str
     tools: "list[ExternalToolSpec | Tool]" = field(default_factory=list)
     reasoning_effort: str | None = None
+    max_tokens: int | None = None
     # Generic per-agent feature flags. Maps flag name -> stored value
     # (typically ``"on"`` / ``"off"`` but free-form strings are allowed
     # so non-boolean flags work — e.g. a tier name or a model variant).

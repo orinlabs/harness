@@ -18,6 +18,7 @@ Failure modes:
            JSON string; non-JSON -> "<status> <reason>: <text>")
   timeout: ToolResult.text = "timeout after Ns"
 """
+
 from __future__ import annotations
 
 import json

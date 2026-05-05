@@ -10,8 +10,10 @@ Takes an `AgentConfig` + a `run_id` and runs the main loop:
 Every side effect goes through the `core/` modules so the infra platform can
 own storage, tracing, LLM routing, and lifecycle without the harness knowing.
 """
+
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -38,6 +40,105 @@ logger = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Tool-result image plumbing
+# ---------------------------------------------------------------------------
+#
+# ``ExternalTool`` parses the wire response into ``ToolResult(text, images)``
+# where ``images`` is a list of base64-encoded image strings (see
+# ``tools/external.py:_parse_success``). Before this helper landed, the
+# main loop only logged ``result.text`` into memory and silently discarded
+# ``result.images`` — every subsequent LLM turn saw ``image_tokens: 0`` and
+# the model would loop trying to "open" the image it had supposedly
+# already received.
+#
+# OpenAI Chat Completions (and OpenRouter, which speaks the same shape) is
+# strict about ``role: tool`` content: many providers only accept a string
+# there, never multipart parts. So we don't try to put the image inside the
+# tool message. Instead we log the tool message with text only — preserving
+# the ``tool_call_id`` pairing every provider validates — and then append
+# a synthetic ``role: user`` message right after it whose ``content`` is
+# OpenAI multipart (``[{"type": "text"}, {"type": "image_url"}]``). Vision-
+# capable models (Claude, GPT-4o, Gemini) accept images in ``user`` content
+# universally, so the image reaches the model on the very next turn.
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_GIF87A = b"GIF87a"
+_GIF89A = b"GIF89a"
+_RIFF = b"RIFF"
+_WEBP = b"WEBP"
+
+
+def _sniff_image_mime(image_bytes: bytes) -> str:
+    """Pick a MIME type for an image based on its leading magic bytes.
+
+    Provider vision endpoints generally tolerate a mismatched ``data:`` URL
+    media type (they sniff bytes themselves), but tagging accurately keeps
+    the trace readable and lets pickier providers do less work. Falls back
+    to ``image/png`` when the bytes don't match a known signature — that's
+    what the bedrock-api invoke endpoint produces today for the images it
+    forwards through ``image_to_image_block``.
+    """
+    if image_bytes.startswith(_PNG_MAGIC):
+        return "image/png"
+    if image_bytes.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    if image_bytes.startswith(_GIF87A) or image_bytes.startswith(_GIF89A):
+        return "image/gif"
+    # WebP: ``RIFF????WEBP``.
+    if (
+        len(image_bytes) >= 12
+        and image_bytes[:4] == _RIFF
+        and image_bytes[8:12] == _WEBP
+    ):
+        return "image/webp"
+    return "image/png"
+
+
+def _build_image_followup_message(
+    *, tool_name: str, images: list[str]
+) -> dict | None:
+    """Build a synthetic ``role: user`` message carrying tool-emitted images.
+
+    Returns ``None`` if there are no usable images so callers can short-
+    circuit before logging anything. Bad payloads (non-strings, undecodable
+    base64) are skipped individually and logged at warn so a partial batch
+    still delivers the images we *can* decode.
+    """
+    parts: list[dict] = []
+    for raw in images or []:
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            decoded = base64.b64decode(raw, validate=False)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "tool %s emitted image bytes that aren't valid base64; skipping",
+                tool_name,
+            )
+            continue
+        mime = _sniff_image_mime(decoded)
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{raw}"},
+            }
+        )
+
+    if not parts:
+        return None
+
+    label_text = (
+        f"[Image attachment from tool '{tool_name}'. View it as if "
+        "you had received it directly from the user.]"
+    )
+    return {
+        "role": "user",
+        "content": [{"type": "text", "text": label_text}, *parts],
+    }
 
 
 class Harness:
@@ -94,9 +195,9 @@ class Harness:
         # generic feature_flags dict (Bedrock + new YAMLs). Either path
         # turns the v2 path on; both off (the default) keeps the legacy
         # cascade-summarizer behavior.
-        summarizer_v2_enabled = bool(
-            getattr(config, "summarizer_v2", False)
-        ) or config.is_enabled("summarizer_v2")
+        summarizer_v2_enabled = bool(getattr(config, "summarizer_v2", False)) or config.is_enabled(
+            "summarizer_v2"
+        )
         self.memory = MemoryService(
             agent_id=config.id,
             model=summary_model,
@@ -157,8 +258,7 @@ class Harness:
                         **self._run_usage,
                         "cost_usd": self._run_usage["total_cost_usd"],
                         "cache_hit_rate": (
-                            self._run_usage["cached_tokens"]
-                            / self._run_usage["input_tokens"]
+                            self._run_usage["cached_tokens"] / self._run_usage["input_tokens"]
                             if self._run_usage["input_tokens"] > 0
                             else 0.0
                         ),
@@ -218,6 +318,33 @@ class Harness:
             self.memory.update_summaries()
 
         system, messages = self.memory.build_llm_inputs(self.config.system_prompt)
+        # Anthropic extended thinking is sensitive to the message tail. On
+        # turn 0 a bare system prompt returns reasoning_tokens=0, and
+        # OpenRouter Claude post-tool continuations often execute correctly
+        # but emit no fresh thinking unless the next request starts a normal
+        # user continuation. Inject an ephemeral user message for the LLM call
+        # only (NOT written to memory) in those cases.
+        tail_role = messages[-1].get("role") if messages else None
+        is_anthropic_reasoning = (
+            self.config.model.startswith("claude-")
+            or self.config.model.startswith("anthropic/")
+        ) and self.config.reasoning_effort != "none"
+        needs_kickoff = (
+            not messages
+            or tail_role == "assistant"
+            or (tail_role == "tool" and is_anthropic_reasoning)
+        )
+        if needs_kickoff:
+            messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Proceed with your next action. Think through it, "
+                        "then call the appropriate tool."
+                    ),
+                },
+            ]
         logger.info(
             "turn %d: self.tool_map has %d tool(s) before schema build: %s",
             self.ctx.turn,
@@ -226,10 +353,11 @@ class Harness:
         )
         tools_schema = [t.schema.to_openai() for t in self.tool_map.values()]
         logger.info(
-            "turn %d built inputs: system_chars=%d messages=%d tools=%d",
+            "turn %d built inputs: system_chars=%d messages=%d (kickoff_injected=%s) tools=%d",
             self.ctx.turn,
             len(system or ""),
             len(messages),
+            needs_kickoff,
             len(tools_schema),
         )
         # Defense: tool_map was populated at init but the schema list came
@@ -260,8 +388,24 @@ class Harness:
                     system=system,
                     messages=messages,
                     tools=tools_schema,
-                    tool_choice="required",
+                    # Intentionally `auto`, not `required`. OpenAI's
+                    # `tool_choice: "required"` maps to Anthropic's
+                    # `any`/`tool` modes on OpenRouter, and Anthropic
+                    # disables extended thinking whenever tool use is
+                    # forced -- our Claude 4.x runs were coming back
+                    # with reasoning_tokens=0 every turn because of
+                    # this, no matter how much we tweaked the
+                    # `reasoning` block.
+                    #
+                    # `auto` lets the model think first and still pick
+                    # a tool; when it doesn't call one, the nudge path
+                    # below (`self.memory.nudge()`) prompts it to call
+                    # a tool or sleep on the next turn. That matches
+                    # the ergonomics of every modern agent SDK and
+                    # costs at most one wasted turn per run.
+                    tool_choice="auto",
                     reasoning_effort=self.config.reasoning_effort,
+                    max_tokens=self.config.max_tokens,
                 )
             except llm.OpenRouterError as e:
                 # Surface the upstream body in the span's output_text so the
@@ -274,7 +418,23 @@ class Harness:
                 )
                 raise
             s.output(json.dumps(resp.raw, default=str)[:20000])
-            s.set_metadata(llm_cost=resp.usage.to_llm_cost_dict())
+            # Surface reasoning on the llm_span itself, not just as a nested
+            # sibling span. Two reasons:
+            #   1. `s.output` is `resp.raw` truncated at 20kB. Anthropic
+            #      streams reasoning as per-token `reasoning_details`
+            #      deltas (one dict per ~1 token), so raw JSON routinely
+            #      blows past 20kB on thinking models and the reasoning
+            #      text gets chopped off the end of the output field.
+            #   2. Clients viewing the span in Bedrock expect a first-
+            #      class `reasoning` / `reasoning_tokens` on the LLM call
+            #      metadata, not to dig into a sibling span's output.
+            reasoning_tokens = resp.usage.reasoning_tokens
+            llm_metadata: dict = {"llm_cost": resp.usage.to_llm_cost_dict()}
+            if resp.reasoning:
+                llm_metadata["reasoning"] = resp.reasoning
+            if reasoning_tokens > 0:
+                llm_metadata["reasoning_tokens"] = reasoning_tokens
+            s.set_metadata(**llm_metadata)
         llm_ended_at = _now_iso()
 
         # Emit a sibling `thinking` span under the turn whenever the model
@@ -284,8 +444,13 @@ class Harness:
         # the trace always shows a visible span right after
         # `openrouter_api_call` confirming reasoning actually happened,
         # not just silent tokens buried in the usage dict.
-        reasoning_tokens = resp.usage.reasoning_tokens
         if resp.reasoning or reasoning_tokens > 0:
+            logger.info(
+                "emitting thinking span: reasoning_tokens=%d has_plaintext=%s text_chars=%d",
+                reasoning_tokens,
+                bool(resp.reasoning),
+                len(resp.reasoning or ""),
+            )
             emit_completed_span(
                 "thinking",
                 span_type=SpanType.TEXT,
@@ -298,12 +463,18 @@ class Harness:
                     "has_plaintext": bool(resp.reasoning),
                 },
             )
+        else:
+            logger.info(
+                "no thinking span emitted: reasoning_tokens=0 and no "
+                "plaintext reasoning from model=%s",
+                self.config.model,
+            )
 
         # Accumulate onto the turn and the run-level rollup.
         turn_span.set_metadata(usage=resp.usage.to_dict())
         self._accumulate_usage(resp.usage)
 
-        assistant_msg = resp.raw["choices"][0]["message"]
+        assistant_msg = llm._strip_provider_reasoning([resp.raw["choices"][0]["message"]])[0]
         self.memory.log_messages([assistant_msg])
 
         logger.info(
@@ -325,6 +496,7 @@ class Harness:
                 args_preview,
             )
             t0 = time.monotonic()
+            result_images: list[str] | None = None
             with tool_span(
                 tc.name,
                 input=json.dumps({"args": tc.args, "tool_call_id": tc.id}),
@@ -338,23 +510,47 @@ class Harness:
                     try:
                         result = tool.call(tc.args, self.ctx)
                         result_text = result.text
+                        result_images = result.images
                         s.output(result_text)
+                        if result_images:
+                            # Surface in the trace that the tool produced
+                            # image bytes — silent image discard was the
+                            # exact symptom we were chasing before this
+                            # plumbing landed, so make it visible.
+                            s.set_metadata(image_count=len(result_images))
                     except Exception as e:
                         logger.exception("tool %s raised", tc.name)
                         s.set_metadata(error=f"{type(e).__name__}: {e}")
                         result_text = f"Tool {tc.name} raised: {type(e).__name__}: {e}"
             logger.info(
-                "tool_call[%d/%d] done name=%s elapsed=%.2fs result_chars=%d",
+                "tool_call[%d/%d] done name=%s elapsed=%.2fs result_chars=%d "
+                "image_count=%d",
                 i + 1,
                 len(resp.tool_calls),
                 tc.name,
                 time.monotonic() - t0,
                 len(result_text),
+                len(result_images) if result_images else 0,
             )
 
+            # Always log the tool message first so the ``tool_call_id``
+            # pairing every provider validates is intact.
             self.memory.log_messages(
                 [{"role": "tool", "tool_call_id": tc.id, "content": result_text}]
             )
+
+            # If the tool emitted image bytes, append a synthetic user
+            # message carrying them so the next LLM turn actually sees
+            # the pixels. See ``_build_image_followup_message`` for the
+            # rationale (provider tool-content schemas are too restrictive
+            # to put images in the tool message itself).
+            if result_images:
+                followup = _build_image_followup_message(
+                    tool_name=tc.name,
+                    images=result_images,
+                )
+                if followup is not None:
+                    self.memory.log_messages([followup])
 
         if self.ctx.sleep_requested:
             logger.info("turn %d sleep_requested -> exiting loop", self.ctx.turn)

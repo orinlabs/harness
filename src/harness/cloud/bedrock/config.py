@@ -4,6 +4,7 @@ Owns every call to ``/api/cloud/agents/*`` and ``/api/templates/``.
 Returns already-parsed Python types (``AgentConfig``, ``dict``) so the CLI
 layer never has to know Bedrock's JSON shape.
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,9 +44,7 @@ def _flatten_and_stamp(cfg: dict[str, Any]) -> dict[str, Any]:
     flat: list[dict[str, Any]] = []
     for adapter in cfg.get("adapters", []) or []:
         for tool in adapter.get("tools", []) or []:
-            tool.setdefault(
-                "auth", {"kind": "bearer_env", "token_env": "BEDROCK_TOKEN"}
-            )
+            tool.setdefault("auth", {"kind": "bearer_env", "token_env": "BEDROCK_TOKEN"})
             tool.setdefault("forward_trace_context", True)
             flat.append(tool)
     cfg["tools"] = flat
@@ -58,6 +57,7 @@ def _config_from_bedrock_json(
     *,
     model_override: str | None = None,
     reasoning_override: str | None = None,
+    max_tokens_override: int | None = None,
 ) -> AgentConfig:
     """Build an ``AgentConfig`` from Bedrock's harness-config JSON payload."""
     _flatten_and_stamp(cfg)
@@ -65,6 +65,8 @@ def _config_from_bedrock_json(
         cfg["model"] = model_override
     if reasoning_override:
         cfg["reasoning_effort"] = reasoning_override
+    if max_tokens_override is not None:
+        cfg["max_tokens"] = max_tokens_override
     return build_agent_config(cfg)
 
 
@@ -78,11 +80,12 @@ def fetch_harness_config(
     *,
     model_override: str | None = None,
     reasoning_override: str | None = None,
+    max_tokens_override: int | None = None,
 ) -> AgentConfig:
     """GET /api/cloud/agents/{agent_id}/harness-config/ and parse the result.
 
-    ``model_override`` / ``reasoning_override`` let the CLI stamp --model /
-    --reasoning-effort onto the result without mutating Bedrock's record.
+    Runtime overrides let the CLI stamp flags onto the result without mutating
+    Bedrock's record.
     """
     url = f"{platform_url()}/api/cloud/agents/{agent_id}/harness-config/"
     logger.info("fetching harness config from %s", url)
@@ -92,6 +95,7 @@ def fetch_harness_config(
         resp.json(),
         model_override=model_override,
         reasoning_override=reasoning_override,
+        max_tokens_override=max_tokens_override,
     )
 
 
@@ -126,9 +130,7 @@ def resolve_template(explicit: str | None) -> str | None:
     if not matches:
         raise SystemExit(f"no template named {explicit!r} visible to this API key")
     if len(matches) > 1:
-        raise SystemExit(
-            f"multiple templates named {explicit!r}; pass --template <uuid>"
-        )
+        raise SystemExit(f"multiple templates named {explicit!r}; pass --template <uuid>")
     return matches[0]["id"]
 
 

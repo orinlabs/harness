@@ -4,6 +4,7 @@ Routes the built-in ``SleepTool`` through Bedrock's agent-scoped lifecycle
 endpoint. Bedrock is then responsible for SIGTERMing this process and
 spawning a fresh one at ``until``.
 """
+
 from __future__ import annotations
 
 from typing import Any

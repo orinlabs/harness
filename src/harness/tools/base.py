@@ -8,6 +8,7 @@ One protocol, two origins:
 
 Both go into a single `tool_map: dict[str, Tool]` assembled by `build_tool_map`.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -78,7 +78,7 @@ class VegetarianRestaurantHeavy(Simulation):
 
     @event(day=1, time_str="12:00", actor="sam", channel="sms")
     def sam_asks_about_steakhouse(self):
-        return "Thinking of taking the team to Mastro's Steakhouse for lunch today. " "Sound good?"
+        return "Thinking of taking the team to Mastro's Steakhouse for lunch today. Sound good?"
 
     @checkpoint(
         day=1,

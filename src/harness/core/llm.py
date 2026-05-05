@@ -8,6 +8,7 @@ needed — harness code builds plain dicts for `messages` and `tools`.
 
 To swap in a different LLM provider, branch the repo and rewrite this file.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 _client: httpx.Client | None = None
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
+_REASONING_EFFORT_RATIOS = {
+    "xhigh": 0.95,
+    "high": 0.8,
+    "medium": 0.5,
+    "low": 0.2,
+    "minimal": 0.1,
+}
 
 
 class OpenRouterError(RuntimeError):
@@ -38,9 +47,7 @@ class OpenRouterError(RuntimeError):
         self.status_code = status_code
         self.body = body
         self.model = model
-        super().__init__(
-            f"openrouter HTTP {status_code} for model {model}: {body}"
-        )
+        super().__init__(f"openrouter HTTP {status_code} for model {model}: {body}")
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +106,110 @@ def _translate_model(model: str) -> str:
     return model
 
 
+def _is_anthropic_model(model: str) -> bool:
+    return model.startswith("anthropic/")
+
+
+def _effective_max_tokens(*, model: str, max_tokens: int | None) -> int | None:
+    """Choose a request max_tokens that keeps Anthropic reasoning valid.
+
+    Anthropic derives reasoning budget from top-level max_tokens when
+    reasoning.effort is used. OpenRouter requires max_tokens to be strictly
+    higher than the resulting reasoning budget; because Anthropic also floors
+    reasoning budgets at 1024, any explicit Anthropic max_tokens must exceed
+    1024.
+    """
+    if max_tokens is not None:
+        if max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+        if _is_anthropic_model(model) and max_tokens <= 1024:
+            raise ValueError(
+                "Anthropic reasoning requires max_tokens > 1024 so the final "
+                f"response has room after the minimum reasoning budget; got {max_tokens}"
+            )
+        return max_tokens
+    if _is_anthropic_model(model):
+        return _DEFAULT_ANTHROPIC_MAX_TOKENS
+    return None
+
+
+def _anthropic_reasoning_max_tokens(
+    *, max_tokens: int, reasoning_effort: str | None
+) -> int | None:
+    if reasoning_effort == "none":
+        return None
+    ratio = _REASONING_EFFORT_RATIOS.get(reasoning_effort or "medium")
+    if ratio is None:
+        raise ValueError(
+            "reasoning_effort must be one of minimal|low|medium|high|xhigh|none "
+            f"for Anthropic models, got {reasoning_effort!r}"
+        )
+    budget = int(max_tokens * ratio)
+    return max(min(budget, 128_000), 1024)
+
+
+def _build_chat_completion_body(
+    *,
+    model: str,
+    system: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    tool_choice: str | dict | None = None,
+    reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
+    model = _translate_model(model)
+    full_messages: list[dict] = []
+    if system:
+        full_messages.append({"role": "system", "content": system})
+    full_messages.extend(_prepare_replay_messages(messages))
+
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": full_messages,
+        "usage": {"include": True},
+    }
+    effective_max_tokens = _effective_max_tokens(model=model, max_tokens=max_tokens)
+    if effective_max_tokens is not None:
+        body["max_tokens"] = effective_max_tokens
+    if tools:
+        body["tools"] = tools
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
+    # Turn reasoning on by default and request plain-text summaries.
+    #
+    # OpenRouter's `reasoning` object is a no-op on non-reasoning models,
+    # so always sending it is safe. But the defaults-per-field matter:
+    #
+    #   - `enabled: true` is required to activate extended thinking on
+    #     Anthropic (Claude 3.7 / 4.x) and Gemini thinking models. Without
+    #     it, those providers return zero reasoning tokens even though the
+    #     model is capable -- which is what caused "Opus 4.7 isn't
+    #     reasoning" until we set this explicitly.
+    #   - `summary: "auto"` opts OpenAI o-series / gpt-5 into a human-
+    #     readable summary instead of the default encrypted blob. Ignored
+    #     by providers that don't encrypt.
+    #   - An explicit `effort` (or the summarizer's `"minimal"` override)
+    #     wins over the implied medium effort from `enabled: true`.
+    #   - Anthropic needs top-level `max_tokens` with effort-based
+    #     reasoning; when callers don't provide one we set a conservative
+    #     default above so OpenRouter can derive a valid reasoning budget.
+    reasoning_cfg: dict[str, Any] = {"enabled": True, "summary": "auto"}
+    if _is_anthropic_model(model):
+        if reasoning_effort == "none":
+            reasoning_cfg = {"effort": "none"}
+        else:
+            assert effective_max_tokens is not None
+            reasoning_cfg["max_tokens"] = _anthropic_reasoning_max_tokens(
+                max_tokens=effective_max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
+    elif reasoning_effort:
+        reasoning_cfg["effort"] = reasoning_effort
+    body["reasoning"] = reasoning_cfg
+    return body
+
+
 def _http() -> httpx.Client:
     global _client
     if _client is None:
@@ -111,9 +222,7 @@ def _http() -> httpx.Client:
 def _api_key() -> str:
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is not set. LLM calls need it to reach OpenRouter."
-        )
+        raise RuntimeError("OPENROUTER_API_KEY is not set. LLM calls need it to reach OpenRouter.")
     return key
 
 
@@ -185,6 +294,7 @@ def complete(
     tools: list[dict] | None = None,
     tool_choice: str | dict | None = None,
     reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
     timeout_seconds: float = 120.0,
 ) -> LLMResponse:
     """Send one chat completion request to OpenRouter.
@@ -198,62 +308,37 @@ def complete(
             When `tools` is provided, the harness loop passes "required" so every
             turn emits at least one tool call. Pass None to let the provider
             default (usually "auto") take over.
-        reasoning_effort: optional "low" | "medium" | "high" for reasoning models.
+        reasoning_effort: optional minimal|low|medium|high|xhigh for reasoning models.
+        max_tokens: optional completion token budget. Anthropic reasoning models
+            need this with effort-based reasoning; if omitted, Anthropic requests
+            get a conservative default.
         timeout_seconds: request timeout.
     """
-    # Translate Anthropic/bedrock model IDs (`claude-opus-4-7`) into
-    # OpenRouter slugs (`anthropic/claude-opus-4.7`). OpenRouter 400s on the
-    # un-namespaced form. No-op for OpenAI/Google/etc. slugs.
-    model = _translate_model(model)
+    body = _build_chat_completion_body(
+        model=model,
+        system=system,
+        messages=messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
+    )
+    model = body["model"]
+    full_messages = body["messages"]
 
     logger.info(
         "openrouter complete() received: model=%s messages=%d tools=%s "
-        "tool_choice=%s reasoning_effort=%s",
+        "tool_choice=%s reasoning_effort=%s max_tokens=%s",
         model,
         len(messages),
         "None" if tools is None else f"len={len(tools)}",
         tool_choice,
         reasoning_effort or "-",
+        body.get("max_tokens", "-"),
     )
     if tools:
-        tool_names = [
-            ((t.get("function") or {}).get("name") or "?") for t in tools
-        ]
+        tool_names = [((t.get("function") or {}).get("name") or "?") for t in tools]
         logger.info("openrouter complete() tool names: %s", tool_names)
-
-    full_messages: list[dict] = []
-    if system:
-        full_messages.append({"role": "system", "content": system})
-    full_messages.extend(_drop_orphan_tool_messages(messages))
-
-    body: dict[str, Any] = {
-        "model": model,
-        "messages": full_messages,
-        "usage": {"include": True},
-    }
-    if tools:
-        body["tools"] = tools
-        if tool_choice is not None:
-            body["tool_choice"] = tool_choice
-    # Turn reasoning on by default and request plain-text summaries.
-    #
-    # OpenRouter's `reasoning` object is a no-op on non-reasoning models,
-    # so always sending it is safe. But the defaults-per-field matter:
-    #
-    #   - `enabled: true` is required to activate extended thinking on
-    #     Anthropic (Claude 3.7 / 4.x) and Gemini thinking models. Without
-    #     it, those providers return zero reasoning tokens even though the
-    #     model is capable -- which is what caused "Opus 4.7 isn't
-    #     reasoning" until we set this explicitly.
-    #   - `summary: "auto"` opts OpenAI o-series / gpt-5 into a human-
-    #     readable summary instead of the default encrypted blob. Ignored
-    #     by providers that don't encrypt.
-    #   - An explicit `effort` (or the summarizer's `"minimal"` override)
-    #     wins over the implied medium effort from `enabled: true`.
-    reasoning_cfg: dict[str, Any] = {"enabled": True, "summary": "auto"}
-    if reasoning_effort:
-        reasoning_cfg["effort"] = reasoning_effort
-    body["reasoning"] = reasoning_cfg
 
     # Stream the response. Reasoning models (gpt-5 thinking, o1, Claude with
     # extended thinking) commonly take minutes before emitting any non-streaming
@@ -276,11 +361,12 @@ def complete(
     body_bytes = len(json.dumps(body, default=str))
     logger.info(
         "openrouter POST start (stream) model=%s messages=%d tools=%d "
-        "reasoning_effort=%s body_bytes=%d read_timeout=%.1fs",
+        "reasoning_effort=%s max_tokens=%s body_bytes=%d read_timeout=%.1fs",
         model,
         len(full_messages),
         len(tools) if tools else 0,
         reasoning_effort or "-",
+        body.get("max_tokens", "-"),
         body_bytes,
         timeout_seconds,
     )
@@ -326,9 +412,7 @@ def complete(
         except json.JSONDecodeError:
             logger.warning("tool_call had unparseable arguments: %r", raw_args)
             args = {"_raw": raw_args}
-        tool_calls.append(
-            ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), args=args)
-        )
+        tool_calls.append(ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), args=args))
 
     usage_data = data.get("usage") or {}
     completion_details = usage_data.get("completion_tokens_details") or {}
@@ -336,7 +420,7 @@ def complete(
         prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
         completion_tokens=int(usage_data.get("completion_tokens") or 0),
         total_tokens=int(usage_data.get("total_tokens") or 0),
-        total_cost=float(usage_data.get("cost") or 0.0),
+        total_cost=_extract_total_cost(usage_data),
         cached_tokens=int(
             (usage_data.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
         ),
@@ -367,9 +451,7 @@ def complete(
     )
 
 
-def _stream_chat_completion(
-    body: dict, *, timeout: httpx.Timeout, model: str
-) -> dict:
+def _stream_chat_completion(body: dict, *, timeout: httpx.Timeout, model: str) -> dict:
     """POST with `stream: true` and reassemble SSE deltas into a dict that
     matches the non-streaming response shape the rest of `complete()` expects.
 
@@ -515,16 +597,89 @@ def _stream_chat_completion(
     if reasoning_parts:
         message["reasoning"] = "".join(reasoning_parts)
     if reasoning_details:
-        message["reasoning_details"] = reasoning_details
+        message["reasoning_details"] = _merge_streamed_reasoning_details(reasoning_details)
 
     return {
         "id": response_id,
         "model": response_model,
-        "choices": [
-            {"index": 0, "message": message, "finish_reason": finish_reason}
-        ],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": usage,
     }
+
+
+def _merge_streamed_reasoning_details(details: list[dict]) -> list[dict]:
+    """Collapse streaming reasoning deltas into replayable reasoning blocks.
+
+    OpenRouter streams Anthropic ``reasoning_details`` as small deltas: several
+    ``reasoning.text`` chunks with the same index, followed by a signature-only
+    chunk. Replaying that fragmented sequence makes Anthropic reject the next
+    tool-continuation request with ``Invalid signature in thinking block``.
+    The chat history needs the same logical block OpenRouter would return from
+    a non-streaming response: concatenated text plus the final signature.
+    """
+    merged: list[dict] = []
+    by_key: dict[tuple[int | None, str | None, str | None], dict] = {}
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        key = (
+            detail.get("index") if isinstance(detail.get("index"), int) else None,
+            detail.get("type") if isinstance(detail.get("type"), str) else None,
+            detail.get("format") if isinstance(detail.get("format"), str) else None,
+        )
+        block = by_key.get(key)
+        if block is None:
+            block = {
+                k: v
+                for k, v in detail.items()
+                if k not in {"text", "summary", "content", "data", "signature"}
+            }
+            by_key[key] = block
+            merged.append(block)
+
+        for text_key in ("text", "summary", "content", "data"):
+            value = detail.get(text_key)
+            if isinstance(value, str) and value:
+                block[text_key] = f"{block.get(text_key, '')}{value}"
+
+        signature = detail.get("signature")
+        if isinstance(signature, str) and signature:
+            block["signature"] = signature
+
+    return merged
+
+
+def _extract_total_cost(usage_data: dict) -> float:
+    """Pick the right USD cost field from an OpenRouter usage payload.
+
+    OpenRouter reports cost differently depending on how the request was
+    billed:
+
+    - **Platform-billed (``is_byok: false``).** ``cost`` is the total USD
+      drawn from the user's OpenRouter credits and includes any provider
+      markup. ``cost_details.upstream_inference_cost`` mirrors the same
+      number minus the markup.
+    - **BYOK (``is_byok: true``).** The user paid the upstream provider
+      directly with their own key, so OpenRouter reports ``cost: 0`` --
+      it didn't bill anything. The actual spend with the upstream
+      provider is in ``cost_details.upstream_inference_cost``. Reading
+      only the top-level ``cost`` made every BYOK turn report ``$0`` on
+      both the per-call ``llm_cost`` span metadata and the run-level
+      usage rollup, which silently zeroed out cost tracking on any
+      account using BYOK for one of its providers (e.g. an Anthropic
+      key plumbed in via OpenRouter).
+
+    Prefer the top-level ``cost`` when it's positive (so platform-billed
+    calls keep including the OpenRouter markup), otherwise fall back to
+    ``cost_details.upstream_inference_cost`` so BYOK runs still surface
+    real spend.
+    """
+    direct = float(usage_data.get("cost") or 0.0)
+    if direct > 0:
+        return direct
+    cost_details = usage_data.get("cost_details") or {}
+    return float(cost_details.get("upstream_inference_cost") or 0.0)
 
 
 def _parse_reasoning(msg: dict) -> str | None:
@@ -557,6 +712,57 @@ def _parse_reasoning(msg: dict) -> str | None:
     if summaries:
         return "\n\n".join(summaries)
     return None
+
+
+def _prepare_replay_messages(messages: list[dict]) -> list[dict]:
+    """Return chat messages safe to replay into a new OpenRouter request."""
+    return _drop_orphan_tool_messages(_strip_provider_reasoning(messages))
+
+
+def _strip_provider_reasoning(messages: list[dict]) -> list[dict]:
+    """Remove non-replayable thinking fields from assistant messages.
+
+    ``reasoning`` is plaintext trace output, not chat history. Preserve
+    ``reasoning_details`` though: OpenRouter's tool-use guidance requires
+    replaying those signed blocks verbatim so Anthropic can continue thinking
+    after tool results.
+    """
+    sanitized: list[dict] = []
+    dropped = 0
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            sanitized.append(msg)
+            continue
+
+        clean = dict(msg)
+        if "reasoning" in clean:
+            clean.pop("reasoning", None)
+            dropped += 1
+
+        content = clean.get("content")
+        if isinstance(content, list):
+            filtered_content = [
+                block
+                for block in content
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in {"thinking", "redacted_thinking", "reasoning"}
+                )
+            ]
+            if len(filtered_content) != len(content):
+                clean["content"] = filtered_content
+                dropped += len(content) - len(filtered_content)
+
+        sanitized.append(clean)
+
+    if dropped:
+        logger.warning(
+            "Stripped %d provider reasoning field/block(s) from replay context",
+            dropped,
+        )
+
+    return sanitized
 
 
 def _drop_orphan_tool_messages(messages: list[dict]) -> list[dict]:

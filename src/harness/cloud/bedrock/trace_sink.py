@@ -20,6 +20,7 @@ Wire protocol (authed with BEDROCK_TOKEN):
 All methods swallow transport errors and log at WARNING -- tracing is
 best-effort so a flaky platform can never take down an agent run.
 """
+
 from __future__ import annotations
 
 import json
@@ -62,9 +63,7 @@ class BedrockTraceSink:
             "metadata": {},
         }
         try:
-            http().post(
-                f"{base}/api/tracing/traces/", json=body, headers=auth_header()
-            )
+            http().post(f"{base}/api/tracing/traces/", json=body, headers=auth_header())
         except httpx.HTTPError as e:
             logger.warning("BedrockTraceSink: failed to open trace %s: %s", name, e)
 
@@ -93,9 +92,7 @@ class BedrockTraceSink:
                 headers=auth_header(),
             )
         except httpx.HTTPError as e:
-            logger.warning(
-                "BedrockTraceSink: failed to close trace %s: %s", trace_id, e
-            )
+            logger.warning("BedrockTraceSink: failed to close trace %s: %s", trace_id, e)
 
     def open_span(
         self,
@@ -123,9 +120,7 @@ class BedrockTraceSink:
             "metadata": _safe_json(metadata),
         }
         try:
-            http().post(
-                f"{base}/api/tracing/spans/", json=body, headers=auth_header()
-            )
+            http().post(f"{base}/api/tracing/spans/", json=body, headers=auth_header())
         except httpx.HTTPError as e:
             logger.warning("BedrockTraceSink: failed to open span %s: %s", name, e)
 
@@ -160,9 +155,7 @@ class BedrockTraceSink:
                 headers=auth_header(),
             )
         except httpx.HTTPError as e:
-            logger.warning(
-                "BedrockTraceSink: failed to close span %s: %s", span_id, e
-            )
+            logger.warning("BedrockTraceSink: failed to close span %s: %s", span_id, e)
 
 
 def _safe_json(obj: Any) -> Any:

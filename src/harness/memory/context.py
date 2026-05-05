@@ -10,6 +10,7 @@ gets appended to the user's system prompt.
   - FIVE_MINUTE: down to 5-minute summaries, no raw messages
   - HOURLY: down to hourly, etc.
 """
+
 from __future__ import annotations
 
 import json
@@ -65,7 +66,6 @@ def _dt_to_ns(dt: datetime) -> int:
     Naive datetimes are treated as UTC (consistent with `marks.py` conventions).
     """
     if dt.tzinfo is None:
-
         dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1_000_000_000)
 
@@ -112,13 +112,9 @@ class MemoryContextBuilder:
             # summaries exist yet. Preserves conversation continuity
             # before summarization has produced any 5m rows (e.g. on
             # the first turn of a brand-new agent).
-            has_5m = db.execute(
-                "SELECT 1 FROM five_minute_summaries LIMIT 1"
-            ).fetchone()
+            has_5m = db.execute("SELECT 1 FROM five_minute_summaries LIMIT 1").fetchone()
             if not has_5m:
-                lower_bound = windows.message_end.replace(
-                    minute=0, second=0, microsecond=0
-                )
+                lower_bound = windows.message_end.replace(minute=0, second=0, microsecond=0)
 
             rows = db.execute(
                 """
@@ -300,9 +296,7 @@ class MemoryContextBuilder:
             parts.append("=== HOURLY SUMMARIES ===")
             for h in data.hourly_summaries:
                 dt = datetime.combine(h.date, time(h.hour, 0, 0))
-                dt = force_timezone(dt, self.timezone) + timedelta(
-                    minutes=self.time_offset
-                )
+                dt = force_timezone(dt, self.timezone) + timedelta(minutes=self.time_offset)
                 parts.append(f"\n{dt.strftime('%H:%M:%S')}: {h.summary}")
 
         if data.five_minute_summaries:

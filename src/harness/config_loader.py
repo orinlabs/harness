@@ -17,6 +17,7 @@ YAML schema (JSON is equivalent):
     system_prompt: |          # required
       ...
     reasoning_effort: medium  # optional
+    max_tokens: 8192          # optional; recommended for Anthropic reasoning
     summarizer_v2: false      # optional, legacy — prefer feature_flags below
     feature_flags:            # optional; per-agent overrides keyed by name
       summarizer_v2: "on"
@@ -41,6 +42,7 @@ Bedrock serves its config with a nested ``adapters: [{name, tools: [...]}]``
 shape. ``harness.cloud.bedrock.config.fetch_harness_config`` flattens that
 on ingest -- only this (flat) schema reaches ``AgentConfig``.
 """
+
 from __future__ import annotations
 
 import json
@@ -88,9 +90,7 @@ def load_agent_config_by_name(name: str) -> AgentConfig:
         if p.exists():
             return load_agent_config_from_path(p)
     tried = "\n  ".join(str(p) for p in candidates)
-    raise FileNotFoundError(
-        f"no local agent config found for '{name}'. Tried:\n  {tried}"
-    )
+    raise FileNotFoundError(f"no local agent config found for '{name}'. Tried:\n  {tried}")
 
 
 def build_agent_config(data: dict[str, Any]) -> AgentConfig:
@@ -107,6 +107,7 @@ def build_agent_config(data: dict[str, Any]) -> AgentConfig:
         model=str(data["model"]),
         system_prompt=str(data["system_prompt"]),
         reasoning_effort=_opt_str(data.get("reasoning_effort")),
+        max_tokens=_opt_int(data.get("max_tokens")),
         feature_flags=_feature_flags(data.get("feature_flags")),
         summarizer_v2=bool(data.get("summarizer_v2", False)),
         tools=[_tool(t) for t in data.get("tools", []) or []],
@@ -157,6 +158,18 @@ def _opt_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _opt_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"expected integer value, got {value!r}") from e
+    if parsed <= 0:
+        raise ValueError(f"expected positive integer value, got {parsed}")
+    return parsed
 
 
 def _feature_flags(value: Any) -> dict[str, str]:

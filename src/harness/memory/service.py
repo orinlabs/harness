@@ -8,6 +8,7 @@ Surface:
 Summarisation runs synchronously inside `log_messages`. Every memory write is
 scoped to the per-agent sqlite file opened by `storage.load(agent_id)`.
 """
+
 from __future__ import annotations
 
 import json

@@ -401,8 +401,7 @@ class Simulation(metaclass=SimulationMeta):
                 {
                     "role": "user",
                     "content": (
-                        f"[inbound SMS from {user_agent.name} "
-                        f"({user_agent.phone})]: {content}"
+                        f"[inbound SMS from {user_agent.name} ({user_agent.phone})]: {content}"
                     ),
                 }
             ]
