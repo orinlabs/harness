@@ -194,7 +194,11 @@ def test_contacts_full_crud(agent_db):
     by_name = _by_name(FakeContactsAdapter.make_tools())
 
     create_result = by_name["create_contact"].call(
-        {"name": "Jamie", "email": "jamie@example.com", "phone": "+15550001111"},
+        {
+            "name": "Jamie",
+            "phones": [{"phone": "+15550001111", "is_primary": True}],
+            "emails": [{"email": "jamie@example.com", "is_primary": True}],
+        },
         ctx=None,
     )
     assert "Contact created: Jamie" in create_result.text
@@ -208,6 +212,7 @@ def test_contacts_full_crud(agent_db):
     get_result = by_name["get_contact"].call({"contact_id": contact_id}, ctx=None)
     assert "Jamie" in get_result.text
     assert "jamie@example.com" in get_result.text
+    assert "+15550001111" in get_result.text
 
     list_result = by_name["list_contacts"].call({}, ctx=None)
     assert "Jamie" in list_result.text
@@ -228,6 +233,100 @@ def test_contacts_full_crud(agent_db):
 
     empty_result = by_name["list_contacts"].call({}, ctx=None)
     assert "no contacts" in empty_result.text.lower()
+
+
+def test_contacts_multi_address_add_and_promote_primary(agent_db):
+    """Add multiple emails / a backup phone, then promote one to primary."""
+    by_name = _by_name(FakeContactsAdapter.make_tools())
+
+    create_result = by_name["create_contact"].call(
+        {
+            "name": "Sam",
+            "phones": [{"phone": "+15550001111", "is_primary": True}],
+            "emails": [{"email": "sam@example.com", "is_primary": True}],
+        },
+        ctx=None,
+    )
+    import re
+
+    cid = re.search(r"ID: (sim_contact_\w+)", create_result.text).group(1)
+
+    by_name["update_contact"].call(
+        {
+            "contact_id": cid,
+            "add_phones": [{"phone": "+15550002222", "label": "work"}],
+            "add_emails": [
+                {"email": "sam.alt@example.com", "label": "personal"},
+                {"email": "sam@work.example", "label": "work"},
+            ],
+        },
+        ctx=None,
+    )
+
+    get_result = by_name["get_contact"].call({"contact_id": cid}, ctx=None).text
+    assert "+15550001111" in get_result and "(primary)" in get_result.split("+15550001111")[1].split("\n")[0]
+    assert "+15550002222" in get_result
+    assert "sam.alt@example.com" in get_result
+    assert "sam@work.example" in get_result
+
+    # Pull out the backup phone's id and promote it to primary.
+    phone_ids = re.findall(r"Phone: (\+\d+).*\(id=(sim_phone_\w+)\)", get_result)
+    backup_id = next(pid for ph, pid in phone_ids if ph == "+15550002222")
+    by_name["update_contact"].call(
+        {"contact_id": cid, "primary_phone_id": backup_id}, ctx=None
+    )
+    after = by_name["get_contact"].call({"contact_id": cid}, ctx=None).text
+    # Old primary is no longer marked primary.
+    primary_marker = re.search(r"Phone: (\+\d+) \(primary\)", after)
+    assert primary_marker and primary_marker.group(1) == "+15550002222"
+
+
+def test_remove_addresses_from_contact_auto_promotes_new_primary(agent_db):
+    by_name = _by_name(FakeContactsAdapter.make_tools())
+
+    create_result = by_name["create_contact"].call(
+        {
+            "name": "Robin",
+            "phones": [
+                {"phone": "+15550003333", "is_primary": True},
+                {"phone": "+15550004444"},
+            ],
+        },
+        ctx=None,
+    )
+    import re
+
+    cid = re.search(r"ID: (sim_contact_\w+)", create_result.text).group(1)
+
+    # Removing the current primary should promote the remaining number.
+    remove_result = by_name["remove_addresses_from_contact"].call(
+        {"contact_id": cid, "phones": ["+15550003333"]}, ctx=None
+    )
+    assert "addresses removed" in remove_result.text
+
+    after = by_name["get_contact"].call({"contact_id": cid}, ctx=None).text
+    primary_marker = re.search(r"Phone: (\+\d+) \(primary\)", after)
+    assert primary_marker and primary_marker.group(1) == "+15550004444"
+
+
+def test_remove_unknown_address_lists_current_addresses(agent_db):
+    by_name = _by_name(FakeContactsAdapter.make_tools())
+    create_result = by_name["create_contact"].call(
+        {
+            "name": "Alex",
+            "phones": [{"phone": "+15550005555", "is_primary": True}],
+        },
+        ctx=None,
+    )
+    import re
+
+    cid = re.search(r"ID: (sim_contact_\w+)", create_result.text).group(1)
+
+    result = by_name["remove_addresses_from_contact"].call(
+        {"contact_id": cid, "phones": ["+19999999999"]}, ctx=None
+    ).text
+    assert "not on this contact" in result
+    assert "+15550005555" in result  # current address surfaced for self-correction
 
 
 def test_contacts_missing_id(agent_db):
