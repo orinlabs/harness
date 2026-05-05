@@ -154,6 +154,91 @@ def test_non_anthropic_reasoning_does_not_invent_max_tokens():
     assert body["reasoning"]["effort"] == "minimal"
 
 
+def test_anthropic_requests_enable_automatic_prompt_caching():
+    """Anthropic requests must include the top-level ``cache_control`` so
+    OpenRouter automatically advances an ephemeral cache breakpoint to the
+    last cacheable block on every request.
+
+    Without this flag Anthropic returns ``cached_tokens: 0`` on every replay
+    of an otherwise stable system prompt + tool schema -- which is what we
+    observed in production before this fix (multi-turn agent loops paying
+    full input price every turn).
+    """
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model="anthropic/claude-opus-4.7",
+        system="stable system prompt",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+    assert body["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_bedrock_id_also_enables_prompt_caching():
+    """Translation-time map turns ``claude-opus-4-7`` into
+    ``anthropic/claude-opus-4.7``; the cache_control branch must fire
+    after translation so callers using bedrock-style IDs benefit too.
+    """
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model="claude-opus-4-7",
+        system="stable system prompt",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+    assert body["model"] == "anthropic/claude-opus-4.7"
+    assert body["cache_control"] == {"type": "ephemeral"}
+
+
+def test_non_anthropic_requests_do_not_set_cache_control():
+    """OpenAI / DeepSeek / Gemini 2.5 cache implicitly. Sending a top-level
+    ``cache_control`` to those providers either no-ops or, on
+    explicit-cache providers (Alibaba, Gemini per-block), is a malformed
+    instruction since their APIs expect per-block breakpoints. Stay out of
+    their way and only emit the flag for Anthropic models.
+    """
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model=CHEAP_MODEL,
+        system="",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+    assert "cache_control" not in body
+
+
+def test_usage_parses_cache_write_tokens_from_prompt_details():
+    """OpenRouter reports cache writes on the request that establishes a
+    new cache entry under ``prompt_tokens_details.cache_write_tokens``;
+    subsequent reads only set ``cached_tokens``. Both must surface on the
+    Usage object so per-call and run-level rollups can distinguish cold
+    from warm turns and explain the cost spike on the first cached request.
+    """
+    from harness.core import llm
+
+    usage = llm.Usage(
+        prompt_tokens=10000,
+        completion_tokens=50,
+        total_tokens=10050,
+        total_cost=0.05,
+        cached_tokens=0,
+        cache_write_tokens=9800,
+    )
+
+    cost_dict = usage.to_llm_cost_dict()
+    full_dict = usage.to_dict()
+
+    assert cost_dict["cache_write_tokens"] == 9800
+    assert cost_dict["cached_tokens"] == 0
+    assert full_dict["cache_write_tokens"] == 9800
+    # cache_hit_rate stays a *read* rate, not write -- writes happen once
+    # and shouldn't inflate the steady-state hit ratio.
+    assert full_dict["cache_hit_rate"] == 0.0
+
+
 def test_complete_translates_anthropic_slug_before_sending(openrouter_key):
     """End-to-end: calling `complete()` with a bedrock-style Anthropic ID
     must succeed (not 400), because translation runs before the HTTP call.
