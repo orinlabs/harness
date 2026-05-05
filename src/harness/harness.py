@@ -209,6 +209,7 @@ class Harness:
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_tokens": 0,
+            "cache_write_tokens": 0,
             "reasoning_tokens": 0,
             "total_tokens": 0,
             "llm_calls": 0,
@@ -270,13 +271,15 @@ class Harness:
                     # the only other path and it's a no-op without a backend.
                     logger.info(
                         "run_agent usage: agent=%s run=%s calls=%d "
-                        "tokens=in/%d+out/%d+cache/%d+reason/%d cost=$%.6f models=%s",
+                        "tokens=in/%d+out/%d+cache_r/%d+cache_w/%d+reason/%d "
+                        "cost=$%.6f models=%s",
                         self.config.id,
                         self.ctx.run_id,
                         int(final_usage["llm_calls"]),
                         int(final_usage["input_tokens"]),
                         int(final_usage["output_tokens"]),
                         int(final_usage["cached_tokens"]),
+                        int(final_usage["cache_write_tokens"]),
                         int(final_usage["reasoning_tokens"]),
                         float(final_usage["total_cost_usd"]),
                         list(self._model_breakdown.keys()),
@@ -566,6 +569,7 @@ class Harness:
         self._run_usage["input_tokens"] += usage.prompt_tokens
         self._run_usage["output_tokens"] += usage.completion_tokens
         self._run_usage["cached_tokens"] += usage.cached_tokens
+        self._run_usage["cache_write_tokens"] += usage.cache_write_tokens
         self._run_usage["reasoning_tokens"] += usage.reasoning_tokens
         self._run_usage["total_tokens"] += usage.total_tokens
         self._run_usage["llm_calls"] += usage.llm_calls
@@ -577,6 +581,7 @@ class Harness:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cached_tokens": 0,
+                "cache_write_tokens": 0,
                 "reasoning_tokens": 0,
                 "cost_usd": 0.0,
                 "llm_calls": 0,
@@ -585,6 +590,7 @@ class Harness:
         per_model["input_tokens"] += usage.prompt_tokens
         per_model["output_tokens"] += usage.completion_tokens
         per_model["cached_tokens"] += usage.cached_tokens
+        per_model["cache_write_tokens"] += usage.cache_write_tokens
         per_model["reasoning_tokens"] += usage.reasoning_tokens
         per_model["cost_usd"] += usage.total_cost
         per_model["llm_calls"] += usage.llm_calls
