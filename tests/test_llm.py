@@ -175,6 +175,56 @@ def test_anthropic_requests_enable_automatic_prompt_caching():
     assert body["cache_control"] == {"type": "ephemeral"}
 
 
+def test_openrouter_routed_anthropic_slug_enables_prompt_caching():
+    """Regression: ``~anthropic/claude-opus-latest`` is a real OpenRouter
+    routing alias the user can put in an agent config (the ``~`` pins
+    routing to Anthropic and ``-latest`` resolves to the newest Opus).
+
+    Before this test, ``_is_anthropic_model`` did ``startswith("anthropic/")``
+    which the leading ``~`` defeated, so:
+      - ``cache_control`` never made it into the body (caching off)
+      - ``_effective_max_tokens`` skipped the Anthropic default
+      - ``_anthropic_reasoning_max_tokens`` was never consulted
+
+    All three of those need to fire for routed-Anthropic slugs.
+    """
+    from harness.core import llm
+
+    body = llm._build_chat_completion_body(
+        model="~anthropic/claude-opus-latest",
+        system="stable system prompt",
+        messages=[{"role": "user", "content": "hi"}],
+        reasoning_effort="high",
+    )
+
+    assert body["cache_control"] == {"type": "ephemeral"}
+    assert body["max_tokens"] == 8192
+    # Anthropic-specific reasoning budget got computed (effort=high -> 0.8 ratio).
+    assert body["reasoning"]["max_tokens"] == int(8192 * 0.8)
+
+
+def test_anthropic_routing_suffixes_still_recognised_as_anthropic():
+    """OpenRouter's ``:floor`` / ``:nitro`` / ``:free`` suffixes pick a
+    routing strategy but don't change the underlying provider. The
+    Anthropic-specific code paths (caching, reasoning, max_tokens) must
+    still fire when these are present.
+    """
+    from harness.core import llm
+
+    for slug in (
+        "anthropic/claude-sonnet-4.6:floor",
+        "anthropic/claude-opus-4.7:nitro",
+    ):
+        body = llm._build_chat_completion_body(
+            model=slug,
+            system="",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert body["cache_control"] == {"type": "ephemeral"}, (
+            f"caching off for routed slug {slug!r}"
+        )
+
+
 def test_anthropic_bedrock_id_also_enables_prompt_caching():
     """Translation-time map turns ``claude-opus-4-7`` into
     ``anthropic/claude-opus-4.7``; the cache_control branch must fire

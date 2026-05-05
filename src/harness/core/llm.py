@@ -107,7 +107,27 @@ def _translate_model(model: str) -> str:
 
 
 def _is_anthropic_model(model: str) -> bool:
-    return model.startswith("anthropic/")
+    """True for any OpenRouter slug that resolves to an Anthropic model.
+
+    Tolerates OpenRouter's routing prefixes/suffixes:
+      - ``~anthropic/claude-opus-latest`` — the ``~`` provider prefix that
+        pins routing to a specific provider and supports ``-latest`` aliases.
+      - ``anthropic/claude-sonnet-4.6:floor`` / ``:nitro`` / ``:free`` —
+        suffixes that pick a routing strategy but don't change the
+        underlying provider.
+
+    A naive ``startswith("anthropic/")`` check missed the ``~`` form,
+    which silently disabled prompt caching, the Anthropic ``max_tokens``
+    default, and the effort-based reasoning budget for any agent
+    configured with a ``~anthropic/...`` slug -- exactly the symptom we
+    saw with ``~anthropic/claude-opus-latest`` returning
+    ``cached_tokens=0`` and ``cache_write_tokens=0`` on every turn even
+    after caching was wired up.
+
+    Substring containment is safe here: no non-Anthropic OpenRouter
+    provider uses ``anthropic/`` in its slug.
+    """
+    return "anthropic/" in model
 
 
 def _effective_max_tokens(*, model: str, max_tokens: int | None) -> int | None:
