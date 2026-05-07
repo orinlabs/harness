@@ -264,7 +264,8 @@ def test_contacts_multi_address_add_and_promote_primary(agent_db):
     )
 
     get_result = by_name["get_contact"].call({"contact_id": cid}, ctx=None).text
-    assert "+15550001111" in get_result and "(primary)" in get_result.split("+15550001111")[1].split("\n")[0]
+    primary_line = get_result.split("+15550001111")[1].split("\n")[0]
+    assert "+15550001111" in get_result and "(primary)" in primary_line
     assert "+15550002222" in get_result
     assert "sam.alt@example.com" in get_result
     assert "sam@work.example" in get_result
