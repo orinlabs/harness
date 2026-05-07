@@ -107,7 +107,27 @@ def _translate_model(model: str) -> str:
 
 
 def _is_anthropic_model(model: str) -> bool:
-    return model.startswith("anthropic/")
+    """True for any OpenRouter slug that resolves to an Anthropic model.
+
+    Tolerates OpenRouter's routing prefixes/suffixes:
+      - ``~anthropic/claude-opus-latest`` — the ``~`` provider prefix that
+        pins routing to a specific provider and supports ``-latest`` aliases.
+      - ``anthropic/claude-sonnet-4.6:floor`` / ``:nitro`` / ``:free`` —
+        suffixes that pick a routing strategy but don't change the
+        underlying provider.
+
+    A naive ``startswith("anthropic/")`` check missed the ``~`` form,
+    which silently disabled prompt caching, the Anthropic ``max_tokens``
+    default, and the effort-based reasoning budget for any agent
+    configured with a ``~anthropic/...`` slug -- exactly the symptom we
+    saw with ``~anthropic/claude-opus-latest`` returning
+    ``cached_tokens=0`` and ``cache_write_tokens=0`` on every turn even
+    after caching was wired up.
+
+    Substring containment is safe here: no non-Anthropic OpenRouter
+    provider uses ``anthropic/`` in its slug.
+    """
+    return "anthropic/" in model
 
 
 def _effective_max_tokens(*, model: str, max_tokens: int | None) -> int | None:
@@ -172,6 +192,27 @@ def _build_chat_completion_body(
     effective_max_tokens = _effective_max_tokens(model=model, max_tokens=max_tokens)
     if effective_max_tokens is not None:
         body["max_tokens"] = effective_max_tokens
+    # Enable Anthropic prompt caching in OpenRouter's "automatic" mode.
+    #
+    # Top-level `cache_control` tells OpenRouter to advance an ephemeral
+    # cache breakpoint to the last cacheable block on every request, which
+    # is exactly the multi-turn agent pattern: stable system prompt + tool
+    # schemas + a growing message log. Without this flag Anthropic returns
+    # zero cached tokens and we pay full input price on every replay.
+    #
+    # Caveats encoded by this branch:
+    #   - Top-level `cache_control` is only honoured when the request is
+    #     routed to Anthropic directly. OpenRouter automatically excludes
+    #     Bedrock/Vertex endpoints when it's present, which matches what
+    #     we want -- the harness already targets `anthropic/...` slugs.
+    #   - Other providers (OpenAI, DeepSeek, Gemini 2.5) cache implicitly
+    #     and need no flag, so we skip this for non-Anthropic models to
+    #     avoid sending a body OpenRouter would route oddly.
+    #   - Default 5-minute TTL is fine: the agent loop's LLM↔tool cycle
+    #     is way under that. Long idle pauses fall back to a cache write
+    #     at the same rate as the very first request.
+    if _is_anthropic_model(model):
+        body["cache_control"] = {"type": "ephemeral"}
     if tools:
         body["tools"] = tools
         if tool_choice is not None:
@@ -234,6 +275,13 @@ class Usage:
     total_cost: float  # USD; 0.0 if OpenRouter didn't return a cost
     model: str = ""
     cached_tokens: int = 0
+    # `cache_write_tokens` is populated only on the request that establishes
+    # a new cache entry (Anthropic, Alibaba, Gemini explicit). Subsequent
+    # cache hits report 0 here and a positive `cached_tokens`. Tracking it
+    # separately keeps the per-turn span faithful to the OpenRouter usage
+    # payload and lets cost-investigation queries distinguish "cold start"
+    # turns (write) from "warm" turns (read).
+    cache_write_tokens: int = 0
     reasoning_tokens: int = 0  # populated only for thinking models (o1/gpt-5/claude-thinking)
     llm_calls: int = 1
 
@@ -243,6 +291,7 @@ class Usage:
             "input_tokens": self.prompt_tokens,
             "output_tokens": self.completion_tokens,
             "cached_tokens": self.cached_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "total_tokens": self.total_tokens,
             "model": self.model,
@@ -261,6 +310,7 @@ class Usage:
             "input_tokens": self.prompt_tokens,
             "output_tokens": self.completion_tokens,
             "cached_tokens": self.cached_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "total_cost_usd": self.total_cost,
             "cache_hit_rate": (
@@ -416,14 +466,14 @@ def complete(
 
     usage_data = data.get("usage") or {}
     completion_details = usage_data.get("completion_tokens_details") or {}
+    prompt_details = usage_data.get("prompt_tokens_details") or {}
     usage = Usage(
         prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
         completion_tokens=int(usage_data.get("completion_tokens") or 0),
         total_tokens=int(usage_data.get("total_tokens") or 0),
         total_cost=_extract_total_cost(usage_data),
-        cached_tokens=int(
-            (usage_data.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-        ),
+        cached_tokens=int(prompt_details.get("cached_tokens") or 0),
+        cache_write_tokens=int(prompt_details.get("cache_write_tokens") or 0),
         reasoning_tokens=int(completion_details.get("reasoning_tokens") or 0),
         model=str(data.get("model") or model),
         llm_calls=1,
@@ -431,12 +481,13 @@ def complete(
 
     logger.info(
         "openrouter response finish=%s tool_calls=%d "
-        "tokens in=%d out=%d cached=%d reasoning=%d cost=$%.5f",
+        "tokens in=%d out=%d cached=%d cache_write=%d reasoning=%d cost=$%.5f",
         finish_reason or "-",
         len(tool_calls),
         usage.prompt_tokens,
         usage.completion_tokens,
         usage.cached_tokens,
+        usage.cache_write_tokens,
         usage.reasoning_tokens,
         usage.total_cost,
     )
