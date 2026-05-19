@@ -477,7 +477,13 @@ class Harness:
         turn_span.set_metadata(usage=resp.usage.to_dict())
         self._accumulate_usage(resp.usage)
 
-        assistant_msg = llm._strip_provider_reasoning([resp.raw["choices"][0]["message"]])[0]
+        # Log the raw assistant message — including ``reasoning`` plaintext
+        # and ``reasoning_details`` blocks — so the summarizer can use what
+        # the model thought as well as what it said. ``llm.complete()``
+        # still calls ``_prepare_replay_messages`` -> ``_strip_provider_reasoning``
+        # on the way out for subsequent agent turns, so providers never see
+        # the persisted reasoning fields on replay.
+        assistant_msg = resp.raw["choices"][0]["message"]
         self.memory.log_messages([assistant_msg])
 
         logger.info(
