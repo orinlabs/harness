@@ -84,11 +84,6 @@ class AgentConfig:
     # boolean check; use ``feature_flags.get(name, default)`` for value
     # reads.
     feature_flags: dict[str, str] = field(default_factory=dict)
-    # Legacy: explicit summarizer_v2 toggle. Kept for backward compat
-    # with YAML configs that predate ``feature_flags``. New configs
-    # should set ``feature_flags["summarizer_v2"] = "on"`` instead;
-    # ``Harness.__init__`` honors either source.
-    summarizer_v2: bool = False
 
     def is_enabled(self, flag: str) -> bool:
         """Return True if ``feature_flags[flag]`` resolves to ``"on"``.

@@ -73,3 +73,31 @@ def sanitize_messages_for_summary(
 
     content = json.dumps(rendered, ensure_ascii=False)
     return _truncate(content, max_chars)
+
+
+def sanitize_summary_input(
+    content: str,
+    *,
+    max_chars: int = DEFAULT_MAX_SUMMARY_INPUT_CHARS,
+    max_message_chars: int = DEFAULT_MAX_MESSAGE_CHARS,
+) -> str:
+    """Sanitize any summarizer payload before it is embedded in the LLM prompt.
+
+    Raw message buckets (five-minute tier) arrive as JSON arrays and are
+    stripped of image bytes. Higher-tier rollups arrive as plain text and
+    are truncated to stay within context limits.
+    """
+    stripped = content.strip()
+    if stripped.startswith("["):
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(parsed, list) and parsed and all(isinstance(item, dict) for item in parsed):
+                return sanitize_messages_for_summary(
+                    parsed,
+                    max_chars=max_chars,
+                    max_message_chars=max_message_chars,
+                )
+    return _truncate(content, max_chars)
