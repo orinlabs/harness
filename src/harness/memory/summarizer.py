@@ -29,9 +29,33 @@ from harness.memory.bucketing import (
     last_completed_5m_end,
 )
 from harness.memory.marks import force_timezone, week_start_sunday
+from harness.memory.sanitize import sanitize_messages_for_summarization
 from harness.memory.types import PERIOD_META, PeriodType
 
 logger = logging.getLogger(__name__)
+
+
+def _is_context_overflow_error(exc: llm.OpenRouterError) -> bool:
+    """Detect OpenRouter context-length 400s so the span can flag them.
+
+    OpenRouter returns the same error code (400) for many failure modes
+    -- invalid model slug, malformed schema, quota, context length, etc.
+    The body text is the only reliable signal; match a few canonical
+    phrases ("maximum context length", "context length", "context-compression
+    plugin") rather than a single brittle string.
+    """
+    if exc.status_code != 400:
+        return False
+    body = (exc.body or "").lower()
+    return any(
+        marker in body
+        for marker in (
+            "maximum context length",
+            "context length is",
+            "context-compression",
+            "exceeds the maximum",
+        )
+    )
 
 
 @dataclass
@@ -68,30 +92,15 @@ def _dt_to_ns(dt: datetime) -> int:
 class SummaryUpdater:
     """Run sync summarisation across the five tiers in order:
     5m -> hourly -> daily -> weekly -> monthly.
-
-    When ``v2=True``, the 5m tier is skipped too (raw messages fill
-    that window), summarization is deferred to end-of-run by the
-    caller (Harness), and the summarization prompt is constrained to
-    past-tense actions only -- no "waiting for X" / "pending Y"
-    state-describing phrasing that stale summaries were turning into
-    current-state assertions on the next run.
-
-    The v2 cascade still produces hourly, daily, weekly, monthly
-    summaries; it only changes where they are computed from (raw
-    messages instead of pre-aggregated 5m summaries) and what the
-    prompt allows them to say.
     """
 
     def __init__(
         self,
         timezone_name: str = "UTC",
         model: str = "openai/gpt-4o-mini",
-        *,
-        v2: bool = False,
     ):
         self.timezone_name = timezone_name
         self.model = model
-        self.v2 = v2
         self.total_usage = SummarizerUsage()
 
     def update_all(self, current_time: datetime | None = None) -> UpdateAllResult:
@@ -99,11 +108,7 @@ class SummaryUpdater:
             current_time = datetime.now().astimezone()
         self.total_usage = SummarizerUsage()
 
-        logger.info(
-            "summarizer.update_all: starting model=%s v2=%s",
-            self.model,
-            self.v2,
-        )
+        logger.info("summarizer.update_all: starting model=%s", self.model)
         existing_counts = self._count_existing_summaries()
         logger.info(
             "summarizer.update_all: sandbox already has messages=%d "
@@ -119,26 +124,15 @@ class SummaryUpdater:
         # text span. Per-tier work opens child `summarize_<tier>` spans
         # (only when there's pending work) and each LLM call opens an
         # `llm` span underneath. Nests under whatever span is active
-        # when `update_all` is called (usually `turn_N`, or `run_agent`
-        # for the v2 end-of-run path).
+        # when `update_all` is called (usually `turn_N`).
         with text_span(
             "memory_summarization",
             metadata={
                 "model": self.model,
-                "v2": self.v2,
                 "existing_counts": existing_counts,
             },
         ) as parent_span:
-            if self.v2:
-                # v2 skips the 5m tier entirely: raw messages fill
-                # that window. Hourly summaries are built directly
-                # from messages by ``_update_hourly_summaries`` when
-                # v2 is on (see the v2 branch inside that method for
-                # the raw-messages-source path). The remaining tiers
-                # roll up off completed hourly summaries as usual.
-                updated_5m: list = []
-            else:
-                updated_5m = self._update_five_minute_summaries(current_time)
+            updated_5m = self._update_five_minute_summaries(current_time)
             updated_hour = self._update_hourly_summaries(current_time)
             updated_day = self._update_daily_summaries(current_time)
             updated_week = self._update_weekly_summaries(current_time)
@@ -194,8 +188,7 @@ class SummaryUpdater:
     # removed (see migration 0002) because it was firing an LLM call per
     # completed minute even when nothing interesting happened, which
     # dominated per-turn cost on long-running agents. 5m is now the finest
-    # summary tier and reads the raw `messages` log directly -- same
-    # pattern `_update_hourly_summaries`'s v2 branch uses.
+    # summary tier and reads the raw `messages` log directly.
 
     def _update_five_minute_summaries(self, current_time: datetime) -> list[tuple]:
         assert storage.db is not None
@@ -276,8 +269,35 @@ class SummaryUpdater:
         for (date_key, hour_key, minute_key), bucket_messages in sorted(
             pending, key=lambda x: (x[0][0], x[0][1], x[0][2])
         ):
-            content = json.dumps(bucket_messages)
-            summary_text = self._create_summary(content=content, period_type=PeriodType.FIVE_MINUTE)
+            # Strip base64 image payloads and ``reasoning_details`` signatures
+            # before serializing -- both are summarization-useless and have
+            # been observed to blow past the summarizer model's context
+            # window on vision-heavy buckets. Tool content, ``tool_calls``,
+            # ``reasoning`` plaintext, and assistant text are preserved.
+            sanitized = sanitize_messages_for_summarization(bucket_messages)
+            content = json.dumps(sanitized.messages)
+            extra_metadata: dict[str, Any] = {"content_chars": len(content)}
+            if sanitized.sanitized:
+                extra_metadata.update(
+                    sanitized=True,
+                    stripped_image_parts=sanitized.stripped_image_parts,
+                    stripped_signatures=sanitized.stripped_signatures,
+                )
+                logger.info(
+                    "summarizer: sanitized 5m bucket %s %02d:%02d "
+                    "stripped_image_parts=%d stripped_signatures=%d content_chars=%d",
+                    date_key,
+                    hour_key,
+                    minute_key,
+                    sanitized.stripped_image_parts,
+                    sanitized.stripped_signatures,
+                    len(content),
+                )
+            summary_text = self._create_summary(
+                content=content,
+                period_type=PeriodType.FIVE_MINUTE,
+                extra_metadata=extra_metadata,
+            )
             if not summary_text or not summary_text.strip():
                 logger.error(
                     "Failed to create 5-minute summary for %s %02d:%02d - empty, skipping",
@@ -555,8 +575,15 @@ class SummaryUpdater:
         content: str,
         period_type: PeriodType,
         existing_memory: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> str | None:
-        """Build the summarization prompt and call OpenRouter."""
+        """Build the summarization prompt and call OpenRouter.
+
+        ``extra_metadata`` is merged into the ``summarizer_call`` span at
+        open time. Callers use it to surface per-bucket sanitization
+        bookkeeping (``content_chars``, ``sanitized``, ...) so failed
+        runs are diagnosable from the trace alone.
+        """
         meta = PERIOD_META[period_type]
 
         prompt = (
@@ -582,6 +609,17 @@ class SummaryUpdater:
             f"{content}\n\n"
         )
 
+        span_metadata: dict[str, Any] = {
+            "model": self.model,
+            "provider": "openrouter",
+            "period_type": period_type.value,
+            "reasoning_effort": "minimal",
+            "content_chars": len(content),
+            "prompt_chars": len(prompt),
+        }
+        if extra_metadata:
+            span_metadata.update(extra_metadata)
+
         # Wrap every summarizer LLM call in an `llm` span so the run's
         # trace tree shows which tier fired, the input prompt, the summary
         # output, and the per-call cost -- same treatment `_step` gives
@@ -594,15 +632,7 @@ class SummaryUpdater:
         # what is essentially a straightforward rewrite task. Summary
         # quality at this tier is more than adequate without extended
         # thinking.
-        with llm_span(
-            "summarizer_call",
-            metadata={
-                "model": self.model,
-                "provider": "openrouter",
-                "period_type": period_type.value,
-                "reasoning_effort": "minimal",
-            },
-        ) as s:
+        with llm_span("summarizer_call", metadata=span_metadata) as s:
             s.input(prompt[:20000])
             try:
                 resp = llm.complete(
@@ -611,8 +641,41 @@ class SummaryUpdater:
                     messages=[{"role": "user", "content": prompt}],
                     reasoning_effort="minimal",
                 )
+            except llm.OpenRouterError as e:
+                # Surface OpenRouter's JSON ``{error: {message, code}}`` body
+                # on the span so trace viewers see the actual reason a
+                # summarizer call 4xx'd (context length, invalid model,
+                # quota, etc.) -- the generic ``f"{type(e).__name__}: {e}"``
+                # capture below would otherwise truncate the most useful
+                # part. We also tag ``context_overflow`` when the upstream
+                # message clearly names the cause so dashboards / queries
+                # can filter for this specific failure mode without
+                # regexing on free-form text every time.
+                logger.exception(
+                    "Summarizer OpenRouter call failed (%s) period=%s "
+                    "content_chars=%d status=%s",
+                    e,
+                    period_type.value,
+                    len(content),
+                    e.status_code,
+                )
+                s.output(e.body)
+                error_meta: dict[str, Any] = {
+                    "error": f"{type(e).__name__}: HTTP {e.status_code}",
+                    "openrouter_status": e.status_code,
+                    "openrouter_error_body": e.body,
+                }
+                if _is_context_overflow_error(e):
+                    error_meta["context_overflow"] = True
+                s.set_metadata(**error_meta)
+                return None
             except Exception as e:
-                logger.exception("Summarizer LLM call failed: %s", e)
+                logger.exception(
+                    "Summarizer LLM call failed period=%s content_chars=%d: %s",
+                    period_type.value,
+                    len(content),
+                    e,
+                )
                 s.set_metadata(error=f"{type(e).__name__}: {e}")
                 return None
             s.output(resp.text[:20000] if resp.text else "")

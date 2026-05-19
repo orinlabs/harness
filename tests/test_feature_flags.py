@@ -43,9 +43,9 @@ def test_is_enabled_true_only_for_literal_on():
         id="a",
         model="m",
         system_prompt="s",
-        feature_flags={"summarizer_v2": "on"},
+        feature_flags={"auto_associative_memory": "on"},
     )
-    assert cfg.is_enabled("summarizer_v2") is True
+    assert cfg.is_enabled("auto_associative_memory") is True
 
 
 def test_is_enabled_case_insensitive():
@@ -105,10 +105,10 @@ def test_build_agent_config_no_feature_flags_block():
 
 def test_build_agent_config_reads_feature_flags_block():
     cfg = build_agent_config(
-        _minimal_data(feature_flags={"summarizer_v2": "on", "auto_associative_memory": "off"})
+        _minimal_data(feature_flags={"elicitation_v2": "on", "auto_associative_memory": "off"})
     )
-    assert cfg.feature_flags == {"summarizer_v2": "on", "auto_associative_memory": "off"}
-    assert cfg.is_enabled("summarizer_v2") is True
+    assert cfg.feature_flags == {"elicitation_v2": "on", "auto_associative_memory": "off"}
+    assert cfg.is_enabled("elicitation_v2") is True
     assert cfg.is_enabled("auto_associative_memory") is False
 
 
@@ -119,7 +119,7 @@ def test_build_agent_config_stringifies_non_string_values():
 
 
 def test_build_agent_config_rejects_non_mapping_feature_flags():
-    bad_payload = _minimal_data(feature_flags=["summarizer_v2", "auto_associative_memory"])
+    bad_payload = _minimal_data(feature_flags=["elicitation_v2", "auto_associative_memory"])
     with pytest.raises(ValueError, match="feature_flags must be a mapping"):
         build_agent_config(bad_payload)
 
@@ -151,7 +151,7 @@ def test_bedrock_json_forwards_feature_flags():
         "system_prompt": "hi",
         "reasoning_effort": "medium",
         "max_tokens": 16384,
-        "feature_flags": {"summarizer_v2": "on", "elicitation_v2": "off"},
+        "feature_flags": {"auto_associative_memory": "on", "elicitation_v2": "off"},
         "adapters": [
             {
                 "name": "Contacts",
@@ -168,9 +168,9 @@ def test_bedrock_json_forwards_feature_flags():
         ],
     }
     cfg = _config_from_bedrock_json(bedrock_payload)
-    assert cfg.feature_flags == {"summarizer_v2": "on", "elicitation_v2": "off"}
+    assert cfg.feature_flags == {"auto_associative_memory": "on", "elicitation_v2": "off"}
     assert cfg.max_tokens == 16384
-    assert cfg.is_enabled("summarizer_v2") is True
+    assert cfg.is_enabled("auto_associative_memory") is True
     assert cfg.is_enabled("elicitation_v2") is False
     # Sanity: tools still flattened.
     assert len(cfg.tools) == 1
@@ -178,22 +178,19 @@ def test_bedrock_json_forwards_feature_flags():
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility: legacy summarizer_v2 bool still works
+# Backward compatibility: legacy YAML keys are silently ignored
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_summarizer_v2_bool_still_loads():
-    """Existing YAML configs with ``summarizer_v2: true`` keep working."""
+def test_legacy_summarizer_v2_yaml_key_is_silently_ignored():
+    """Older agent YAMLs / Bedrock payloads still ship ``summarizer_v2: ...``
+    at the top level. The flag was removed when v1 became the only path, so
+    the loader must not raise -- it should drop the key and produce a usable
+    config. Locks in the contract so old YAMLs keep loading after the field
+    is gone from ``AgentConfig``."""
     cfg = build_agent_config(_minimal_data(summarizer_v2=True))
-    assert cfg.summarizer_v2 is True
-    # ``is_enabled`` only consults ``feature_flags`` — the legacy bool is
-    # honored separately by ``Harness.__init__``. Verify that here.
+    assert cfg.id == "agent-1"
+    # The flag is gone from AgentConfig entirely; ``is_enabled`` falls
+    # through to its "missing flag => off" branch.
     assert cfg.is_enabled("summarizer_v2") is False
-
-
-def test_feature_flags_and_legacy_bool_coexist():
-    cfg = build_agent_config(
-        _minimal_data(summarizer_v2=False, feature_flags={"summarizer_v2": "on"})
-    )
-    assert cfg.summarizer_v2 is False
-    assert cfg.is_enabled("summarizer_v2") is True
+    assert not hasattr(cfg, "summarizer_v2")
