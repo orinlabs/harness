@@ -45,6 +45,31 @@ def test_fresh_db_returns_system_and_empty_messages(memory_env):
     assert messages == []
 
 
+def test_log_messages_preserves_assistant_reasoning(memory_env):
+    """The message ledger stores full provider payloads, not replay-stripped copies."""
+    m = _make()
+    assistant = {
+        "role": "assistant",
+        "content": "Checking notifications.",
+        "reasoning": "I should inspect notifications before replying.",
+        "reasoning_details": [
+            {"type": "reasoning.text", "text": "I should inspect notifications before replying."},
+            {"type": "reasoning.text", "signature": "sig-abc"},
+        ],
+        "tool_calls": [
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {"name": "list_notifications", "arguments": "{}"},
+            }
+        ],
+    }
+    m.log_messages([assistant])
+
+    _, messages = m.build_llm_inputs("sys")
+    assert messages[0] == assistant
+
+
 def test_log_messages_persists_in_order(memory_env):
     m = _make()
     m.log_messages(

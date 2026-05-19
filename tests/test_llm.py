@@ -485,13 +485,8 @@ def test_drop_orphan_tool_messages_passthrough_when_paired():
     assert filtered == messages
 
 
-def test_prepare_replay_messages_preserves_reasoning_details_for_tool_replay():
-    """Signed reasoning_details are required for Anthropic tool continuations.
-
-    Top-level ``reasoning`` is trace output and should not be replayed, but
-    OpenRouter documents ``reasoning_details`` as the continuity mechanism for
-    reasoning models when a tool call pauses the response.
-    """
+def test_prepare_replay_messages_preserves_reasoning_for_tool_replay():
+    """Replay keeps full provider reasoning payloads for tool continuations."""
     from harness.core import llm
 
     messages = [
@@ -517,21 +512,7 @@ def test_prepare_replay_messages_preserves_reasoning_details_for_tool_replay():
 
     filtered = llm._prepare_replay_messages(messages)
 
-    assert filtered[1] == {
-        "role": "assistant",
-        "content": None,
-        "reasoning_details": [
-            {"type": "reasoning.text", "text": "I should inspect notifications."},
-            {"type": "reasoning.text", "signature": "provider-signature"},
-        ],
-        "tool_calls": [
-            {
-                "id": "toolu_123",
-                "type": "function",
-                "function": {"name": "list_notifications", "arguments": "{}"},
-            }
-        ],
-    }
+    assert filtered[1] == messages[1]
     assert filtered[2]["tool_call_id"] == "toolu_123"
 
 
@@ -572,8 +553,8 @@ def test_merge_streamed_reasoning_details_combines_text_with_signature():
     ]
 
 
-def test_prepare_replay_messages_strips_anthropic_thinking_content_blocks():
-    """Anthropic thinking blocks can also appear inside message content lists."""
+def test_prepare_replay_messages_preserves_anthropic_thinking_content_blocks():
+    """Anthropic thinking blocks inside message content are replayed verbatim."""
     from harness.core import llm
 
     messages = [
@@ -586,6 +567,4 @@ def test_prepare_replay_messages_strips_anthropic_thinking_content_blocks():
         }
     ]
 
-    assert llm._prepare_replay_messages(messages) == [
-        {"role": "assistant", "content": [{"type": "text", "text": "Visible answer"}]}
-    ]
+    assert llm._prepare_replay_messages(messages) == messages
