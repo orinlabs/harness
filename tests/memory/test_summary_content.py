@@ -7,6 +7,7 @@ import json
 from harness.memory.summary_content import (
     DEFAULT_MAX_SUMMARY_INPUT_CHARS,
     flatten_message_content,
+    message_body_for_summary,
     sanitize_messages_for_summary,
     sanitize_summary_input,
 )
@@ -21,6 +22,61 @@ def test_flatten_message_content_replaces_image_blocks():
         },
     ]
     assert flatten_message_content(content) == "Photo from site: [image attachment]"
+
+
+def test_message_body_for_summary_includes_top_level_reasoning():
+    msg = {
+        "role": "assistant",
+        "content": "Done.",
+        "reasoning": "I should check the inbox first.",
+    }
+    assert message_body_for_summary(msg) == (
+        "[reasoning] I should check the inbox first.\nDone."
+    )
+
+
+def test_message_body_for_summary_includes_reasoning_details_summaries():
+    """OpenAI encrypted reasoning often surfaces only via reasoning_details."""
+    msg = {
+        "role": "assistant",
+        "content": None,
+        "reasoning_details": [
+            {"type": "reasoning.summary", "summary": "Planned the tool call."},
+        ],
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "sleep", "arguments": "{}"},
+            }
+        ],
+    }
+    assert message_body_for_summary(msg) == "[reasoning] Planned the tool call."
+
+
+def test_message_body_for_summary_includes_thinking_content_blocks():
+    msg = {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "Work through the schedule."},
+            {"type": "text", "text": "Visible answer"},
+        ],
+    }
+    assert message_body_for_summary(msg) == "Work through the schedule. Visible answer"
+
+
+def test_sanitize_messages_for_summary_includes_reasoning_in_payload():
+    rendered = sanitize_messages_for_summary(
+        [
+            {
+                "role": "assistant",
+                "content": "Paris is the capital.",
+                "reasoning": "Recall geography facts.",
+            }
+        ]
+    )
+    assert "[reasoning] Recall geography facts." in rendered
+    assert "Paris is the capital." in rendered
 
 
 def test_sanitize_messages_for_summary_strips_large_image_payloads():

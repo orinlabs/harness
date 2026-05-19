@@ -439,8 +439,7 @@ class Harness:
         turn_span.set_metadata(usage=resp.usage.to_dict())
         self._accumulate_usage(resp.usage)
 
-        assistant_msg = llm._strip_provider_reasoning([resp.raw["choices"][0]["message"]])[0]
-        self.memory.log_messages([assistant_msg])
+        self.memory.log_messages([resp.raw["choices"][0]["message"]])
 
         logger.info(
             "turn %d dispatching %d tool_call(s): %s",

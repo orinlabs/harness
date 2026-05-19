@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from harness.core.llm import _parse_reasoning
+
 # Stay well under OpenRouter's 400k-token context ceiling once the
 # summarizer prompt wrapper is included. ~4 chars/token is conservative
 # for JSON-ish text; 300k chars ~= 75k tokens of payload.
@@ -33,11 +35,31 @@ def flatten_message_content(content: Any) -> str:
             parts.append(str(block.get("text") or ""))
         elif block_type == "image_url":
             parts.append("[image attachment]")
-        elif block_type in {"thinking", "redacted_thinking", "reasoning"}:
-            continue
+        elif block_type == "thinking":
+            thinking = block.get("thinking")
+            if isinstance(thinking, str) and thinking.strip():
+                parts.append(thinking.strip())
+        elif block_type == "redacted_thinking":
+            parts.append("[redacted thinking]")
+        elif block_type == "reasoning":
+            text = block.get("reasoning") or block.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
         else:
             parts.append(f"[{block_type or 'block'}]")
     return " ".join(part for part in parts if part)
+
+
+def message_body_for_summary(msg: dict[str, Any]) -> str:
+    """Plain-text body for one chat message, including model reasoning when present."""
+    parts: list[str] = []
+    reasoning = _parse_reasoning(msg)
+    if reasoning:
+        parts.append(f"[reasoning] {reasoning}")
+    content_text = flatten_message_content(msg.get("content"))
+    if content_text:
+        parts.append(content_text)
+    return "\n".join(parts)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -64,7 +86,7 @@ def sanitize_messages_for_summary(
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role") or "unknown")
-        body = _truncate(flatten_message_content(msg.get("content")), max_message_chars)
+        body = _truncate(message_body_for_summary(msg), max_message_chars)
         entry: dict[str, str] = {"role": role, "content": body}
         tool_call_id = msg.get("tool_call_id")
         if tool_call_id:
@@ -94,7 +116,11 @@ def sanitize_summary_input(
         except json.JSONDecodeError:
             pass
         else:
-            if isinstance(parsed, list) and parsed and all(isinstance(item, dict) for item in parsed):
+            if (
+                isinstance(parsed, list)
+                and parsed
+                and all(isinstance(item, dict) for item in parsed)
+            ):
                 return sanitize_messages_for_summary(
                     parsed,
                     max_chars=max_chars,

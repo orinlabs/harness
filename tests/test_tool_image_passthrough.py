@@ -232,6 +232,7 @@ class _FakeImageTool:
 
 
 def test_tool_emitted_images_reach_next_llm_turn(harness_storage, monkeypatch):
+    from harness.memory.summarizer import SummarizerUsage
     """End-to-end: a tool returns ``ToolResult.images``, the harness logs
     the followup user message, and the very next LLM call's messages
     include the image bytes as an OpenAI multipart ``image_url`` part.
@@ -264,6 +265,12 @@ def test_tool_emitted_images_reach_next_llm_turn(harness_storage, monkeypatch):
         ]
     )
     monkeypatch.setattr(llm_mod, "complete", recording)
+    # Summarizer also calls llm.complete; disable it so the recording only
+    # sees harness turn LLM calls.
+    monkeypatch.setattr(
+        "harness.memory.service.MemoryService.update_summaries",
+        lambda self, *, current_time=None: SummarizerUsage(),
+    )
 
     config = AgentConfig(
         id="agent-image-passthrough",

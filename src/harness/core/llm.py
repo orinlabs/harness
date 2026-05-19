@@ -766,54 +766,12 @@ def _parse_reasoning(msg: dict) -> str | None:
 
 
 def _prepare_replay_messages(messages: list[dict]) -> list[dict]:
-    """Return chat messages safe to replay into a new OpenRouter request."""
-    return _drop_orphan_tool_messages(_strip_provider_reasoning(messages))
+    """Return chat messages safe to replay into a new OpenRouter request.
 
-
-def _strip_provider_reasoning(messages: list[dict]) -> list[dict]:
-    """Remove non-replayable thinking fields from assistant messages.
-
-    ``reasoning`` is plaintext trace output, not chat history. Preserve
-    ``reasoning_details`` though: OpenRouter's tool-use guidance requires
-    replaying those signed blocks verbatim so Anthropic can continue thinking
-    after tool results.
+    Preserves provider reasoning fields (``reasoning``, ``reasoning_details``,
+    thinking content blocks) verbatim. Only drops orphan tool results.
     """
-    sanitized: list[dict] = []
-    dropped = 0
-
-    for msg in messages:
-        if not isinstance(msg, dict):
-            sanitized.append(msg)
-            continue
-
-        clean = dict(msg)
-        if "reasoning" in clean:
-            clean.pop("reasoning", None)
-            dropped += 1
-
-        content = clean.get("content")
-        if isinstance(content, list):
-            filtered_content = [
-                block
-                for block in content
-                if not (
-                    isinstance(block, dict)
-                    and block.get("type") in {"thinking", "redacted_thinking", "reasoning"}
-                )
-            ]
-            if len(filtered_content) != len(content):
-                clean["content"] = filtered_content
-                dropped += len(content) - len(filtered_content)
-
-        sanitized.append(clean)
-
-    if dropped:
-        logger.warning(
-            "Stripped %d provider reasoning field/block(s) from replay context",
-            dropped,
-        )
-
-    return sanitized
+    return _drop_orphan_tool_messages(messages)
 
 
 def _drop_orphan_tool_messages(messages: list[dict]) -> list[dict]:

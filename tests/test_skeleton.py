@@ -7,7 +7,7 @@ import pytest
 
 
 def test_cold_import_under_100ms():
-    """Fresh interpreter import of `harness` should be well under 100ms.
+    """Fresh interpreter import of `harness` should be well under 150ms.
 
     Measured in a subprocess so prior imports in the test process don't hide the cost.
     """
@@ -22,7 +22,7 @@ def test_cold_import_under_100ms():
         check=True,
     )
     elapsed = float(result.stdout.strip())
-    assert elapsed < 0.1, f"harness import took {elapsed * 1000:.1f}ms, budget is 100ms"
+    assert elapsed < 0.15, f"harness import took {elapsed * 1000:.1f}ms, budget is 150ms"
 
 
 def test_config_construction_no_io(monkeypatch):

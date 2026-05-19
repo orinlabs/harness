@@ -83,7 +83,10 @@ def test_five_minute_tier_strips_image_bytes_before_llm(storage_env):
 
     updater = SummaryUpdater(timezone_name="UTC", model="openai/gpt-5-nano")
 
-    with patch("harness.memory.summarizer.llm.complete", return_value=_fake_llm_response()) as mock_llm:
+    with patch(
+        "harness.memory.summarizer.llm.complete",
+        return_value=_fake_llm_response(),
+    ) as mock_llm:
         created = updater._update_five_minute_summaries(now)
 
     assert created
