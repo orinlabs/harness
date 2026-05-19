@@ -92,30 +92,15 @@ def _dt_to_ns(dt: datetime) -> int:
 class SummaryUpdater:
     """Run sync summarisation across the five tiers in order:
     5m -> hourly -> daily -> weekly -> monthly.
-
-    When ``v2=True``, the 5m tier is skipped too (raw messages fill
-    that window), summarization is deferred to end-of-run by the
-    caller (Harness), and the summarization prompt is constrained to
-    past-tense actions only -- no "waiting for X" / "pending Y"
-    state-describing phrasing that stale summaries were turning into
-    current-state assertions on the next run.
-
-    The v2 cascade still produces hourly, daily, weekly, monthly
-    summaries; it only changes where they are computed from (raw
-    messages instead of pre-aggregated 5m summaries) and what the
-    prompt allows them to say.
     """
 
     def __init__(
         self,
         timezone_name: str = "UTC",
         model: str = "openai/gpt-4o-mini",
-        *,
-        v2: bool = False,
     ):
         self.timezone_name = timezone_name
         self.model = model
-        self.v2 = v2
         self.total_usage = SummarizerUsage()
 
     def update_all(self, current_time: datetime | None = None) -> UpdateAllResult:
@@ -123,11 +108,7 @@ class SummaryUpdater:
             current_time = datetime.now().astimezone()
         self.total_usage = SummarizerUsage()
 
-        logger.info(
-            "summarizer.update_all: starting model=%s v2=%s",
-            self.model,
-            self.v2,
-        )
+        logger.info("summarizer.update_all: starting model=%s", self.model)
         existing_counts = self._count_existing_summaries()
         logger.info(
             "summarizer.update_all: sandbox already has messages=%d "
@@ -143,26 +124,15 @@ class SummaryUpdater:
         # text span. Per-tier work opens child `summarize_<tier>` spans
         # (only when there's pending work) and each LLM call opens an
         # `llm` span underneath. Nests under whatever span is active
-        # when `update_all` is called (usually `turn_N`, or `run_agent`
-        # for the v2 end-of-run path).
+        # when `update_all` is called (usually `turn_N`).
         with text_span(
             "memory_summarization",
             metadata={
                 "model": self.model,
-                "v2": self.v2,
                 "existing_counts": existing_counts,
             },
         ) as parent_span:
-            if self.v2:
-                # v2 skips the 5m tier entirely: raw messages fill
-                # that window. Hourly summaries are built directly
-                # from messages by ``_update_hourly_summaries`` when
-                # v2 is on (see the v2 branch inside that method for
-                # the raw-messages-source path). The remaining tiers
-                # roll up off completed hourly summaries as usual.
-                updated_5m: list = []
-            else:
-                updated_5m = self._update_five_minute_summaries(current_time)
+            updated_5m = self._update_five_minute_summaries(current_time)
             updated_hour = self._update_hourly_summaries(current_time)
             updated_day = self._update_daily_summaries(current_time)
             updated_week = self._update_weekly_summaries(current_time)
@@ -218,8 +188,7 @@ class SummaryUpdater:
     # removed (see migration 0002) because it was firing an LLM call per
     # completed minute even when nothing interesting happened, which
     # dominated per-turn cost on long-running agents. 5m is now the finest
-    # summary tier and reads the raw `messages` log directly -- same
-    # pattern `_update_hourly_summaries`'s v2 branch uses.
+    # summary tier and reads the raw `messages` log directly.
 
     def _update_five_minute_summaries(self, current_time: datetime) -> list[tuple]:
         assert storage.db is not None

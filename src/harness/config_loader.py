@@ -18,9 +18,7 @@ YAML schema (JSON is equivalent):
       ...
     reasoning_effort: medium  # optional
     max_tokens: 8192          # optional; recommended for Anthropic reasoning
-    summarizer_v2: false      # optional, legacy — prefer feature_flags below
     feature_flags:            # optional; per-agent overrides keyed by name
-      summarizer_v2: "on"
       auto_associative_memory: "off"
 
     tools:                    # flat list -- no adapter grouping
@@ -109,7 +107,6 @@ def build_agent_config(data: dict[str, Any]) -> AgentConfig:
         reasoning_effort=_opt_str(data.get("reasoning_effort")),
         max_tokens=_opt_int(data.get("max_tokens")),
         feature_flags=_feature_flags(data.get("feature_flags")),
-        summarizer_v2=bool(data.get("summarizer_v2", False)),
         tools=[_tool(t) for t in data.get("tools", []) or []],
     )
 

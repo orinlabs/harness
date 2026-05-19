@@ -127,7 +127,6 @@ model: claude-haiku-4-5
 system_prompt: |
   You are helpful.
 reasoning_effort: medium        # optional
-summarizer_v2: false            # optional
 
 tools:                          # flat list; no adapter grouping
   - name: get_forecast

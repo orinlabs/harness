@@ -125,14 +125,26 @@ class TestBuildImageFollowupMessage:
 
 @pytest.fixture
 def harness_storage(tmp_path, monkeypatch):
-    """Reset storage to a temp dir so the test owns its sqlite file."""
-    monkeypatch.setenv("HARNESS_STORAGE_ROOT", str(tmp_path))
+    """Reset storage to a temp dir so the test owns its sqlite file.
+
+    ``HARNESS_STORAGE_ROOT`` is not currently read by ``core.storage`` --
+    the module-level ``_STORAGE_ROOT`` is what matters. Monkeypatch it
+    directly so each test gets a fresh empty sqlite, otherwise the
+    in-loop per-turn ``update_summaries()`` can find completed buckets
+    left over from previous runs in ``~/.harness/agents`` and consume
+    LLM responses queued for this test's recording LLM.
+    """
     mig_dir = Path(__file__).parent.parent / "src/harness/memory/migrations"
     monkeypatch.setenv("HARNESS_MIGRATIONS_DIR", str(mig_dir))
     from harness.core import storage
 
     importlib.reload(storage)
+    monkeypatch.setattr(storage, "_STORAGE_ROOT", tmp_path)
     yield
+    try:
+        storage.close()
+    except Exception:
+        pass
 
 
 class _RecordingLLM:

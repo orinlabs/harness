@@ -190,18 +190,9 @@ class Harness:
             summary_model,
             config.model,
         )
-        # ``summarizer_v2`` may arrive from either source: the legacy
-        # explicit AgentConfig.summarizer_v2 bool (older YAMLs) or the
-        # generic feature_flags dict (Bedrock + new YAMLs). Either path
-        # turns the v2 path on; both off (the default) keeps the legacy
-        # cascade-summarizer behavior.
-        summarizer_v2_enabled = bool(getattr(config, "summarizer_v2", False)) or config.is_enabled(
-            "summarizer_v2"
-        )
         self.memory = MemoryService(
             agent_id=config.id,
             model=summary_model,
-            summarizer_v2=summarizer_v2_enabled,
         )
         # Per-run accumulator: totals (summed) + per-model breakdown (for the
         # run_agent span's final `usage.model_breakdown`).
@@ -220,7 +211,6 @@ class Harness:
     def run(self) -> None:
         set_agent_id(self.config.id)
         storage.load(self.config.id)
-        interrupted = False
         try:
             with text_span(
                 "run_agent",
@@ -240,13 +230,9 @@ class Harness:
                 except BaseException as exc:  # noqa: BLE001
                     # SystemExit (SIGTERM from a supervisor's /stop or a
                     # supersede), KeyboardInterrupt, and anything else
-                    # that isn't Exception. Flag the run so the finally
-                    # block can skip the end-of-run summarization (we
-                    # don't want to stretch shutdown with an LLM call)
-                    # and let the signal propagate. The outer finally
-                    # still flushes storage so messages written before
-                    # the interrupt are durable.
-                    interrupted = True
+                    # that isn't Exception. The outer finally still
+                    # flushes storage so messages written before the
+                    # interrupt are durable.
                     logger.warning(
                         "run_agent interrupted by %s (agent=%s, run=%s)",
                         type(exc).__name__,
@@ -285,40 +271,16 @@ class Harness:
                         list(self._model_breakdown.keys()),
                     )
         finally:
-            # v2 defers all summarization to end-of-run so the summary
-            # describes completed actions, not in-flight state. Skipped
-            # on the interrupted path -- SIGTERM should propagate
-            # without being stretched by an LLM call, and the
-            # platform-side wake-drain is the backstop for state the
-            # agent left pending. Wrapped in try so a summarization
-            # failure can never block the storage flush below.
-            if self.memory.summarizer_v2 and not interrupted:
-                try:
-                    self.memory.update_summaries()
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "End-of-run summarization failed for agent %s "
-                        "(run=%s) -- storage will still flush",
-                        self.config.id,
-                        self.ctx.run_id,
-                    )
             storage.flush()
             storage.close()
 
     def _step(self, turn_span) -> bool:
         """Run one turn. Return False if the loop should stop."""
         logger.info("turn %d start (run=%s)", self.ctx.turn, self.ctx.run_id)
-        # V1 rolls up any completed buckets into higher-tier summaries
-        # exactly once per turn, before building the LLM inputs. Skipped
-        # internally (no trace span emitted) when nothing is pending.
-        #
-        # V2 defers all summarization to end-of-run (see Harness.run's
-        # finally block). Rationale: mid-run state ("I am waiting for
-        # Mike's photo") routinely became a stale summary that a future
-        # run read as current state. End-of-run is the first moment
-        # where what happened is a stable fact.
-        if not self.memory.summarizer_v2:
-            self.memory.update_summaries()
+        # Roll up any completed buckets into higher-tier summaries once
+        # per turn, before building the LLM inputs. Skipped internally
+        # (no trace span emitted) when nothing is pending.
+        self.memory.update_summaries()
 
         system, messages = self.memory.build_llm_inputs(self.config.system_prompt)
         # Anthropic extended thinking is sensitive to the message tail. On
