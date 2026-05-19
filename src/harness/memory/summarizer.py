@@ -29,6 +29,7 @@ from harness.memory.bucketing import (
     last_completed_5m_end,
 )
 from harness.memory.marks import force_timezone, week_start_sunday
+from harness.memory.summary_content import sanitize_messages_for_summary
 from harness.memory.types import PERIOD_META, PeriodType
 
 logger = logging.getLogger(__name__)
@@ -276,7 +277,7 @@ class SummaryUpdater:
         for (date_key, hour_key, minute_key), bucket_messages in sorted(
             pending, key=lambda x: (x[0][0], x[0][1], x[0][2])
         ):
-            content = json.dumps(bucket_messages)
+            content = sanitize_messages_for_summary(bucket_messages)
             summary_text = self._create_summary(content=content, period_type=PeriodType.FIVE_MINUTE)
             if not summary_text or not summary_text.strip():
                 logger.error(
