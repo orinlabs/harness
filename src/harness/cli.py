@@ -20,6 +20,11 @@ Subcommands:
                                           # Auto-creates a dev agent on
                                           # Bedrock when no id is provided.
     harness reset-memory AGENT_ID         # Reset agent memory storage.
+    harness forget-memory AGENT_ID --minutes N
+                                          # Forget memory from the last N
+                                          # minutes (raw messages + the
+                                          # summary buckets covering them);
+                                          # older memory is preserved.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
 Environment is loaded from the first `.env` found by walking up from cwd
@@ -506,6 +511,38 @@ def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _cmd_forget_memory(args, parser: argparse.ArgumentParser) -> int:
+    _load_env()
+
+    if args.minutes <= 0:
+        parser.exit(2, "--minutes must be a positive integer\n")
+
+    from harness.core import storage
+    from harness.memory import forget_recent_minutes
+
+    # Open (or create) the agent DB before mutating it. A never-run agent
+    # yields an empty schema-applied DB, so the deletes are simply no-ops.
+    storage.load(args.agent_id)
+    try:
+        counts = forget_recent_minutes(args.minutes, timezone_name=args.timezone)
+    except (RuntimeError, ValueError) as e:
+        parser.exit(1, f"forget memory failed: {e}\n")
+    finally:
+        storage.flush()
+
+    logger.info(
+        "forget agent memory: id=%s minutes=%s deleted=%s",
+        args.agent_id,
+        args.minutes,
+        counts,
+    )
+    print(
+        f"forget agent memory: id={args.agent_id} minutes={args.minutes} deleted={counts}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argparse + entrypoint
 # ---------------------------------------------------------------------------
@@ -648,6 +685,35 @@ def main(argv: list[str] | None = None) -> int:
         help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
 
+    forget_p = subparsers.add_parser(
+        "forget-memory",
+        help="Forget the last N minutes of an agent's memory.",
+        description=(
+            "Delete raw messages logged in the last --minutes minutes plus "
+            "the tiered-summary buckets covering them. Memory older than the "
+            "cutoff is preserved; the summarizer rebuilds the boundary bucket "
+            "from any surviving messages on its next run."
+        ),
+    )
+    forget_p.add_argument("agent_id", help="Agent UUID to forget memory for.")
+    forget_p.add_argument(
+        "--minutes",
+        type=int,
+        required=True,
+        help="How many minutes of recent memory to forget (e.g. 30).",
+    )
+    forget_p.add_argument(
+        "--timezone",
+        default=os.environ.get("HARNESS_FORGET_TIMEZONE", "UTC"),
+        help="Timezone the summary buckets are keyed in (default: UTC, "
+        "matching the summarizer's production default).",
+    )
+    forget_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
+
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
@@ -663,6 +729,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_agent(args, agent_p)
     if args.command == "reset-memory":
         return _cmd_reset_memory(args, reset_p)
+    if args.command == "forget-memory":
+        return _cmd_forget_memory(args, forget_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval
