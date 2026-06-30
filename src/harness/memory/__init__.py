@@ -1,4 +1,5 @@
 from harness.memory.context import MemoryContextBuilder, MemoryData
+from harness.memory.forget import forget_recent_minutes, forget_since
 from harness.memory.sanitize import (
     SanitizationResult,
     sanitize_messages_for_summarization,
@@ -14,5 +15,7 @@ __all__ = [
     "PeriodType",
     "SanitizationResult",
     "SummaryUpdater",
+    "forget_recent_minutes",
+    "forget_since",
     "sanitize_messages_for_summarization",
 ]
