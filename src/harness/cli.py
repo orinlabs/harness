@@ -25,6 +25,11 @@ Subcommands:
                                           # minutes (raw messages + the
                                           # summary buckets covering them);
                                           # older memory is preserved.
+    harness export-memory AGENT_ID        # Print the agent's tiered memory
+                                          # summary block to stdout, wrapped
+                                          # in sentinel markers so callers
+                                          # can extract it from combined
+                                          # exec output.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
 
 Environment is loaded from the first `.env` found by walking up from cwd
@@ -543,6 +548,26 @@ def _cmd_forget_memory(args, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _cmd_export_memory(args, parser: argparse.ArgumentParser) -> int:
+    _load_env()
+
+    from harness.core import storage
+    from harness.memory import export_memory_context, wrap_export
+
+    # Open (or create) the agent DB. A never-run agent yields an empty
+    # schema-applied DB, so the export is simply an empty block.
+    storage.load(args.agent_id)
+    try:
+        rendered = export_memory_context(timezone_name=args.timezone)
+    except (RuntimeError, ValueError) as e:
+        parser.exit(1, f"export memory failed: {e}\n")
+
+    # Payload goes to stdout between sentinel markers. Everything else on
+    # the stream (log lines, etc.) is noise the consumer discards.
+    print(wrap_export(rendered), flush=True)
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argparse + entrypoint
 # ---------------------------------------------------------------------------
@@ -714,6 +739,28 @@ def main(argv: list[str] | None = None) -> int:
         help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
 
+    export_p = subparsers.add_parser(
+        "export-memory",
+        help="Print an agent's tiered memory summary block to stdout.",
+        description=(
+            "Render the agent's temporally tiered memory (monthly through "
+            "5-minute summaries, no raw messages) and print it to stdout "
+            "between sentinel marker lines. Consumers (e.g. Bedrock's voice "
+            "webhook) extract the text between the markers."
+        ),
+    )
+    export_p.add_argument("agent_id", help="Agent UUID to export memory for.")
+    export_p.add_argument(
+        "--timezone",
+        default=os.environ.get("HARNESS_TIMEZONE", "UTC"),
+        help="Timezone the summary buckets are keyed in (default: UTC).",
+    )
+    export_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
+
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
@@ -731,6 +778,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reset_memory(args, reset_p)
     if args.command == "forget-memory":
         return _cmd_forget_memory(args, forget_p)
+    if args.command == "export-memory":
+        return _cmd_export_memory(args, export_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval
