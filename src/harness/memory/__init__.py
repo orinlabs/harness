@@ -1,4 +1,10 @@
 from harness.memory.context import MemoryContextBuilder, MemoryData
+from harness.memory.export import (
+    EXPORT_BEGIN_MARKER,
+    EXPORT_END_MARKER,
+    export_memory_context,
+    wrap_export,
+)
 from harness.memory.forget import forget_recent_minutes, forget_since
 from harness.memory.sanitize import (
     SanitizationResult,
@@ -9,13 +15,17 @@ from harness.memory.summarizer import SummaryUpdater
 from harness.memory.types import PeriodType
 
 __all__ = [
+    "EXPORT_BEGIN_MARKER",
+    "EXPORT_END_MARKER",
     "MemoryContextBuilder",
     "MemoryData",
     "MemoryService",
     "PeriodType",
     "SanitizationResult",
     "SummaryUpdater",
+    "export_memory_context",
     "forget_recent_minutes",
     "forget_since",
     "sanitize_messages_for_summarization",
+    "wrap_export",
 ]
