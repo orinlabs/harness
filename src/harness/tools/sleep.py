@@ -78,6 +78,12 @@ class SleepTool:
                 )
             )
 
+        # Forward the sleep to the environment's listener (if one was
+        # registered) BEFORE handing lifecycle to the platform, so the
+        # environment can react -- e.g. advance a simulated clock to the wake
+        # time or schedule an earlier notification-driven wake.
+        _forward_sleep_to_env(ctx, until=until, reason=reason)
+
         if ctx.runtime is None:
             # Defensive: Harness always wires a runtime onto ctx. A missing
             # runtime means the caller built a RunContext by hand for a test
@@ -95,6 +101,36 @@ class SleepTool:
             ctx.runtime.sleep(ctx.agent_id, until=until, reason=reason)
         ctx.sleep_requested = True
         return ToolResult(text=f"Sleeping until {until}.")
+
+
+def _forward_sleep_to_env(ctx: RunContext, *, until: str, reason: str) -> None:
+    """Best-effort forward of a sleep call to the environment's listener.
+
+    Environments may register a config tool named ``sleep``; ``build_tool_map``
+    captures it onto ``ctx.env_sleep_tool`` (it is never model-visible). The
+    forward fires for every sleep -- finite or indefinite -- under every
+    runtime, mirroring how ``BedrockAgentRuntime`` notifies the platform. Any
+    failure is logged and swallowed: a broken listener must never wedge the
+    agent awake or crash the run.
+    """
+    tool = getattr(ctx, "env_sleep_tool", None)
+    if tool is None:
+        return
+    try:
+        result = tool.call({"until": until, "reason": reason}, ctx)
+        logger.info(
+            "sleep forwarded to env listener for agent=%s (until=%s): %s",
+            ctx.agent_id,
+            until,
+            (getattr(result, "text", "") or "")[:200],
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "env sleep listener failed for agent=%s (until=%s); sleeping anyway",
+            ctx.agent_id,
+            until,
+            exc_info=True,
+        )
 
 
 def _notifications_block_sleep(ctx: RunContext) -> str | None:

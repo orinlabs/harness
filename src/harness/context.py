@@ -34,3 +34,9 @@ class RunContext:
     # (currently just SleepTool) invoke them through here. Typed as Any to
     # avoid a context <-> core/runtime import cycle at dataclass-decoration time.
     runtime: Any = None
+    # The environment's optional sleep listener: a config tool named "sleep",
+    # captured by ``build_tool_map`` instead of colliding with the built-in.
+    # The built-in SleepTool forwards every sleep call here (best-effort) so
+    # the environment can react -- e.g. advance a simulated clock or schedule
+    # a wake. Never model-visible. Typed as Any to avoid an import cycle.
+    env_sleep_tool: Any = None

@@ -440,7 +440,7 @@ def test_build_tool_map_with_fakes_and_external_mix(agent_db):
         url="https://example.invalid/remote",
     )
 
-    tm = build_tool_map(
+    tm, _env_sleep = build_tool_map(
         [
             *FakeEmailAdapter.make_tools(),
             *TestContactsAdapter.make_tools(),

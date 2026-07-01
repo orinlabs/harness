@@ -166,10 +166,13 @@ class Harness:
         tracer.set_trace_sink(trace_sink)
 
         self.ctx = RunContext(agent_id=config.id, run_id=run_id, runtime=runtime)
-        self.tool_map: dict[str, Tool] = build_tool_map(config.tools)
+        self.tool_map, env_sleep = build_tool_map(config.tools)
         # Expose the tool map on the per-run context so built-in tools can
         # invoke siblings (e.g. sleep -> list_notifications pre-flight check).
         self.ctx.tool_map = self.tool_map
+        # The environment's optional sleep listener (a config tool named
+        # "sleep"); the built-in SleepTool forwards sleep calls to it.
+        self.ctx.env_sleep_tool = env_sleep
         logger.info(
             "Harness init: agent=%s run=%s tool_map has %d tool(s): %s",
             config.id,

@@ -312,19 +312,103 @@ def test_build_tool_map_merges_builtins_and_tools(fake_platform):
         url=f"{fake_platform.url}/fake_tools/search",
     )
 
-    tool_map = build_tool_map([spec])
+    tool_map, env_sleep = build_tool_map([spec])
     assert set(tool_map.keys()) == {"sleep", "search"}
+    assert env_sleep is None
 
 
 def test_build_tool_map_rejects_collision(fake_platform):
     from harness.tools import build_tool_map
 
-    bad = ExternalToolSpec(
+    dup = ExternalToolSpec(
+        name="search",
+        description="search",
+        parameters={"type": "object", "properties": {}},
+        url=f"{fake_platform.url}/fake_tools/search",
+    )
+
+    with pytest.raises(ValueError, match="collision"):
+        build_tool_map([dup, dup])
+
+
+# ---------------------------------------------------------------------------
+# Env sleep listener: a config tool named "sleep" is captured (not a
+# collision), stays out of the model-visible map, and the built-in SleepTool
+# forwards every sleep call to it before honoring the sleep.
+# ---------------------------------------------------------------------------
+
+
+def test_build_tool_map_captures_env_sleep_listener(fake_platform):
+    from harness.tools import build_tool_map
+    from harness.tools.external import ExternalTool
+
+    listener = ExternalToolSpec(
         name="sleep",
-        description="shadow",
+        description="env sleep listener",
         parameters={"type": "object", "properties": {}},
         url=f"{fake_platform.url}/fake_tools/sleep",
     )
 
-    with pytest.raises(ValueError, match="collision"):
-        build_tool_map([bad])
+    tool_map, env_sleep = build_tool_map([listener])
+    # The built-in keeps the model-visible slot; the listener is captured.
+    assert set(tool_map.keys()) == {"sleep"}
+    assert isinstance(env_sleep, ExternalTool)
+
+    with pytest.raises(ValueError, match="duplicate env sleep listener"):
+        build_tool_map([listener, listener])
+
+
+def test_sleep_forwards_to_env_listener(fake_platform):
+    from harness.tools.external import ExternalTool
+    from harness.tools.sleep import SleepTool
+
+    seen: list[dict] = []
+    fake_platform.register_tool(
+        "sleep", lambda args, env: (seen.append(args), {"text": "advanced to wake time"})[1]
+    )
+    listener = ExternalTool(
+        ExternalToolSpec(
+            name="sleep",
+            description="env sleep listener",
+            parameters={"type": "object", "properties": {}},
+            url=f"{fake_platform.url}/fake_tools/sleep",
+        )
+    )
+
+    ctx = _ctx()
+    ctx.tool_map = {}
+    ctx.env_sleep_tool = listener
+
+    result = SleepTool().call({"until": "2099-01-01T00:00:00Z", "reason": "batch done"}, ctx)
+
+    # Forward happened with the sleep args...
+    assert seen == [{"until": "2099-01-01T00:00:00Z", "reason": "batch done"}]
+    # ...and the sleep itself still proceeds (platform notified, run ends).
+    assert ctx.sleep_requested is True
+    assert "2099-01-01T00:00:00Z" in result.text
+    assert len(fake_platform.sleep_requests) == 1
+
+
+def test_sleep_survives_env_listener_failure(fake_platform):
+    from harness.tools.external import ExternalTool
+    from harness.tools.sleep import SleepTool
+
+    # Listener URL points nowhere routable -> the forward raises internally.
+    listener = ExternalTool(
+        ExternalToolSpec(
+            name="sleep",
+            description="broken env sleep listener",
+            parameters={"type": "object", "properties": {}},
+            url="http://127.0.0.1:9/fake_tools/sleep",
+        )
+    )
+
+    ctx = _ctx()
+    ctx.tool_map = {}
+    ctx.env_sleep_tool = listener
+
+    result = SleepTool().call({"until": "indefinite"}, ctx)
+
+    # A broken listener must never wedge the agent awake.
+    assert ctx.sleep_requested is True
+    assert "indefinite" in result.text
