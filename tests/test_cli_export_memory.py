@@ -152,3 +152,147 @@ def test_export_memory_cli_empty_agent_yields_empty_block(tmp_path, monkeypatch,
     out = capsys.readouterr().out
     payload = out.split(EXPORT_BEGIN_MARKER, 1)[1].split(EXPORT_END_MARKER, 1)[0]
     assert payload.strip() == ""
+
+
+def _seed_all_tiers(storage, agent_id: str, *, five_minute_pad: int = 300):
+    """Seed one row per coarse tier plus three 5-minute rows (oldest to
+    newest) with padded summaries so budget math has something to trim.
+
+    Window-compatible with now=2026-07-01T12:33Z, matching
+    ``test_export_memory_context_renders_all_tiers``.
+    """
+    conn = storage.load(agent_id)
+    for minute, label in ((0, "5m-old"), (5, "5m-mid"), (10, "5m-new")):
+        _insert(
+            conn,
+            "five_minute_summaries",
+            {
+                "date": "2026-07-01",
+                "hour": 12,
+                "minute": minute,
+                "summary": label + " " + "x" * five_minute_pad,
+                "message_count": 3,
+            },
+        )
+    _insert(
+        conn,
+        "hourly_summaries",
+        {"date": "2026-06-30", "hour": 5, "summary": "hourly tier row", "message_count": 10},
+    )
+    _insert(
+        conn,
+        "daily_summaries",
+        {"date": "2026-06-25", "summary": "daily tier row", "message_count": 40},
+    )
+    _insert(
+        conn,
+        "weekly_summaries",
+        {"week_start_date": "2026-05-31", "summary": "weekly tier row", "message_count": 200},
+    )
+    _insert(
+        conn,
+        "monthly_summaries",
+        {"year": 2026, "month": 3, "summary": "monthly tier row", "message_count": 900},
+    )
+    storage.flush()
+
+
+def test_export_max_tokens_drops_finest_tier_first(tmp_path, monkeypatch):
+    """A tight budget removes the whole 5-minute tier (header included)
+    before touching any coarser tier."""
+    storage = _fresh_storage(tmp_path, monkeypatch)
+    _seed_all_tiers(storage, "agent-budget-tiers")
+
+    rendered = export_memory_context(
+        timezone_name="UTC",
+        current_time=datetime(2026, 7, 1, 12, 33, tzinfo=UTC),
+        max_tokens=100,  # ~400 chars: forces all three padded 5m rows out
+    )
+
+    assert "monthly tier row" in rendered
+    assert "weekly tier row" in rendered
+    assert "daily tier row" in rendered
+    assert "hourly tier row" in rendered
+    assert "5m-" not in rendered
+    assert "=== 5-MINUTE SUMMARIES ===" not in rendered
+
+    storage.close()
+
+
+def test_export_max_tokens_trims_oldest_entries_within_tier(tmp_path, monkeypatch):
+    """Partial trims drop the oldest entries of the finest tier first,
+    keeping the freshest detail."""
+    storage = _fresh_storage(tmp_path, monkeypatch)
+    _seed_all_tiers(storage, "agent-budget-oldest")
+
+    rendered = export_memory_context(
+        timezone_name="UTC",
+        current_time=datetime(2026, 7, 1, 12, 33, tzinfo=UTC),
+        max_tokens=180,  # ~720 chars: room for one padded 5m row
+    )
+
+    assert "5m-new" in rendered
+    assert "5m-old" not in rendered
+    assert "monthly tier row" in rendered
+
+    storage.close()
+
+
+def test_export_without_max_tokens_is_unchanged(tmp_path, monkeypatch):
+    """Under-budget data (the default path) renders every tier untouched."""
+    storage = _fresh_storage(tmp_path, monkeypatch)
+    _seed_all_tiers(storage, "agent-budget-default")
+
+    kwargs = {
+        "timezone_name": "UTC",
+        "current_time": datetime(2026, 7, 1, 12, 33, tzinfo=UTC),
+    }
+    default_render = export_memory_context(**kwargs)
+    explicit_none = export_memory_context(**kwargs, max_tokens=None)
+
+    assert default_render == explicit_none
+    for label in ("5m-old", "5m-mid", "5m-new", "hourly", "daily", "weekly", "monthly"):
+        assert label in default_render
+
+    storage.close()
+
+
+def test_export_memory_cli_max_tokens_flag_reaches_renderer(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    storage = _fresh_storage(tmp_path, monkeypatch)
+    conn = storage.load("agent-cli-budget")
+    _insert(
+        conn,
+        "monthly_summaries",
+        {"year": 2020, "month": 1, "summary": "January 2020 things happened", "message_count": 5},
+    )
+    _insert(
+        conn,
+        "monthly_summaries",
+        {"year": 2020, "month": 2, "summary": "February 2020 things happened", "message_count": 5},
+    )
+    storage.flush()
+    storage.close()
+
+    from harness.cli import main
+
+    # ~80-char budget: fits the header plus one entry, so the oldest
+    # month is dropped and the newest survives.
+    assert (
+        main(
+            [
+                "export-memory",
+                "agent-cli-budget",
+                "--max-tokens",
+                "20",
+                "--log-level",
+                "ERROR",
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    payload = out.split(EXPORT_BEGIN_MARKER, 1)[1].split(EXPORT_END_MARKER, 1)[0]
+    assert "February 2020 things happened" in payload
+    assert "January 2020 things happened" not in payload

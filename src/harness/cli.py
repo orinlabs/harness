@@ -558,7 +558,10 @@ def _cmd_export_memory(args, parser: argparse.ArgumentParser) -> int:
     # schema-applied DB, so the export is simply an empty block.
     storage.load(args.agent_id)
     try:
-        rendered = export_memory_context(timezone_name=args.timezone)
+        rendered = export_memory_context(
+            timezone_name=args.timezone,
+            max_tokens=args.max_tokens,
+        )
     except (RuntimeError, ValueError) as e:
         parser.exit(1, f"export memory failed: {e}\n")
 
@@ -754,6 +757,16 @@ def main(argv: list[str] | None = None) -> int:
         "--timezone",
         default=os.environ.get("HARNESS_TIMEZONE", "UTC"),
         help="Timezone the summary buckets are keyed in (default: UTC).",
+    )
+    export_p.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Cap the rendered block at roughly this many tokens "
+            "(tier-aware: finest tiers are dropped first). Omit to keep "
+            "the renderer's default."
+        ),
     )
     export_p.add_argument(
         "--log-level",
