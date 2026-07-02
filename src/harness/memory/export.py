@@ -33,18 +33,26 @@ def export_memory_context(
     *,
     timezone_name: str = "UTC",
     current_time: datetime | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """Return the rendered tier-labeled summary block for the loaded agent.
 
     Requires ``storage.load(agent_id)`` to have been called. Returns ``""``
     when the agent has no summaries yet.
+
+    ``max_tokens`` optionally caps the rendered block (tier-aware trim,
+    finest tiers dropped first — see ``MemoryContextBuilder.render``).
+    ``None`` keeps the renderer's default, preserving existing behavior
+    for callers that don't budget.
     """
     if current_time is None:
         current_time = datetime.now(tz=UTC)
 
     builder = MemoryContextBuilder(timezone=timezone_name)
     data = builder.fetch_data(current_time, min_resolution=PeriodType.FIVE_MINUTE)
-    return builder.render(data)
+    if max_tokens is None:
+        return builder.render(data)
+    return builder.render(data, max_tokens=max_tokens)
 
 
 def wrap_export(rendered: str) -> str:

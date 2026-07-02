@@ -275,32 +275,44 @@ class MemoryContextBuilder:
     # ------------------------------------------------------------------
 
     def render(self, data: MemoryData, max_tokens: int = 50_000) -> str:
-        parts: list[str] = []
+        # Tiers in render order (coarsest first). Each is (header, entries)
+        # with entries oldest-first, matching fetch_data ordering.
+        tiers: list[tuple[str, list[str]]] = []
 
         if data.monthly_summaries:
-            parts.append("=== MONTHLY SUMMARIES ===")
-            for m in data.monthly_summaries:
-                parts.append(f"\n{m.year}-{m.month:02d}: {m.summary}")
+            tiers.append(
+                (
+                    "=== MONTHLY SUMMARIES ===",
+                    [f"\n{m.year}-{m.month:02d}: {m.summary}" for m in data.monthly_summaries],
+                )
+            )
 
         if data.weekly_summaries:
-            parts.append("\n\n=== RECENT WEEKLY SUMMARIES ===")
-            for w in data.weekly_summaries:
-                parts.append(f"\nWeek of {w.week_start_date}: {w.summary}")
+            tiers.append(
+                (
+                    "\n\n=== RECENT WEEKLY SUMMARIES ===",
+                    [f"\nWeek of {w.week_start_date}: {w.summary}" for w in data.weekly_summaries],
+                )
+            )
 
         if data.daily_summaries:
-            parts.append("\n\n=== RECENT DAILY SUMMARIES ===")
-            for d in data.daily_summaries:
-                parts.append(f"\n{d.date}: {d.summary}")
+            tiers.append(
+                (
+                    "\n\n=== RECENT DAILY SUMMARIES ===",
+                    [f"\n{d.date}: {d.summary}" for d in data.daily_summaries],
+                )
+            )
 
         if data.hourly_summaries:
-            parts.append("=== HOURLY SUMMARIES ===")
+            hourly_entries: list[str] = []
             for h in data.hourly_summaries:
                 dt = datetime.combine(h.date, time(h.hour, 0, 0))
                 dt = force_timezone(dt, self.timezone) + timedelta(minutes=self.time_offset)
-                parts.append(f"\n{dt.strftime('%H:%M:%S')}: {h.summary}")
+                hourly_entries.append(f"\n{dt.strftime('%H:%M:%S')}: {h.summary}")
+            tiers.append(("=== HOURLY SUMMARIES ===", hourly_entries))
 
         if data.five_minute_summaries:
-            parts.append("\n\n=== 5-MINUTE SUMMARIES ===")
+            five_min_entries: list[str] = []
             for s in data.five_minute_summaries:
                 start_dt = datetime.combine(s.date, time(s.hour, s.minute, 0))
                 start_dt = force_timezone(start_dt, self.timezone)
@@ -308,11 +320,42 @@ class MemoryContextBuilder:
                 if self.time_offset:
                     start_dt += timedelta(minutes=self.time_offset)
                     end_dt += timedelta(minutes=self.time_offset)
-                parts.append(
+                five_min_entries.append(
                     f"\n{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}: {s.summary}"
                 )
+            tiers.append(("\n\n=== 5-MINUTE SUMMARIES ===", five_min_entries))
 
+        self._trim_to_budget(tiers, max_tokens)
+
+        parts: list[str] = []
+        for header, entries in tiers:
+            parts.append(header)
+            parts.extend(entries)
         return "\n".join(parts) if parts else ""
+
+    @staticmethod
+    def _trim_to_budget(tiers: list[tuple[str, list[str]]], max_tokens: int) -> None:
+        """Trim rendered tiers in place to fit ``max_tokens``.
+
+        Tokens are approximated as 4 chars/token (no tokenizer dependency;
+        the consumers of this block budget conservatively). While over
+        budget, entries are dropped from the finest tier that still has
+        any (5-minute first, then hourly, daily, weekly, monthly),
+        oldest-first within a tier, so the long-horizon summaries and the
+        freshest fine-grained detail survive longest. A tier's header is
+        dropped along with its last entry.
+        """
+        budget_chars = max_tokens * 4
+        # +1 per part for the "\n" join separator; close enough at the
+        # boundary given the 4 chars/token approximation.
+        total = sum(len(header) + 1 + sum(len(e) + 1 for e in entries) for header, entries in tiers)
+        while total > budget_chars and tiers:
+            header, entries = tiers[-1]
+            if entries:
+                total -= len(entries.pop(0)) + 1
+            if not entries:
+                tiers.pop()
+                total -= len(header) + 1
 
 
 # ---------------------------------------------------------------------------
