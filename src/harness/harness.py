@@ -153,7 +153,8 @@ class Harness:
         # Pick defaults from the environment when the caller didn't pass
         # explicit dependencies. autoconfigure() returns Bedrock-backed
         # implementations when BEDROCK_URL + BEDROCK_TOKEN are set, else
-        # NullTraceSink + LocalAgentRuntime (standalone mode).
+        # StdoutTraceSink + LocalAgentRuntime (standalone mode).
+        # $HARNESS_TRACE_SINK / --trace-sink override the sink choice.
         if trace_sink is None or runtime is None:
             from harness.cloud.autoconfig import autoconfigure
 

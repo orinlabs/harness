@@ -443,6 +443,8 @@ def _build_agent_cmd(agent_id: str, run_id: str | None, args) -> list[str]:
         cmd += ["--bedrock-url", args.bedrock_url]
     elif getattr(args, "local", False):
         cmd += ["--local"]
+    if getattr(args, "trace_sink", None):
+        cmd += ["--trace-sink", args.trace_sink]
     if getattr(args, "model", None):
         cmd += ["--model", args.model]
     if getattr(args, "reasoning_effort", None):
@@ -642,6 +644,16 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         default=os.environ.get("LOG_LEVEL", "INFO"),
         help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
+    p.add_argument(
+        "--trace-sink",
+        choices=("bedrock", "stdout", "null"),
+        default=None,
+        help=(
+            "Where trace spans go. Defaults to automatic: bedrock when "
+            "BEDROCK_URL + BEDROCK_TOKEN are set, else stdout (machine-"
+            "readable @@trace lines). Overrides $HARNESS_TRACE_SINK."
+        ),
+    )
     p.add_argument("--model", default=None, help="Override the model.")
     p.add_argument(
         "--reasoning-effort",
@@ -836,6 +848,11 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.log_level)
     _activate_sim_clock(args, parser)
     _install_shutdown_handlers()
+
+    # Normalize --trace-sink onto env for downstream (autoconfigure reads
+    # $HARNESS_TRACE_SINK), same pattern as --bedrock-url -> $BEDROCK_URL.
+    if getattr(args, "trace_sink", None):
+        os.environ["HARNESS_TRACE_SINK"] = args.trace_sink
 
     if args.command == "boot":
         return _cmd_boot(args, boot_p)

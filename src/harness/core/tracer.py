@@ -7,7 +7,8 @@ on SIGTERM" registry.
 
 Module-level ``_sink`` is the currently-installed sink. It auto-populates on
 first use via ``harness.cloud.autoconfigure()`` (returns a Bedrock sink when
-the env is set, else ``NullTraceSink``). Callers that want explicit control
+the env is set, else ``StdoutTraceSink``; ``$HARNESS_TRACE_SINK`` overrides).
+Callers that want explicit control
 (most notably ``Harness.__init__`` when the user passed ``trace_sink=...``)
 call ``set_trace_sink(sink)`` before the first span opens.
 """
