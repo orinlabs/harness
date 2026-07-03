@@ -151,13 +151,33 @@ exits cleanly at the end of the current turn (the `SleepTool` sets
 `ctx.sleep_requested = True`), but nothing re-spawns the process at
 `until`. Use Bedrock mode when you need durable sleep/wake.
 
+### Tracing in standalone
+
+Without Bedrock env, spans go to the `StdoutTraceSink`: every trace/span
+lifecycle event is printed as one machine-readable line —
+
+```
+@@trace {"event": "open_span", "span_id": "...", "name": "turn_0", ...}
+```
+
+Same supervisor contract as the `@@sleep` sentinel: a parent process holding
+the stdout pipe can reconstruct the entire run (LLM requests/responses,
+thinking plaintext, tool args/results, timing, nesting via `parent_id`) from
+these lines alone. Without a supervisor they're inert log noise.
+
+Select a sink explicitly with `--trace-sink bedrock|stdout|null` (or
+`$HARNESS_TRACE_SINK`). `null` disables tracing entirely. The sink choice
+never affects the runtime: sleep/wake stays Bedrock-managed whenever the
+Bedrock env is set.
+
 ### Usage tracking in standalone
 
 Usage totals (tokens, cost, per-model breakdown) are computed per run. They
-only persist via the `TraceSink`:
+persist via the `TraceSink`:
 
 - With Bedrock configured, totals land on the `run_agent` trace metadata.
-- Without, they're logged to stderr at end-of-run and not persisted.
+- Standalone, they land on the `run_agent` / trace-close `@@trace` lines
+  (and are mirrored to the log at end-of-run).
 
 ## Use With Bedrock
 
@@ -278,7 +298,7 @@ src/harness/config_loader.py       Load AgentConfig from ./agents/<name>.yaml
 src/harness/core/llm.py            OpenRouter client
 src/harness/core/storage.py        Per-agent local sqlite (~/.harness/agents/)
 src/harness/core/tracer.py         Trace/span context manager; delegates HTTP to TraceSink
-src/harness/core/tracing.py        TraceSink protocol + NullTraceSink + InMemoryTraceSink
+src/harness/core/tracing.py        TraceSink protocol + Null/Stdout/InMemory sinks
 src/harness/core/runtime.py        AgentRuntime protocol + LocalAgentRuntime
 src/harness/cloud/autoconfig.py    Pick TraceSink + AgentRuntime from env
 src/harness/cloud/bedrock/         Bedrock integration (trace sink, runtime, config fetch)
