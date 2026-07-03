@@ -43,6 +43,8 @@ Optional:
     HARNESS_COMMIT_SHA    git SHA to check out before booting
     HARNESS_REPO_DIR      checkout path (default: /workspace/harness)
     GITHUB_TOKEN          private-repo fetch auth (used by `boot` only)
+    HARNESS_SIM_START_TIME  simulated start time (epoch seconds); all time
+                          reads become this moment + elapsed run time
     MODEL                 override the agent's configured model
     REASONING_EFFORT      override reasoning_effort (minimal|low|medium|high|xhigh)
     LOG_LEVEL             default: INFO
@@ -174,6 +176,40 @@ def _apply_bedrock_env(args) -> tuple[str | None, str | None]:
 
 def _bedrock_configured() -> bool:
     return bool(os.environ.get("BEDROCK_URL") and os.environ.get("BEDROCK_TOKEN"))
+
+
+def _activate_sim_clock(args, parser: argparse.ArgumentParser) -> None:
+    """Install the simulated clock offset if a start time was provided.
+
+    Precedence: ``--sim-start-time`` > ``$HARNESS_SIM_START_TIME`` > off.
+    Once set, every harness time read (memory timestamps, summarization
+    buckets, trace span times, ...) returns the given epoch plus real
+    elapsed run time. Runs before any subcommand body so nothing observes
+    wall-clock first.
+    """
+    _load_env()  # idempotent; needed here so a .env-provided fallback is visible
+    epoch = getattr(args, "sim_start_time", None)
+    if epoch is None:
+        raw = os.environ.get("HARNESS_SIM_START_TIME")
+        if not raw:
+            return
+        try:
+            epoch = float(raw)
+        except ValueError:
+            parser.exit(2, f"HARNESS_SIM_START_TIME must be epoch seconds, got {raw!r}\n")
+
+    from harness.core import clock
+
+    clock.set_start_epoch(epoch)
+    # Persist onto env so exec'd children (`boot` -> `agent`) inherit the
+    # same simulated start even when the flag isn't forwarded.
+    os.environ["HARNESS_SIM_START_TIME"] = str(epoch)
+    logger.info(
+        "simulated clock active: start=%s (epoch %s), offset=%s",
+        clock.now().isoformat(),
+        epoch,
+        clock.get_offset(),
+    )
 
 
 def _ensure_secrets_env(parser: argparse.ArgumentParser) -> None:
@@ -415,6 +451,8 @@ def _build_agent_cmd(agent_id: str, run_id: str | None, args) -> list[str]:
         cmd += ["--max-tokens", str(args.max_tokens)]
     if getattr(args, "log_level", None):
         cmd += ["--log-level", args.log_level]
+    if getattr(args, "sim_start_time", None) is not None:
+        cmd += ["--sim-start-time", str(args.sim_start_time)]
     return cmd
 
 
@@ -576,7 +614,20 @@ def _cmd_export_memory(args, parser: argparse.ArgumentParser) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _add_sim_clock_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--sim-start-time",
+        type=float,
+        default=None,
+        metavar="EPOCH",
+        help="Simulated start time as epoch seconds. Every harness time read "
+        "becomes this moment plus real elapsed run time. Falls back to "
+        "$HARNESS_SIM_START_TIME; omit both to use wall-clock.",
+    )
+
+
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
+    _add_sim_clock_flag(p)
     p.add_argument("--bedrock-url", default=None, help="Override $BEDROCK_URL (CLI wins).")
     p.add_argument(
         "--local", action="store_true", help="Sugar for --bedrock-url http://127.0.0.1:8000."
@@ -741,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("LOG_LEVEL", "INFO"),
         help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
+    _add_sim_clock_flag(forget_p)
 
     export_p = subparsers.add_parser(
         "export-memory",
@@ -773,6 +825,7 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("LOG_LEVEL", "INFO"),
         help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
+    _add_sim_clock_flag(export_p)
 
     eval_p = subparsers.add_parser("eval", help="Run a scenario eval end-to-end.")
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
@@ -781,6 +834,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _configure_logging(args.log_level)
+    _activate_sim_clock(args, parser)
     _install_shutdown_handlers()
 
     if args.command == "boot":

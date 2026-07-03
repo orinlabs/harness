@@ -17,12 +17,11 @@ import base64
 import json
 import logging
 import time
-from datetime import UTC, datetime
 
 from harness.config import AgentConfig
 from harness.constants import MAX_TURNS
 from harness.context import RunContext, set_agent_id
-from harness.core import llm, storage, tracer
+from harness.core import clock, llm, storage, tracer
 from harness.core.runtime import AgentRuntime
 from harness.core.tracer import (
     SpanType,
@@ -39,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
+    return clock.now_iso()
 
 
 # ---------------------------------------------------------------------------

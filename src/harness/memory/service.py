@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
-from harness.core import storage
+from harness.core import clock, storage
 from harness.memory.context import MemoryContextBuilder
 from harness.memory.summarizer import SummarizerUsage, SummaryUpdater
 
@@ -69,7 +68,7 @@ class MemoryService:
         if not messages:
             return
 
-        base_ts = ts_ns or time.time_ns()
+        base_ts = ts_ns or clock.time_ns()
         rows = []
         for i, msg in enumerate(messages):
             rows.append(
@@ -118,7 +117,7 @@ class MemoryService:
         """
         assert storage.db is not None
         if current_time is None:
-            current_time = datetime.now(tz=UTC)
+            current_time = clock.now()
 
         data = self._builder.fetch_data(current_time)
 

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from harness.core import llm, storage
+from harness.core import clock, llm, storage
 from harness.core.tracer import llm_span, text_span
 from harness.memory.bucketing import (
     floor_to_5_minutes,
@@ -105,7 +105,7 @@ class SummaryUpdater:
 
     def update_all(self, current_time: datetime | None = None) -> UpdateAllResult:
         if current_time is None:
-            current_time = datetime.now().astimezone()
+            current_time = clock.now().astimezone()
         self.total_usage = SummarizerUsage()
 
         logger.info("summarizer.update_all: starting model=%s", self.model)

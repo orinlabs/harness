@@ -20,8 +20,9 @@ extracts the text between them.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
+from harness.core import clock
 from harness.memory.context import MemoryContextBuilder
 from harness.memory.types import PeriodType
 
@@ -46,7 +47,7 @@ def export_memory_context(
     for callers that don't budget.
     """
     if current_time is None:
-        current_time = datetime.now(tz=UTC)
+        current_time = clock.now()
 
     builder = MemoryContextBuilder(timezone=timezone_name)
     data = builder.fetch_data(current_time, min_resolution=PeriodType.FIVE_MINUTE)

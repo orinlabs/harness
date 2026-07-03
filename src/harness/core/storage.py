@@ -32,9 +32,10 @@ import logging
 import os
 import re
 import sqlite3
-import time
 from pathlib import Path
 from typing import Any
+
+from harness.core import clock
 
 logger = logging.getLogger(__name__)
 
@@ -287,5 +288,5 @@ def _apply_migration(conn, name: str, sql: str) -> None:
     conn.executescript(sql)
     conn.execute(
         "INSERT INTO applied_migrations (name, applied_at_ns) VALUES (?, ?)",
-        (name, time.time_ns()),
+        (name, clock.time_ns()),
     )

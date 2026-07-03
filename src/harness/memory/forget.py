@@ -17,10 +17,9 @@ runs the summarizer with the default ``timezone_name="UTC"``.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 
-from harness.core import storage
+from harness.core import clock, storage
 from harness.memory.bucketing import floor_to_5_minutes, hour_start
 from harness.memory.marks import force_timezone, week_start_sunday
 
@@ -112,6 +111,6 @@ def forget_recent_minutes(
     """
     if minutes <= 0:
         raise ValueError(f"minutes must be positive, got {minutes}")
-    base = now_ns if now_ns is not None else time.time_ns()
+    base = now_ns if now_ns is not None else clock.time_ns()
     cutoff_ns = base - minutes * _NS_PER_MINUTE
     return forget_since(cutoff_ns, timezone_name=timezone_name)

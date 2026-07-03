@@ -19,10 +19,10 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from harness.core import clock
 from harness.core.tracing import TraceSink
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ def _reset_sink_for_tests() -> None:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
+    return clock.now_iso()
 
 
 def get_current_trace_id() -> str | None:
