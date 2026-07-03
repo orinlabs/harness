@@ -23,6 +23,21 @@ for _var in (
 
 
 @pytest.fixture(autouse=True)
+def _reset_sim_clock_between_tests():
+    """Clear the simulated-clock offset before and after every test.
+
+    The offset is a process-wide global (see ``harness.core.clock``); a test
+    that sets a simulated start time must not leak it into the next test's
+    timestamps.
+    """
+    from harness.core import clock
+
+    clock.reset()
+    yield
+    clock.reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_trace_sink_between_tests():
     """Force the tracer to re-pick its sink each test.
 

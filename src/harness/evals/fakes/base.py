@@ -16,12 +16,10 @@ Why a separate migration runner?
 
 from __future__ import annotations
 
-import time
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 
-from harness.core import storage
+from harness.core import clock, storage
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -61,7 +59,7 @@ def apply_migrations() -> None:
         db.executescript(path.read_text())
         db.execute(
             "INSERT INTO applied_migrations (name, applied_at_ns) VALUES (?, ?)",
-            (name, time.time_ns()),
+            (name, clock.time_ns()),
         )
 
 
@@ -71,8 +69,8 @@ def apply_migrations() -> None:
 
 
 def now_iso() -> str:
-    """Return the current time as an ISO-8601 UTC string (``...Z``)."""
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    """Return the current (simulated) time as an ISO-8601 UTC string (``...Z``)."""
+    return clock.now().isoformat().replace("+00:00", "Z")
 
 
 def new_id(prefix: str) -> str:

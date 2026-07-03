@@ -37,7 +37,7 @@ import logging
 import subprocess
 import time as wall_time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from harness.core.tracer import SpanType, emit_completed_span
@@ -197,10 +197,12 @@ class SimulationRunner:
         )
 
         # Bedrock used `timezone.now()` (Django-aware UTC). Harness uses
-        # plain UTC-aware datetimes.
-        from datetime import UTC
+        # plain UTC-aware datetimes. Read through the core clock so a
+        # `--sim-start-time` passed to `harness eval` anchors the scenario
+        # day instead of wall-clock "today".
+        from harness.core import clock as core_clock
 
-        sim_start = datetime.now(tz=UTC).replace(hour=8, minute=0, second=0, microsecond=0)
+        sim_start = core_clock.now().replace(hour=8, minute=0, second=0, microsecond=0)
 
         config_overrides = asdict(overrides)
         config_overrides["duration_days"] = sim_cls.duration_days

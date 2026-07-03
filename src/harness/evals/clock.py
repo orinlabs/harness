@@ -1,47 +1,36 @@
 """Offset-based simulated clock for eval runs.
 
-The clock stores a global offset (as a ``contextvars.ContextVar``) between
-wall-clock time and simulated time. Callers that need simulation-aware
-"now" should use ``SimulatedClock.now()`` or the module-level
-``_simulated_now`` helper. Between scheduled events the runner jumps
-forward via ``advance_to()``; during agent execution wall-clock ticks
-pass through naturally (a 45-second LLM call shows up as 45 simulated
-seconds).
+Thin wrapper around :mod:`harness.core.clock`, which owns the process-wide
+offset between wall-clock time and simulated time. Between scheduled events
+the runner jumps forward via ``advance_to()``; during agent execution
+wall-clock ticks pass through naturally (a 45-second LLM call shows up as
+45 simulated seconds).
 
-The bedrock version of this file monkey-patched ``django.utils.timezone.now``
-so that every call site in the Django codebase transparently saw
-simulated time. The harness has no analogous global "now" shim, so this
-module only exposes the offset — callers that care about simulated time
-explicitly route through ``SimulatedClock``. If we later add tool handlers
-that read wall-clock time directly, this module can grow a monkey-patch
-hook for that specific source.
+Because the offset lives in the core clock, *every* production call site
+that reads time through ``harness.core.clock`` (memory timestamps, the
+summarizer's "now", tracer span times, ...) transparently sees simulated
+time while a ``SimulatedClock`` is active -- no monkey-patching needed.
 """
 
 from __future__ import annotations
 
-import contextvars
 import logging
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
+
+from harness.core import clock as core_clock
 
 logger = logging.getLogger(__name__)
-
-_sim_clock_offset: contextvars.ContextVar[timedelta | None] = contextvars.ContextVar(
-    "sim_clock_offset", default=None
-)
 
 
 def _original_now() -> datetime:
     """Wall-clock now (UTC, timezone-aware)."""
-    return datetime.now(tz=UTC)
+    return core_clock.wall_now()
 
 
 def _simulated_now() -> datetime:
-    """Return wall-clock-plus-offset when inside a simulated clock context."""
-    offset = _sim_clock_offset.get()
-    if offset is None:
-        return _original_now()
-    return _original_now() + offset
+    """Return wall-clock-plus-offset (wall-clock when no offset is set)."""
+    return core_clock.now()
 
 
 class SimulatedClock:
@@ -51,13 +40,16 @@ class SimulatedClock:
         self.start_time = start_time
         self._base_wall_time = _original_now()
         self._base_sim_time = start_time
+        self._prior_offset = core_clock.get_offset()
 
     def activate(self):
-        offset = self._base_sim_time - self._base_wall_time
-        _sim_clock_offset.set(offset)
+        self._prior_offset = core_clock.get_offset()
+        core_clock.set_offset(self._base_sim_time - self._base_wall_time)
 
     def deactivate(self):
-        _sim_clock_offset.set(None)
+        # Restore whatever offset was active before (e.g. one installed by
+        # `--sim-start-time`) instead of unconditionally reverting to wall.
+        core_clock.set_offset(self._prior_offset)
 
     def advance_to(self, target_time: datetime) -> dict:
         """Jump simulated time forward to *target_time*.
@@ -69,7 +61,7 @@ class SimulatedClock:
         self._base_wall_time = wall_now
         self._base_sim_time = target_time
         offset = target_time - wall_now
-        _sim_clock_offset.set(offset)
+        core_clock.set_offset(offset)
 
         entry = {
             "event": "clock_advance",
@@ -82,10 +74,7 @@ class SimulatedClock:
         return entry
 
     def now(self) -> datetime:
-        offset = _sim_clock_offset.get()
-        if offset is None:
-            return _original_now()
-        return _original_now() + offset
+        return core_clock.now()
 
     @property
     def elapsed_sim_time(self) -> timedelta:
