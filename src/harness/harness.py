@@ -30,7 +30,7 @@ from harness.core.tracer import (
     text_span,
     tool_span,
 )
-from harness.core.tracing import NullTraceSink, TraceSink
+from harness.core.tracing import TraceSink
 from harness.memory import MemoryService
 from harness.tools import Tool, build_tool_map
 
@@ -416,13 +416,6 @@ class Harness:
                 bool(resp.reasoning),
                 len(resp.reasoning or ""),
             )
-            # A NullTraceSink (explicit --trace-sink null) drops every span
-            # on the floor, so mirror the reasoning plaintext to the logger —
-            # same reason run-level usage is mirrored in run(). Skipped for
-            # every other sink (stdout, bedrock) to avoid duplicating
-            # potentially long text in both the trace and the process logs.
-            if isinstance(self._trace_sink, NullTraceSink) and resp.reasoning:
-                logger.info("thinking (turn %d):\n%s", self.ctx.turn, resp.reasoning)
             emit_completed_span(
                 "thinking",
                 span_type=SpanType.TEXT,
