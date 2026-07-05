@@ -174,9 +174,7 @@ def _effective_max_tokens(*, model: str, max_tokens: int | None) -> int | None:
     return None
 
 
-def _anthropic_reasoning_max_tokens(
-    *, max_tokens: int, reasoning_effort: str | None
-) -> int | None:
+def _anthropic_reasoning_max_tokens(*, max_tokens: int, reasoning_effort: str | None) -> int | None:
     if reasoning_effort == "none":
         return None
     ratio = _REASONING_EFFORT_RATIOS.get(reasoning_effort or "medium")
