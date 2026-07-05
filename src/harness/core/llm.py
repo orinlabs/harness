@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,6 +25,26 @@ logger = logging.getLogger(__name__)
 
 _client: httpx.Client | None = None
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# --- transient-failure retry policy -----------------------------------------
+#
+# One flaky TLS read on a single OpenRouter call (e.g. `httpx.ReadError:
+# [SSL: SSLV3_ALERT_BAD_RECORD_MAC]`) used to crash the whole agent process,
+# and the supervising rollout runner scores the episode as-is. A
+# chat-completions POST is stateless and safely re-sendable, so transport
+# failures — including mid-stream ones, where we just discard partial SSE
+# output — get bounded retries with exponential backoff + jitter.
+#
+# Retried: the `httpx.TransportError` family (ReadError, ConnectError,
+# RemoteProtocolError, the timeout subclasses, ...) and HTTP 502/503/529 from
+# OpenRouter. Anything else (400/401/403/404/429, parse errors, ...) keeps
+# today's fail-fast behavior.
+_DEFAULT_LLM_RETRIES = 3  # override via HARNESS_LLM_RETRIES; 0 disables
+_RETRYABLE_STATUS_CODES = frozenset({502, 503, 529})
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_MAX_SECONDS = 10.0
+# Indirection so tests can observe/skip the waits without patching `time`.
+_sleep = time.sleep
 _DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
 _REASONING_EFFORT_RATIOS = {
     "xhigh": 0.95,
@@ -153,9 +174,7 @@ def _effective_max_tokens(*, model: str, max_tokens: int | None) -> int | None:
     return None
 
 
-def _anthropic_reasoning_max_tokens(
-    *, max_tokens: int, reasoning_effort: str | None
-) -> int | None:
+def _anthropic_reasoning_max_tokens(*, max_tokens: int, reasoning_effort: str | None) -> int | None:
     if reasoning_effort == "none":
         return None
     ratio = _REASONING_EFFORT_RATIOS.get(reasoning_effort or "medium")
@@ -249,6 +268,83 @@ def _build_chat_completion_body(
         reasoning_cfg["effort"] = reasoning_effort
     body["reasoning"] = reasoning_cfg
     return body
+
+
+def _max_retries() -> int:
+    """Number of *retries* (attempts beyond the first) for transient failures.
+
+    Reads ``HARNESS_LLM_RETRIES`` on every call so a supervisor can tune it
+    per-run; 0 disables retries entirely. Bad values fail loudly — a silently
+    misparsed retry budget would only surface mid-incident.
+    """
+    raw = os.environ.get("HARNESS_LLM_RETRIES")
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_LLM_RETRIES
+    try:
+        retries = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"HARNESS_LLM_RETRIES must be a non-negative integer, got {raw!r}"
+        ) from None
+    if retries < 0:
+        raise ValueError(f"HARNESS_LLM_RETRIES must be a non-negative integer, got {raw!r}")
+    return retries
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True only when re-sending the identical request is safe and likely to help.
+
+    - ``httpx.TransportError`` covers the whole flaky-network family:
+      ReadError/WriteError/ConnectError/RemoteProtocolError plus the timeout
+      subclasses (ConnectTimeout, ReadTimeout, PoolTimeout, ...).
+    - HTTP 502/503/529 are OpenRouter/upstream "temporarily unavailable"
+      responses. Other statuses (400/401/403/404/429) are deterministic or
+      quota-related and keep their fail-fast behavior.
+    """
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, OpenRouterError):
+        return exc.status_code in _RETRYABLE_STATUS_CODES
+    return False
+
+
+def _backoff_seconds(retry_number: int) -> float:
+    """Exponential backoff (~1s/4s/10s for retries 1/2/3) with ±25% jitter."""
+    base = min(_BACKOFF_BASE_SECONDS * (4 ** (retry_number - 1)), _BACKOFF_MAX_SECONDS)
+    return base * random.uniform(0.75, 1.25)
+
+
+def _request_with_retries(body: dict, *, timeout: httpx.Timeout, model: str) -> dict:
+    """Run `_stream_chat_completion` with bounded retries on transient failures.
+
+    The chat-completions POST is stateless, so a failed attempt — even one
+    that died mid-stream after partial SSE chunks — can be re-sent verbatim;
+    partial output is local to `_stream_chat_completion` and is discarded.
+    After the retry budget is exhausted the last exception propagates
+    unchanged, so callers see exactly the error they would have seen without
+    retries.
+    """
+    retries = _max_retries()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return _stream_chat_completion(body, timeout=timeout, model=model)
+        except Exception as e:
+            if attempt > retries or not _is_retryable(e):
+                raise
+            wait = _backoff_seconds(attempt)
+            logger.warning(
+                "openrouter transient failure on attempt %d/%d, retrying in %.1fs "
+                "(%s: %s) model=%s",
+                attempt,
+                retries + 1,
+                wait,
+                type(e).__name__,
+                e,
+                model,
+            )
+            _sleep(wait)
 
 
 def _http() -> httpx.Client:
@@ -422,7 +518,7 @@ def complete(
     )
     t0 = time.monotonic()
     try:
-        data = _stream_chat_completion(body, timeout=timeout, model=model)
+        data = _request_with_retries(body, timeout=timeout, model=model)
     except httpx.TimeoutException as e:
         logger.error(
             "openrouter POST timeout after %.2fs model=%s (%s: %s)",
