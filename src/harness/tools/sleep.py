@@ -47,7 +47,6 @@ class SleepTool:
                 "type": "string",
                 "description": (
                     'ISO-8601 timestamp (e.g. "2099-01-01T09:00:00") when you should wake up. '
-                    "Use your configured local timezone when you have one; otherwise use UTC. "
                     'or the string "indefinite" if you should only be woken by an external event.'
                 ),
             },
