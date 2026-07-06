@@ -200,6 +200,7 @@ def test_build_agent_cmd_forwards_all_flags():
         reasoning_effort="medium",
         max_tokens=8192,
         log_level="DEBUG",
+        max_utc_sleep="2026-07-07T06:00:00Z",
     )
     cmd = _build_agent_cmd("agent-xyz", run_id="run-abc", args=args)
 
@@ -224,6 +225,8 @@ def test_build_agent_cmd_forwards_all_flags():
         "8192",
         "--log-level",
         "DEBUG",
+        "--max-utc-sleep",
+        "2026-07-07T06:00:00Z",
     ]
 
 
@@ -268,6 +271,40 @@ def test_cmd_boot_errors_when_agent_id_missing(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         main(["boot"])
     assert excinfo.value.code == 2
+
+
+def test_max_utc_sleep_invalid_value_exits_2(monkeypatch, tmp_path, capsys):
+    """A malformed --max-utc-sleep must fail the invocation up front, not
+    mid-run when the agent first tries to sleep."""
+    monkeypatch.setenv("HARNESS_AGENT_ID", "agent-test")
+    monkeypatch.setenv("HARNESS_REPO_DIR", str(tmp_path))
+
+    from harness.cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["boot", "--max-utc-sleep", "not-a-time", "--log-level", "ERROR"])
+    assert excinfo.value.code == 2
+    assert "--max-utc-sleep" in capsys.readouterr().err
+
+
+def test_max_utc_sleep_does_not_use_env_fallback(monkeypatch, tmp_path):
+    """The cap is only active when --max-utc-sleep is passed; a stale env var
+    should not enable or override it."""
+    import os
+
+    monkeypatch.setenv("HARNESS_MAX_UTC_SLEEP", "stale-value")
+    monkeypatch.setenv("HARNESS_AGENT_ID", "agent-test")
+    not_a_repo = tmp_path / "blank"
+    not_a_repo.mkdir()
+    monkeypatch.setenv("HARNESS_REPO_DIR", str(not_a_repo))
+
+    from harness.cli import main
+
+    # boot itself exits 1 (not a git checkout) -- by then the CLI validation
+    # path has run. The stale env var should still be untouched.
+    with pytest.raises(SystemExit):
+        main(["boot", "--max-utc-sleep", "2026-07-07T06:00:00Z", "--log-level", "ERROR"])
+    assert os.environ["HARNESS_MAX_UTC_SLEEP"] == "stale-value"
 
 
 def test_cmd_boot_errors_when_repo_dir_is_not_a_git_checkout(monkeypatch, tmp_path, capsys):

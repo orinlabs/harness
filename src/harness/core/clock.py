@@ -82,3 +82,16 @@ def set_start_epoch(epoch_seconds: float) -> None:
 def reset() -> None:
     """Clear the offset (back to wall-clock). Used by teardown paths/tests."""
     set_offset(timedelta(0))
+
+
+def parse_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp into an aware UTC datetime.
+
+    Accepts a trailing ``Z`` and any explicit offset (normalized to UTC).
+    Naive timestamps are assumed to already be UTC. Raises ``ValueError``
+    on anything ``datetime.fromisoformat`` can't parse.
+    """
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)

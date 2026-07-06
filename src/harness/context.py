@@ -1,5 +1,6 @@
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 _agent_id: ContextVar[str | None] = ContextVar("harness_agent_id", default=None)
@@ -34,3 +35,12 @@ class RunContext:
     # (currently just SleepTool) invoke them through here. Typed as Any to
     # avoid a context <-> core/runtime import cycle at dataclass-decoration time.
     runtime: Any = None
+    # Hard cap on how far into the future the agent may sleep (aware UTC
+    # datetime). Populated by Harness.__init__ from --max-utc-sleep.
+    # SleepTool clamps any later (or "indefinite") sleep request down to
+    # this moment. None means uncapped.
+    max_sleep_until: datetime | None = None
+    # Agent-local timezone name (e.g. "America/Los_Angeles"). SleepTool
+    # treats naive sleep timestamps as local to this zone and keeps
+    # user-facing sleep/clamp messages in this zone. None means UTC.
+    timezone_name: str | None = None

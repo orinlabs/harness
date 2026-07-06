@@ -455,6 +455,8 @@ def _build_agent_cmd(agent_id: str, run_id: str | None, args) -> list[str]:
         cmd += ["--log-level", args.log_level]
     if getattr(args, "sim_start_time", None) is not None:
         cmd += ["--sim-start-time", str(args.sim_start_time)]
+    if getattr(args, "max_utc_sleep", None):
+        cmd += ["--max-utc-sleep", args.max_utc_sleep]
     return cmd
 
 
@@ -523,7 +525,7 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
     run_id = args.run_id or str(uuid.uuid4())
     logger.info("starting harness run agent=%s run=%s", agent_id, run_id)
     try:
-        Harness(config, run_id=run_id).run()
+        Harness(config, run_id=run_id, max_sleep_until=args.max_utc_sleep).run()
     except KeyboardInterrupt:
         logger.warning("harness run interrupted agent=%s run=%s", agent_id, run_id)
         return 130
@@ -675,6 +677,16 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         help="Optional AgentTemplate uuid-or-name to base auto-created "
         "agents on. Omit to create a templateless agent (Bedrock "
         "infers organization from $BEDROCK_TOKEN).",
+    )
+    p.add_argument(
+        "--max-utc-sleep",
+        default=None,
+        metavar="ISO8601",
+        help=(
+            "Hard cap on how far into the future the agent may sleep "
+            '(e.g. "2026-07-07T06:00:00Z"). Sleep requests past this '
+            "moment (including indefinite) are clamped to it. Omit for no cap."
+        ),
     )
 
 
@@ -853,6 +865,20 @@ def main(argv: list[str] | None = None) -> int:
     # $HARNESS_TRACE_SINK), same pattern as --bedrock-url -> $BEDROCK_URL.
     if getattr(args, "trace_sink", None):
         os.environ["HARNESS_TRACE_SINK"] = args.trace_sink
+
+    # Validate eagerly so a malformed cap fails the invocation up front rather
+    # than mid-run when the agent first tries to sleep.
+    if getattr(args, "max_utc_sleep", None):
+        from harness.core import clock
+
+        try:
+            clock.parse_utc(args.max_utc_sleep)
+        except ValueError:
+            parser.exit(
+                2,
+                f"--max-utc-sleep must be an ISO-8601 timestamp "
+                f"(e.g. 2026-07-07T06:00:00Z), got {args.max_utc_sleep!r}\n",
+            )
 
     if args.command == "boot":
         return _cmd_boot(args, boot_p)

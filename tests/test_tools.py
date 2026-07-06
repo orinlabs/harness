@@ -190,6 +190,163 @@ def test_sleep_tool_posts_and_flags_ctx(fake_platform):
     assert sr["reason"] == "done"
 
 
+def test_sleep_tool_converts_agent_local_time_to_utc_for_runtime(fake_platform):
+    """When an agent has a timezone, a naive ISO timestamp is agent-local.
+    The runtime receives UTC, while the agent sees local time in the response."""
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.timezone_name = "America/Los_Angeles"
+
+    result = SleepTool().call({"until": "2030-01-01T00:30:00", "reason": "done"}, ctx)
+
+    [sr] = fake_platform.sleep_requests
+    assert sr["until"] == "2030-01-01T08:30:00Z"
+    assert result.text == "Sleeping until 2030-01-01T00:30:00-08:00."
+
+
+def test_sleep_tool_clamps_until_past_max(fake_platform):
+    """A wake time past ctx.max_sleep_until is capped: the platform gets the
+    capped timestamp and the model is told its request was clamped."""
+    from datetime import UTC, datetime
+
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.max_sleep_until = datetime(2030, 1, 1, tzinfo=UTC)
+
+    result = SleepTool().call({"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx)
+
+    assert ctx.sleep_requested is True
+    assert "2030-01-01T00:00:00Z" in result.text
+    assert "capped" in result.text
+    [sr] = fake_platform.sleep_requests
+    assert sr["until"] == "2030-01-01T00:00:00Z"
+
+
+def test_sleep_tool_reports_clamp_in_agent_local_timezone(fake_platform):
+    """The cap is UTC for Bedrock, but clamp feedback to the model stays in
+    the agent's local timezone."""
+    from datetime import UTC, datetime
+
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.timezone_name = "America/Los_Angeles"
+    ctx.max_sleep_until = datetime(2030, 1, 1, 8, tzinfo=UTC)
+
+    result = SleepTool().call({"until": "2030-01-01T00:30:00", "reason": "done"}, ctx)
+
+    [sr] = fake_platform.sleep_requests
+    assert sr["until"] == "2030-01-01T08:00:00Z"
+    assert "2030-01-01T00:00:00-08:00" in result.text
+    assert "Z" not in result.text
+
+
+def test_sleep_tool_clamps_indefinite_to_max(fake_platform):
+    """ "indefinite" would sleep past any cap, so it's clamped to the cap."""
+    from datetime import UTC, datetime
+
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.max_sleep_until = datetime(2030, 6, 15, 12, 30, tzinfo=UTC)
+
+    result = SleepTool().call({"until": "indefinite"}, ctx)
+
+    assert ctx.sleep_requested is True
+    [sr] = fake_platform.sleep_requests
+    assert sr["until"] == "2030-06-15T12:30:00Z"
+    assert "2030-06-15T12:30:00Z" in result.text
+
+
+def test_sleep_tool_leaves_until_within_max(fake_platform):
+    """A wake time at or before the cap passes through byte-for-byte."""
+    from datetime import UTC, datetime
+
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.max_sleep_until = datetime(2099, 6, 1, tzinfo=UTC)
+
+    result = SleepTool().call({"until": "2099-01-01T00:00:00Z", "reason": "done"}, ctx)
+
+    assert result.text == "Sleeping until 2099-01-01T00:00:00Z."
+    [sr] = fake_platform.sleep_requests
+    assert sr["until"] == "2099-01-01T00:00:00Z"
+
+
+def test_sleep_tool_clamps_unparseable_until_when_capped(fake_platform):
+    """The cap is a hard guarantee: an until we can't parse (and therefore
+    can't prove is within bounds) gets the capped wake time."""
+    from datetime import UTC, datetime
+
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    ctx.max_sleep_until = datetime(2030, 1, 1, tzinfo=UTC)
+
+    SleepTool().call({"until": "next tuesday-ish"}, ctx)
+
+    [sr] = fake_platform.sleep_requests
+    assert sr["until"] == "2030-01-01T00:00:00Z"
+
+
+def test_sleep_tool_uncapped_without_max(fake_platform):
+    """No cap configured: even "indefinite" goes through untouched (this is
+    the pre-existing default, exercised explicitly)."""
+    from harness.tools.sleep import SleepTool
+
+    ctx = _ctx(agent_id="agent-7", run_id="run-x")
+    assert ctx.max_sleep_until is None
+
+    SleepTool().call({"until": "indefinite"}, ctx)
+
+    [sr] = fake_platform.sleep_requests
+    assert sr["until"] == "indefinite"
+
+
+def test_resolve_max_sleep_until_precedence_and_validation(monkeypatch):
+    """Harness only applies an explicit sleep cap; no env fallback. It
+    normalizes to aware UTC and fails loudly on garbage."""
+    from datetime import UTC, datetime
+
+    from harness.harness import _resolve_max_sleep_until
+
+    monkeypatch.delenv("HARNESS_MAX_UTC_SLEEP", raising=False)
+    assert _resolve_max_sleep_until(None) is None
+
+    monkeypatch.setenv("HARNESS_MAX_UTC_SLEEP", "2026-07-07T06:00:00Z")
+    assert _resolve_max_sleep_until(None) is None
+
+    # Explicit args are honored; non-UTC offsets normalize to UTC.
+    assert _resolve_max_sleep_until("2027-01-01T00:00:00+02:00") == datetime(
+        2026, 12, 31, 22, tzinfo=UTC
+    )
+
+    with pytest.raises(ValueError, match="ISO-8601"):
+        _resolve_max_sleep_until("garbage")
+
+
+def test_agent_config_parses_timezone_and_harness_validates_it():
+    from harness.config_loader import build_agent_config
+    from harness.harness import _validate_timezone_name
+
+    cfg = build_agent_config(
+        {
+            "id": "agent-1",
+            "model": "openai/gpt-4o-mini",
+            "system_prompt": "test",
+            "timezone": "America/Los_Angeles",
+        }
+    )
+
+    assert cfg.timezone == "America/Los_Angeles"
+    assert _validate_timezone_name(cfg.timezone) == "America/Los_Angeles"
+    with pytest.raises(ValueError, match="timezone"):
+        _validate_timezone_name("Mars/Base")
+
+
 def test_sleep_tool_allows_sleep_when_no_notifications(fake_platform):
     """list_notifications returning its empty-inbox string must NOT block sleep."""
     from harness.tools.external import ExternalTool

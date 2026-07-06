@@ -16,6 +16,9 @@ notifications API client.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from harness.context import RunContext
 from harness.tools.base import ToolResult, ToolSchema
@@ -43,7 +46,7 @@ class SleepTool:
             "until": {
                 "type": "string",
                 "description": (
-                    'ISO-8601 timestamp (e.g. "2099-01-01T00:00:00Z") when you should wake up, '
+                    'ISO-8601 timestamp (e.g. "2099-01-01T09:00:00") when you should wake up. '
                     'or the string "indefinite" if you should only be woken by an external event.'
                 ),
             },
@@ -62,6 +65,12 @@ class SleepTool:
     def call(self, args: dict, ctx: RunContext) -> ToolResult:
         until = str(args.get("until") or "indefinite")
         reason = str(args.get("reason") or "")
+
+        schedule = _resolve_sleep_schedule(
+            until,
+            max_until_utc=ctx.max_sleep_until,
+            timezone_name=ctx.timezone_name,
+        )
 
         blocked = _notifications_block_sleep(ctx)
         if blocked is not None:
@@ -89,12 +98,108 @@ class SleepTool:
                 "SleepTool called without ctx.runtime; treating as local no-op "
                 "(agent=%s, until=%s)",
                 ctx.agent_id,
-                until,
+                schedule.runtime_until,
             )
         else:
-            ctx.runtime.sleep(ctx.agent_id, until=until, reason=reason)
+            ctx.runtime.sleep(ctx.agent_id, until=schedule.runtime_until, reason=reason)
         ctx.sleep_requested = True
-        return ToolResult(text=f"Sleeping until {until}.")
+        if schedule.clamped:
+            logger.info(
+                "sleep clamped for agent=%s: requested until=%s, capped at %s",
+                ctx.agent_id,
+                until,
+                schedule.runtime_until,
+            )
+            return ToolResult(
+                text=(
+                    f"Sleeping until {schedule.display_until}. (Your requested wake time of "
+                    f"{until!r} was past the platform-enforced maximum, "
+                    f"so it was capped at {schedule.display_until}.)"
+                )
+            )
+        return ToolResult(text=f"Sleeping until {schedule.display_until}.")
+
+
+@dataclass(frozen=True)
+class _SleepSchedule:
+    runtime_until: str
+    display_until: str
+    clamped: bool
+
+
+def _resolve_sleep_schedule(
+    until: str,
+    *,
+    max_until_utc: datetime | None,
+    timezone_name: str | None,
+) -> _SleepSchedule:
+    """Convert the agent-local wake time to UTC and apply an optional cap.
+
+    ``runtime_until`` is what goes to Bedrock/local runtime (always UTC for
+    timestamp sleeps). ``display_until`` is what the agent sees back. When
+    the agent has a configured timezone, naive timestamps are interpreted
+    in that zone and display text stays in that zone; otherwise UTC is used.
+    """
+    if until == "indefinite":
+        if max_until_utc is None:
+            return _SleepSchedule("indefinite", "indefinite", clamped=False)
+        return _SleepSchedule(
+            _format_utc(max_until_utc),
+            _format_for_agent(max_until_utc, timezone_name),
+            clamped=True,
+        )
+
+    requested_utc: datetime | None = None
+    try:
+        requested_utc = _parse_agent_timestamp(until, timezone_name)
+    except ValueError:
+        if max_until_utc is None:
+            logger.warning(
+                "sleep until=%r is not parseable ISO-8601; passing through without cap",
+                until,
+            )
+            return _SleepSchedule(until, until, clamped=False)
+        logger.warning(
+            "sleep until=%r is not parseable ISO-8601; clamping to max %s",
+            until,
+            max_until_utc,
+        )
+
+    if requested_utc is None or (max_until_utc is not None and requested_utc > max_until_utc):
+        assert max_until_utc is not None
+        return _SleepSchedule(
+            _format_utc(max_until_utc),
+            _format_for_agent(max_until_utc, timezone_name),
+            clamped=True,
+        )
+
+    return _SleepSchedule(
+        _format_utc(requested_utc),
+        _format_for_agent(requested_utc, timezone_name),
+        clamped=False,
+    )
+
+
+def _parse_agent_timestamp(value: str, timezone_name: str | None) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_agent_tz(timezone_name))
+    return dt.astimezone(UTC)
+
+
+def _agent_tz(timezone_name: str | None):
+    return ZoneInfo(timezone_name) if timezone_name else UTC
+
+
+def _format_utc(dt: datetime) -> str:
+    """Render an aware datetime as UTC ISO-8601 with a ``Z`` suffix."""
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _format_for_agent(dt: datetime, timezone_name: str | None) -> str:
+    if timezone_name:
+        return dt.astimezone(_agent_tz(timezone_name)).isoformat()
+    return _format_utc(dt)
 
 
 def _notifications_block_sleep(ctx: RunContext) -> str | None:

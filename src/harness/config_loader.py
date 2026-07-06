@@ -18,6 +18,7 @@ YAML schema (JSON is equivalent):
       ...
     reasoning_effort: medium  # optional
     max_tokens: 8192          # optional; recommended for Anthropic reasoning
+    timezone: America/Los_Angeles  # optional; agent-local timezone for user-visible times
     feature_flags:            # optional; per-agent overrides keyed by name
       auto_associative_memory: "off"
 
@@ -106,6 +107,7 @@ def build_agent_config(data: dict[str, Any]) -> AgentConfig:
         system_prompt=str(data["system_prompt"]),
         reasoning_effort=_opt_str(data.get("reasoning_effort")),
         max_tokens=_opt_int(data.get("max_tokens")),
+        timezone=_opt_str(data.get("timezone") or data.get("time_zone")),
         feature_flags=_feature_flags(data.get("feature_flags")),
         tools=[_tool(t) for t in data.get("tools", []) or []],
     )
