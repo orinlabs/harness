@@ -17,6 +17,8 @@ import base64
 import json
 import logging
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from harness.config import AgentConfig
 from harness.constants import MAX_TURNS
@@ -88,18 +90,12 @@ def _sniff_image_mime(image_bytes: bytes) -> str:
     if image_bytes.startswith(_GIF87A) or image_bytes.startswith(_GIF89A):
         return "image/gif"
     # WebP: ``RIFF????WEBP``.
-    if (
-        len(image_bytes) >= 12
-        and image_bytes[:4] == _RIFF
-        and image_bytes[8:12] == _WEBP
-    ):
+    if len(image_bytes) >= 12 and image_bytes[:4] == _RIFF and image_bytes[8:12] == _WEBP:
         return "image/webp"
     return "image/png"
 
 
-def _build_image_followup_message(
-    *, tool_name: str, images: list[str]
-) -> dict | None:
+def _build_image_followup_message(*, tool_name: str, images: list[str]) -> dict | None:
     """Build a synthetic ``role: user`` message carrying tool-emitted images.
 
     Returns ``None`` if there are no usable images so callers can short-
@@ -140,6 +136,35 @@ def _build_image_followup_message(
     }
 
 
+def _resolve_max_sleep_until(value: datetime | str | None) -> datetime | None:
+    """Resolve the optional sleep cap.
+
+    Accepts an aware/naive datetime (naive assumed UTC) or an ISO-8601
+    string. Raises ``ValueError`` on an unparseable string so a bad cap
+    fails the run at startup. ``None`` means uncapped.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return clock.parse_utc(value.isoformat())
+    try:
+        return clock.parse_utc(value)
+    except ValueError as e:
+        raise ValueError(
+            f"max sleep time must be ISO-8601 (e.g. 2026-07-06T22:00:00Z), got {value!r}"
+        ) from e
+
+
+def _validate_timezone_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError as e:
+        raise ValueError(f"agent timezone must be an IANA timezone name, got {value!r}") from e
+    return value
+
+
 class Harness:
     def __init__(
         self,
@@ -148,6 +173,7 @@ class Harness:
         *,
         trace_sink: TraceSink | None = None,
         runtime: AgentRuntime | None = None,
+        max_sleep_until: datetime | str | None = None,
     ):
         self.config = config
         # Pick defaults from the environment when the caller didn't pass
@@ -165,7 +191,19 @@ class Harness:
         self._runtime = runtime
         tracer.set_trace_sink(trace_sink)
 
-        self.ctx = RunContext(agent_id=config.id, run_id=run_id, runtime=runtime)
+        self.ctx = RunContext(
+            agent_id=config.id,
+            run_id=run_id,
+            runtime=runtime,
+            max_sleep_until=_resolve_max_sleep_until(max_sleep_until),
+            timezone_name=_validate_timezone_name(config.timezone),
+        )
+        if self.ctx.max_sleep_until is not None:
+            logger.info(
+                "sleep cap active: agent=%s may not sleep past %s",
+                config.id,
+                self.ctx.max_sleep_until.isoformat(),
+            )
         self.tool_map: dict[str, Tool] = build_tool_map(config.tools)
         # Expose the tool map on the per-run context so built-in tools can
         # invoke siblings (e.g. sleep -> list_notifications pre-flight check).
@@ -193,6 +231,7 @@ class Harness:
         self.memory = MemoryService(
             agent_id=config.id,
             model=summary_model,
+            timezone_name=self.ctx.timezone_name or "UTC",
         )
         # Per-run accumulator: totals (summed) + per-model breakdown (for the
         # run_agent span's final `usage.model_breakdown`).
@@ -291,8 +330,7 @@ class Harness:
         # only (NOT written to memory) in those cases.
         tail_role = messages[-1].get("role") if messages else None
         is_anthropic_reasoning = (
-            self.config.model.startswith("claude-")
-            or self.config.model.startswith("anthropic/")
+            self.config.model.startswith("claude-") or self.config.model.startswith("anthropic/")
         ) and self.config.reasoning_effort != "none"
         needs_kickoff = (
             not messages
@@ -494,8 +532,7 @@ class Harness:
                         s.set_metadata(error=f"{type(e).__name__}: {e}")
                         result_text = f"Tool {tc.name} raised: {type(e).__name__}: {e}"
             logger.info(
-                "tool_call[%d/%d] done name=%s elapsed=%.2fs result_chars=%d "
-                "image_count=%d",
+                "tool_call[%d/%d] done name=%s elapsed=%.2fs result_chars=%d image_count=%d",
                 i + 1,
                 len(resp.tool_calls),
                 tc.name,
