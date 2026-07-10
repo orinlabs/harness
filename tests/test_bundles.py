@@ -10,6 +10,7 @@ import pytest
 
 from harness.bundles import (
     BundleError,
+    _compute_bundle_hash,
     expand_extends,
     list_bundle_names,
     load_bundle,
@@ -188,6 +189,54 @@ def test_path_traversal_rejected(tmp_path: Path):
     )
     with pytest.raises(BundleError, match="relative path"):
         load_bundle("po-3v", d)
+
+
+@pytest.mark.parametrize("escape", ["../outside.md", "/etc/passwd", "a/../../b.md"])
+@pytest.mark.parametrize("field", ["system_prompt_file", "prompt_fragments"])
+def test_prompt_path_traversal_rejected(tmp_path: Path, field: str, escape: str):
+    """system_prompt_file / prompt_fragments must not escape the agents dir."""
+    d = tmp_path / "agents"
+    manifest = _write_bundle(d)
+    original = "po-3v/system.md" if field == "system_prompt_file" else "shared/etiquette.md"
+    manifest.write_text(manifest.read_text().replace(original, escape))
+    with pytest.raises(BundleError, match="relative path"):
+        load_bundle("po-3v", d)
+
+
+def test_bundle_hash_immune_to_framing_collision(tmp_path: Path):
+    """One file whose content embeds entry framing must not hash like two files."""
+    d1 = tmp_path / "a" / "agents"
+    _write_bundle(d1)
+    # Content of one fragment crafted to embed a NUL + another path's framing.
+    (d1 / "shared" / "etiquette.md").write_bytes(b"X\x00po-3v/sops/build-po.md\x00Y")
+
+    d2 = tmp_path / "b" / "agents"
+    _write_bundle(d2)
+    (d2 / "shared" / "etiquette.md").write_bytes(b"X")
+    (d2 / "po-3v" / "sops" / "build-po.md").write_bytes(b"Y")
+
+    h1 = _compute_bundle_hash(
+        d1 / "po-3v.yaml", d1, ["shared/etiquette.md", "po-3v/sops/build-po.md"]
+    )
+    h2 = _compute_bundle_hash(
+        d2 / "po-3v.yaml", d2, ["shared/etiquette.md", "po-3v/sops/build-po.md"]
+    )
+    assert h1 != h2
+
+
+def test_non_utf8_document_fails_validation(agents_dir: Path):
+    """A binary document-target file must fail at load, not crash at render."""
+    (agents_dir / "po-3v" / "sops" / "build-po.md").write_bytes(b"\xff\xfe\x00binary")
+    with pytest.raises(BundleError, match="UTF-8"):
+        load_bundle("po-3v", agents_dir)
+
+
+def test_non_utf8_sandbox_file_still_allowed(agents_dir: Path):
+    """Sandbox files stay binary-safe (shipped base64, never decoded)."""
+    (agents_dir / "po-3v" / "sandbox" / "po_flow_write.py").write_bytes(b"\xff\xfe\x00bin")
+    payload = render_bundle_payload(load_bundle("po-3v", agents_dir))
+    decoded = base64.b64decode(payload["sandbox_files"]["tools/po_flow_write.py"])
+    assert decoded == b"\xff\xfe\x00bin"
 
 
 # ---------------------------------------------------------------------------

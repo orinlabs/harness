@@ -128,6 +128,19 @@ def load_bundle(name: str, agents_dir: str | Path | None = None) -> LoadedBundle
     if missing:
         raise BundleError(f"{manifest_path}: referenced file(s) not found: {', '.join(missing)}")
 
+    # Files consumed as text (prompt sources and document targets) must
+    # decode as UTF-8. Checking here keeps `validate-agents` (the CI gate)
+    # in agreement with rendering, which would otherwise crash with a raw
+    # UnicodeDecodeError at sync time.
+    for rel in _text_files(manifest):
+        try:
+            (base / rel).read_text(encoding="utf-8")
+        except UnicodeDecodeError as e:
+            raise BundleError(
+                f"{manifest_path}: {rel} is not valid UTF-8 "
+                "(prompt and document files must be UTF-8 text)"
+            ) from e
+
     system_prompt = _render_system_prompt(manifest, base)
     bundle_hash = _compute_bundle_hash(manifest_path, base, referenced)
     return LoadedBundle(
@@ -329,6 +342,15 @@ def _referenced_files(manifest: RepoAgentManifest) -> list[str]:
     return sorted(refs)
 
 
+def _text_files(manifest: RepoAgentManifest) -> list[str]:
+    """Referenced files that get decoded as UTF-8 text, sorted."""
+    refs: set[str] = set(manifest.prompt_fragments)
+    if manifest.system_prompt_file:
+        refs.add(manifest.system_prompt_file)
+    refs.update(f.path for f in manifest.files if f.target == "document")
+    return sorted(refs)
+
+
 def _render_system_prompt(manifest: RepoAgentManifest, base: Path) -> str:
     if manifest.system_prompt is not None:
         parts = [manifest.system_prompt]
@@ -344,13 +366,15 @@ def _compute_bundle_hash(manifest_path: Path, base: Path, referenced: list[str])
     """sha256 over the manifest + the resolved file closure.
 
     Relative paths are mixed into the digest so a rename changes the
-    hash even when contents don't.
+    hash even when contents don't. Each entry contributes
+    ``<rel>\\x00<sha256(content) hex>\\n``: hashing a fixed-length digest
+    of the content (rather than the raw bytes, which may themselves
+    contain NULs) keeps the encoding injective, so distinct closures
+    can't collide by crafting content that mimics entry framing.
     """
     h = hashlib.sha256()
     entries = [(manifest_path.name, manifest_path)] + [(rel, base / rel) for rel in referenced]
     for rel, path in entries:
-        h.update(rel.encode("utf-8"))
-        h.update(b"\x00")
-        h.update(path.read_bytes())
-        h.update(b"\x00")
+        content_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        h.update(f"{rel}\x00{content_digest}\n".encode())
     return f"sha256:{h.hexdigest()}"

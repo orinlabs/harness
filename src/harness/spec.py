@@ -49,6 +49,17 @@ KNOWN_MEMORY_SYSTEMS = ("tiered_sqlite",)
 DEFAULT_SUMMARIZER_MODEL = "openai/gpt-5-nano"
 
 
+def _require_bundle_relative(value: str, field: str) -> None:
+    """Reject absolute paths and ``..`` segments.
+
+    Every path in a manifest resolves against the agents dir and is then
+    read, hashed, and replicated into sync payloads -- an escaping path
+    would exfiltrate arbitrary host files into the rendered prompt.
+    """
+    if value.startswith("/") or ".." in value.split("/"):
+        raise ValueError(f"{field} must be a relative path inside the bundle: {value!r}")
+
+
 class MemorySpec(BaseModel):
     """Per-agent memory configuration.
 
@@ -100,12 +111,9 @@ class BundleFile(BaseModel):
             raise ValueError("files[].dest is only valid with target: sandbox")
         if self.target == "sandbox" and self.title is not None:
             raise ValueError("files[].title is only valid with target: document")
-        if ".." in self.path.split("/") or self.path.startswith("/"):
-            raise ValueError(
-                f"files[].path must be a relative path inside the bundle: {self.path!r}"
-            )
-        if self.dest is not None and (".." in self.dest.split("/") or self.dest.startswith("/")):
-            raise ValueError(f"files[].dest must be a relative path: {self.dest!r}")
+        _require_bundle_relative(self.path, "files[].path")
+        if self.dest is not None:
+            _require_bundle_relative(self.dest, "files[].dest")
         return self
 
 
@@ -181,6 +189,10 @@ class RepoAgentManifest(BaseModel):
         has_file = self.system_prompt_file is not None
         if has_literal == has_file:
             raise ValueError("exactly one of system_prompt / system_prompt_file is required")
+        if self.system_prompt_file is not None:
+            _require_bundle_relative(self.system_prompt_file, "system_prompt_file")
+        for fragment in self.prompt_fragments:
+            _require_bundle_relative(fragment, "prompt_fragments[]")
         if self.spec_version > SPEC_VERSION:
             raise ValueError(
                 f"manifest spec_version={self.spec_version} is newer than this "
