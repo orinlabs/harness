@@ -48,6 +48,9 @@ expected_tools:
 feature_flags:
   auto_associative_memory: "on"
 
+# `summarizer_model` is deliberately omitted: null/absent means "whatever
+# the running harness defaults to", so a fleet-wide summarizer upgrade is
+# a harness change rather than an every-yaml edit. Set it only to pin a
+# specific model for this agent.
 memory:
   system: tiered_sqlite
-  summarizer_model: openai/gpt-5-nano

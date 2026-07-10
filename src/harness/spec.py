@@ -63,8 +63,12 @@ def _require_bundle_relative(value: str, field: str) -> None:
 class MemorySpec(BaseModel):
     """Per-agent memory configuration.
 
-    Defaults match the harness's historical hardcoded behavior, so
-    omitting the block entirely is always safe.
+    Omitting the block entirely is always safe: every field's null/absent
+    state means "whatever the running harness decides". That is the
+    general rule for this model -- memory tunables only become spec
+    fields when their absence has a well-defined "harness decides"
+    meaning. Otherwise every synced config would bake in whatever the
+    default was on the day it was rendered.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -72,7 +76,18 @@ class MemorySpec(BaseModel):
     system: Literal["tiered_sqlite"] = "tiered_sqlite"
     # Summarization runs on a cheap model, never the agent's own model
     # (see Harness.__init__ for the cost rationale).
-    summarizer_model: str = DEFAULT_SUMMARIZER_MODEL
+    summarizer_model: str | None = Field(
+        default=None,
+        description=(
+            "Model for memory summarization. null/omitted means 'whatever the "
+            f"running harness defaults to' (currently {DEFAULT_SUMMARIZER_MODEL!r}, "
+            "resolved by the memory factory at construction time); a set value "
+            "pins it. The default is deliberately NOT baked in here: if it were, "
+            "every rendered config and bundle hash would silently pin today's "
+            "default, and a fleet-wide summarizer upgrade would require editing "
+            "every bundle yaml."
+        ),
+    )
 
 
 class BundleFile(BaseModel):

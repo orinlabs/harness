@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from harness.config import AgentConfig
+from harness.spec import DEFAULT_SUMMARIZER_MODEL
 
 
 @runtime_checkable
@@ -45,14 +46,19 @@ class MemoryBackend(Protocol):
 
 
 def build_memory(config: AgentConfig, *, timezone_name: str) -> MemoryBackend:
-    """Construct the memory backend selected by ``config.memory.system``."""
+    """Construct the memory backend selected by ``config.memory.system``.
+
+    ``summarizer_model=None`` ("harness decides") resolves to
+    ``DEFAULT_SUMMARIZER_MODEL`` here, at construction time -- backends
+    always receive a concrete model string.
+    """
     system = config.memory.system
     if system == "tiered_sqlite":
         from harness.memory.service import MemoryService
 
         return MemoryService(
             agent_id=config.id,
-            model=config.memory.summarizer_model,
+            model=config.memory.summarizer_model or DEFAULT_SUMMARIZER_MODEL,
             timezone_name=timezone_name,
         )
     raise ValueError(

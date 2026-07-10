@@ -217,11 +217,13 @@ class Harness:
         )
         # Backend + summarizer model come from config.memory (defaults:
         # tiered_sqlite + a cheap summarizer -- see MemoryConfig for the
-        # cost rationale). Unknown systems fail here, before the loop.
+        # cost rationale). summarizer_model=None means "harness decides":
+        # build_memory resolves it to DEFAULT_SUMMARIZER_MODEL. Unknown
+        # systems fail here, before the loop.
         logger.info(
             "Harness init: memory system=%s summarizer_model=%s (agent model=%s)",
             config.memory.system,
-            config.memory.summarizer_model,
+            config.memory.summarizer_model or "<harness default>",
             config.model,
         )
         self.memory = build_memory(

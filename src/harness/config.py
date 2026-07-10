@@ -44,7 +44,14 @@ class MemoryConfig:
     # fires N summary-generation LLM calls at whatever the agent
     # happens to be using (Opus, Sonnet, etc.) -- easily >$1/turn on
     # agents with deep history.
-    summarizer_model: str = "openai/gpt-5-nano"
+    #
+    # None means "whatever the running harness defaults to"
+    # (``harness.spec.DEFAULT_SUMMARIZER_MODEL``), resolved by
+    # ``harness.memory.build_memory`` at construction time. A set value
+    # pins the model. Synced bundle configs carry null unless the bundle
+    # pins one, so a fleet-wide summarizer upgrade is a harness change,
+    # not an every-yaml edit.
+    summarizer_model: str | None = None
 
 
 @dataclass(frozen=True)

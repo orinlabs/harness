@@ -323,6 +323,7 @@ def test_loader_expands_extends_via_env(agents_dir: Path, tmp_path: Path, monkey
 def test_memory_defaults_and_override():
     cfg = build_agent_config({"id": "a", "model": "m", "system_prompt": "s"})
     assert cfg.memory == MemoryConfig()
+    assert cfg.memory.summarizer_model is None  # "harness decides"
     cfg2 = build_agent_config(
         {
             "id": "a",
@@ -333,6 +334,67 @@ def test_memory_defaults_and_override():
     )
     assert cfg2.memory.summarizer_model == "openai/gpt-6-nano"
     assert cfg2.memory.system == "tiered_sqlite"
+
+
+def test_build_memory_resolves_null_summarizer_to_harness_default():
+    """Unset summarizer_model means "harness decides": the factory resolves
+    it to DEFAULT_SUMMARIZER_MODEL at construction time, so backends always
+    receive a concrete model string."""
+    from harness.memory import build_memory
+    from harness.spec import DEFAULT_SUMMARIZER_MODEL
+
+    cfg = build_agent_config(
+        {"id": "a", "model": "m", "system_prompt": "s", "memory": {"summarizer_model": None}}
+    )
+    assert cfg.memory.summarizer_model is None
+    backend = build_memory(cfg, timezone_name="UTC")
+    assert backend.model == DEFAULT_SUMMARIZER_MODEL
+
+
+def test_build_memory_honors_pinned_summarizer_model():
+    from harness.memory import build_memory
+
+    cfg = build_agent_config(
+        {
+            "id": "a",
+            "model": "m",
+            "system_prompt": "s",
+            "memory": {"summarizer_model": "openai/gpt-6-nano"},
+        }
+    )
+    backend = build_memory(cfg, timezone_name="UTC")
+    assert backend.model == "openai/gpt-6-nano"
+
+
+def test_sync_payload_carries_null_summarizer_when_unset(agents_dir: Path):
+    """The wire payload must carry null (not today's default) so synced
+    configs and bundle hashes don't silently pin the current default."""
+    payload = render_bundle_payload(load_bundle("bidlevel", agents_dir))
+    memory = payload["config"]["memory"]
+    assert memory["system"] == "tiered_sqlite"
+    assert memory["summarizer_model"] is None
+    # And the payload must survive a JSON round-trip with null intact.
+    assert json.loads(json.dumps(payload))["config"]["memory"]["summarizer_model"] is None
+
+
+def test_expand_extends_flows_null_summarizer_through(agents_dir: Path):
+    """A bundle without a summarizer pin yields a merged config whose
+    memory block still says "harness decides" (None), not a baked default."""
+    merged = expand_extends({"id": "t", "extends": "bidlevel", "tools": []}, agents_dir=agents_dir)
+    assert merged["memory"]["summarizer_model"] is None
+    cfg = build_agent_config(merged)
+    assert cfg.memory.summarizer_model is None
+
+
+def test_pinned_summarizer_model_survives_render_and_extends(tmp_path: Path):
+    d = tmp_path / "agents"
+    _write_bundle(d, manifest_extra="memory:\n  summarizer_model: openai/gpt-6-nano\n")
+    bundle = load_bundle("bidlevel", d)
+    payload = render_bundle_payload(bundle)
+    assert payload["config"]["memory"]["summarizer_model"] == "openai/gpt-6-nano"
+    merged = expand_extends({"id": "t", "extends": "bidlevel", "tools": []}, agents_dir=d)
+    cfg = build_agent_config(merged)
+    assert cfg.memory.summarizer_model == "openai/gpt-6-nano"
 
 
 def test_memory_unknown_key_rejected():
