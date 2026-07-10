@@ -1,0 +1,279 @@
+{
+  "$comment": "Generated from harness.spec (SPEC_VERSION=1). Do not edit by hand: uv run python -m harness.spec > harness-spec.json",
+  "$defs": {
+    "BundleFile": {
+      "additionalProperties": false,
+      "description": "A file shipped with the bundle.\n\n``target`` picks the delivery mechanism:\n\n* ``document`` -- becomes a Bedrock ``Document`` row (kind=skill by\n  default), upserted by title on sync. Readable via the agent's\n  ``get_document`` tools and visible in the portal.\n* ``sandbox`` -- shipped as a plain file into the agent's Computer\n  (Blaxel) sandbox by Bedrock's pre-wake apply step. ``dest`` is the\n  sandbox-relative destination path (defaults to the bundle-relative\n  source path).",
+      "properties": {
+        "dest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Destination path relative to the sandbox working dir (sandbox target only).",
+          "title": "Dest"
+        },
+        "kind": {
+          "default": "skill",
+          "enum": [
+            "note",
+            "skill"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "description": "Source path relative to the manifest's directory.",
+          "title": "Path",
+          "type": "string"
+        },
+        "target": {
+          "enum": [
+            "document",
+            "sandbox"
+          ],
+          "title": "Target",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Document title (document target only). Defaults to the file stem.",
+          "title": "Title"
+        }
+      },
+      "required": [
+        "path",
+        "target"
+      ],
+      "title": "BundleFile",
+      "type": "object"
+    },
+    "MemorySpec": {
+      "additionalProperties": false,
+      "description": "Per-agent memory configuration.\n\nDefaults match the harness's historical hardcoded behavior, so\nomitting the block entirely is always safe.",
+      "properties": {
+        "summarizer_model": {
+          "default": "openai/gpt-5-nano",
+          "title": "Summarizer Model",
+          "type": "string"
+        },
+        "system": {
+          "const": "tiered_sqlite",
+          "default": "tiered_sqlite",
+          "title": "System",
+          "type": "string"
+        }
+      },
+      "title": "MemorySpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Schema for ``agents/<name>.yaml`` in the agents repo.",
+  "properties": {
+    "adapters": {
+      "description": "Adapter names (presence only; credentials stay in Bedrock).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Adapters",
+      "type": "array"
+    },
+    "adopt_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Existing Bedrock agent UUID to adopt in place on first sync. Honored only while that agent is not yet repo-managed.",
+      "title": "Adopt Agent Id"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Human-facing agent name in Bedrock. Defaults to `name`.",
+      "title": "Display Name"
+    },
+    "expected_tools": {
+      "description": "Tool names the prompt assumes exist. Bedrock warns when unsatisfied.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Expected Tools",
+      "type": "array"
+    },
+    "feature_flags": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Feature Flags",
+      "type": "object"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/BundleFile"
+      },
+      "title": "Files",
+      "type": "array"
+    },
+    "max_sleep_hours": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Sleep Hours"
+    },
+    "max_tokens": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Tokens"
+    },
+    "max_turns": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Turns"
+    },
+    "memory": {
+      "$ref": "#/$defs/MemorySpec"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "previous_names": {
+      "description": "Former bundle names, so a rename is not treated as delete+create.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Previous Names",
+      "type": "array"
+    },
+    "prompt_fragments": {
+      "description": "Extra prompt files appended after the system prompt, in order.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Prompt Fragments",
+      "type": "array"
+    },
+    "reasoning_effort": {
+      "anyOf": [
+        {
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reasoning Effort"
+    },
+    "spec_version": {
+      "minimum": 1,
+      "title": "Spec Version",
+      "type": "integer"
+    },
+    "system_prompt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Literal prompt. Mutually exclusive with system_prompt_file.",
+      "title": "System Prompt"
+    },
+    "system_prompt_file": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Path to the prompt file, relative to the manifest's directory.",
+      "title": "System Prompt File"
+    },
+    "timezone": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timezone"
+    }
+  },
+  "required": [
+    "spec_version",
+    "name",
+    "model"
+  ],
+  "title": "RepoAgentManifest",
+  "type": "object"
+}

@@ -28,6 +28,26 @@ class ToolAuth:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    """Per-agent memory selection.
+
+    Defaults reproduce the harness's historical behavior (tiered sqlite
+    summaries, cheap summarizer model), so configs that omit the block
+    entirely -- including every existing Bedrock payload and standalone
+    YAML -- behave identically. ``system`` picks the backend in
+    ``harness.memory.build_memory``; unknown values fail at startup.
+    """
+
+    system: str = "tiered_sqlite"
+    # Summarization always runs on a cheap model, not the agent's
+    # configured model. Otherwise every turn's `update_summaries()`
+    # fires N summary-generation LLM calls at whatever the agent
+    # happens to be using (Opus, Sonnet, etc.) -- easily >$1/turn on
+    # agents with deep history.
+    summarizer_model: str = "openai/gpt-5-nano"
+
+
+@dataclass(frozen=True)
 class ExternalToolSpec:
     """A tool invoked by HTTP POST to ``url``.
 
@@ -85,6 +105,10 @@ class AgentConfig:
     # boolean check; use ``feature_flags.get(name, default)`` for value
     # reads.
     feature_flags: dict[str, str] = field(default_factory=dict)
+    # Memory backend selection; see MemoryConfig. Repo-managed bundles set
+    # this from their manifest's `memory:` block; everything else gets the
+    # defaults.
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def is_enabled(self, flag: str) -> bool:
         """Return True if ``feature_flags[flag]`` resolves to ``"on"``.

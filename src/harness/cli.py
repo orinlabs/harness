@@ -31,6 +31,21 @@ Subcommands:
                                           # can extract it from combined
                                           # exec output.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
+    harness validate-agents [--agents-dir DIR]
+                                          # Validate every repo-managed
+                                          # agent bundle in an agents dir
+                                          # against harness.spec; print
+                                          # `<name> <bundle_hash>` per
+                                          # bundle. CI gate for the
+                                          # agents repo.
+    harness render-agent NAME [--agents-dir DIR]
+                                          # Render one bundle (resolved
+                                          # prompt, documents, sandbox
+                                          # files, hash) as JSON.
+    harness render-manifest [--agents-dir DIR] [--commit SHA]
+                                          # Render the full sync manifest
+                                          # (all bundles) that the agents
+                                          # repo CI POSTs to Bedrock.
 
 Environment is loaded from the first `.env` found by walking up from cwd
 (so a per-repo `.env` shadows an org-level `.env` one or more directories
@@ -45,6 +60,9 @@ Optional:
     GITHUB_TOKEN          private-repo fetch auth (used by `boot` only)
     HARNESS_SIM_START_TIME  simulated start time (epoch seconds); all time
                           reads become this moment + elapsed run time
+    HARNESS_AGENTS_DIR    directory of repo-managed agent bundles; used by
+                          the bundle subcommands and by configs that
+                          `extends:` a bundle (defaults to ./agents)
     MODEL                 override the agent's configured model
     REASONING_EFFORT      override reasoning_effort (minimal|low|medium|high|xhigh)
     LOG_LEVEL             default: INFO
@@ -614,6 +632,86 @@ def _cmd_export_memory(args, parser: argparse.ArgumentParser) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommands: bundle tooling (validate-agents / render-agent / render-manifest)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_validate_agents(args, parser: argparse.ArgumentParser) -> int:
+    """Validate every bundle in the agents dir; print name + hash per bundle.
+
+    Exit 0 when everything validates, 1 with per-bundle errors otherwise.
+    Also runs the secret tripwire scan -- findings are hard failures, the
+    whole point of bundles is that their contents are safe to replicate.
+    """
+    import json as _json
+
+    from harness.bundles import (
+        BundleError,
+        list_bundle_names,
+        load_bundle,
+        resolve_agents_dir,
+        scan_for_secrets,
+    )
+
+    agents_dir = resolve_agents_dir(args.agents_dir)
+    if not agents_dir.is_dir():
+        parser.exit(1, f"validate-agents: {agents_dir} is not a directory\n")
+
+    names = list_bundle_names(agents_dir)
+    if not names:
+        parser.exit(1, f"validate-agents: no bundle manifests found in {agents_dir}\n")
+
+    errors: list[str] = []
+    results: list[dict] = []
+    for name in names:
+        try:
+            bundle = load_bundle(name, agents_dir)
+        except BundleError as e:
+            errors.append(str(e))
+            continue
+        findings = scan_for_secrets(bundle)
+        if findings:
+            errors.extend(f"{name}: {f}" for f in findings)
+            continue
+        results.append({"name": name, "bundle_hash": bundle.bundle_hash})
+        print(f"{name} {bundle.bundle_hash}")
+
+    if args.json:
+        print(_json.dumps({"agents": results, "errors": errors}))
+    if errors:
+        for err in errors:
+            print(f"ERROR: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_render_agent(args, parser: argparse.ArgumentParser) -> int:
+    import json as _json
+
+    from harness.bundles import BundleError, load_bundle, render_bundle_payload
+
+    try:
+        bundle = load_bundle(args.name, args.agents_dir)
+    except BundleError as e:
+        parser.exit(1, f"render-agent: {e}\n")
+    print(_json.dumps(render_bundle_payload(bundle), indent=2))
+    return 0
+
+
+def _cmd_render_manifest(args, parser: argparse.ArgumentParser) -> int:
+    import json as _json
+
+    from harness.bundles import BundleError, render_sync_manifest
+
+    try:
+        manifest = render_sync_manifest(args.agents_dir, harness_git_sha=args.commit)
+    except BundleError as e:
+        parser.exit(1, f"render-manifest: {e}\n")
+    print(_json.dumps(manifest))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Argparse + entrypoint
 # ---------------------------------------------------------------------------
 
@@ -855,6 +953,56 @@ def main(argv: list[str] | None = None) -> int:
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
 
+    def _add_agents_dir_flag(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--agents-dir",
+            default=None,
+            help="Directory holding <name>.yaml bundle manifests. Defaults to "
+            "$HARNESS_AGENTS_DIR, then ./agents.",
+        )
+        p.add_argument(
+            "--log-level",
+            default=os.environ.get("LOG_LEVEL", "INFO"),
+            help="Log level: DEBUG|INFO|WARNING|ERROR.",
+        )
+
+    validate_p = subparsers.add_parser(
+        "validate-agents",
+        help="Validate every agent bundle in an agents dir; print name + bundle hash.",
+        description=(
+            "CI gate for the agents repo. Validates each <name>.yaml against "
+            "the harness.spec schema, checks every referenced file exists, "
+            "runs a secret tripwire scan, and prints `<name> <bundle_hash>` "
+            "per bundle. The bundle hash covers the manifest plus its "
+            "resolved file closure, so shared-fragment edits change every "
+            "dependent bundle's hash."
+        ),
+    )
+    _add_agents_dir_flag(validate_p)
+    validate_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Additionally print a JSON summary line ({agents, errors}).",
+    )
+
+    render_agent_p = subparsers.add_parser(
+        "render-agent",
+        help="Render one bundle (prompt, documents, sandbox files, hash) as JSON.",
+    )
+    render_agent_p.add_argument("name", help="Bundle name (file stem of <name>.yaml).")
+    _add_agents_dir_flag(render_agent_p)
+
+    render_manifest_p = subparsers.add_parser(
+        "render-manifest",
+        help="Render the full sync manifest the agents-repo CI POSTs to Bedrock.",
+    )
+    _add_agents_dir_flag(render_manifest_p)
+    render_manifest_p.add_argument(
+        "--commit",
+        default=None,
+        help="Git SHA of the agents-repo commit this manifest was rendered from.",
+    )
+
     args = parser.parse_args(argv)
 
     _configure_logging(args.log_level)
@@ -890,6 +1038,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_forget_memory(args, forget_p)
     if args.command == "export-memory":
         return _cmd_export_memory(args, export_p)
+    if args.command == "validate-agents":
+        return _cmd_validate_agents(args, validate_p)
+    if args.command == "render-agent":
+        return _cmd_render_agent(args, render_agent_p)
+    if args.command == "render-manifest":
+        return _cmd_render_manifest(args, render_manifest_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval

@@ -48,6 +48,24 @@ class MemoryService:
         self._builder = MemoryContextBuilder(timezone=timezone_name)
 
     # ------------------------------------------------------------------
+    # Lifecycle (MemoryBackend protocol)
+    # ------------------------------------------------------------------
+    #
+    # This backend owns the module-global sqlite handle in
+    # ``harness.core.storage``. Owning open/flush/close here (instead of
+    # in Harness.run) keeps the storage global an implementation detail
+    # of the tiered backend -- a future backend need not touch it.
+
+    def open(self) -> None:
+        storage.load(self.agent_id)
+
+    def flush(self) -> None:
+        storage.flush()
+
+    def close(self) -> None:
+        storage.close()
+
+    # ------------------------------------------------------------------
     # Writes
     # ------------------------------------------------------------------
 

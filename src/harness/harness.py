@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from harness.config import AgentConfig
 from harness.constants import MAX_TURNS
 from harness.context import RunContext, set_agent_id
-from harness.core import clock, llm, storage, tracer
+from harness.core import clock, llm, tracer
 from harness.core.runtime import AgentRuntime
 from harness.core.tracer import (
     SpanType,
@@ -33,7 +33,7 @@ from harness.core.tracer import (
     tool_span,
 )
 from harness.core.tracing import TraceSink
-from harness.memory import MemoryService
+from harness.memory import build_memory
 from harness.tools import Tool, build_tool_map
 
 logger = logging.getLogger(__name__)
@@ -215,22 +215,17 @@ class Harness:
             len(self.tool_map),
             sorted(self.tool_map.keys()),
         )
-        # Summarization always runs on a cheap model, not the agent's
-        # configured model. Otherwise every turn's `update_summaries()`
-        # fires N summary-generation LLM calls at whatever the agent
-        # happens to be using (Opus, Sonnet, etc.) -- easily >$1/turn on
-        # agents with deep history. gpt-5-nano is ~1000x cheaper per
-        # token and the summary quality is more than adequate for
-        # timeline rollups.
-        summary_model = "openai/gpt-5-nano"
+        # Backend + summarizer model come from config.memory (defaults:
+        # tiered_sqlite + a cheap summarizer -- see MemoryConfig for the
+        # cost rationale). Unknown systems fail here, before the loop.
         logger.info(
-            "Harness init: using summary_model=%s (agent model=%s)",
-            summary_model,
+            "Harness init: memory system=%s summarizer_model=%s (agent model=%s)",
+            config.memory.system,
+            config.memory.summarizer_model,
             config.model,
         )
-        self.memory = MemoryService(
-            agent_id=config.id,
-            model=summary_model,
+        self.memory = build_memory(
+            config,
             timezone_name=self.ctx.timezone_name or "UTC",
         )
         # Per-run accumulator: totals (summed) + per-model breakdown (for the
@@ -249,7 +244,7 @@ class Harness:
 
     def run(self) -> None:
         set_agent_id(self.config.id)
-        storage.load(self.config.id)
+        self.memory.open()
         try:
             with text_span(
                 "run_agent",
@@ -310,8 +305,8 @@ class Harness:
                         list(self._model_breakdown.keys()),
                     )
         finally:
-            storage.flush()
-            storage.close()
+            self.memory.flush()
+            self.memory.close()
 
     def _step(self, turn_span) -> bool:
         """Run one turn. Return False if the loop should stop."""
