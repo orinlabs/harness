@@ -341,3 +341,23 @@ def test_cli_render_manifest(agents_dir: Path, capsys):
     manifest = json.loads(capsys.readouterr().out)
     assert manifest["harness_git_sha"] == "b" * 40
     assert [a["name"] for a in manifest["agents"]] == ["po-3v"]
+
+
+def test_cli_generate_spec_check_passes(capsys):
+    rc = main(["generate-spec", "--check"])
+    assert rc == 0
+    assert "up to date" in capsys.readouterr().out
+
+
+def test_cli_generate_spec_prints_schema(capsys):
+    rc = main(["generate-spec"])
+    assert rc == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert schema == spec_json_schema()
+
+
+def test_example_bundle_validates(capsys):
+    examples = Path(__file__).resolve().parents[1] / "examples" / "bundles"
+    rc = main(["validate-agents", "--agents-dir", str(examples)])
+    assert rc == 0
+    assert capsys.readouterr().out.startswith("example-po sha256:")

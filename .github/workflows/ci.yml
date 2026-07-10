@@ -36,5 +36,17 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check .
 
+      # The committed bundle-manifest schema must match the live Pydantic
+      # models (regenerate with `uv run harness generate-spec > harness-spec.json`).
+      - name: Spec schema in sync
+        run: uv run harness generate-spec --check
+
+      # Validate the example bundle layout. Real bundles live in the
+      # private orinlabs/agents repo (whose own CI validates + syncs them);
+      # this keeps the tooling honest against a realistic fixture. No
+      # agent-sync happens from this repo.
+      - name: Validate example agent bundles
+        run: uv run harness validate-agents --agents-dir examples/bundles
+
       - name: Tests (default suite -- excludes tests/memory)
         run: uv run pytest -q
