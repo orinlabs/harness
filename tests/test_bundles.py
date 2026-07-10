@@ -30,7 +30,7 @@ from harness.spec import SPEC_VERSION, spec_json_schema
 
 def _write_bundle(
     agents_dir: Path,
-    name: str = "po-3v",
+    name: str = "bidlevel",
     *,
     manifest_extra: str = "",
 ) -> Path:
@@ -42,10 +42,12 @@ def _write_bundle(
     (bundle_dir / "sandbox").mkdir(parents=True, exist_ok=True)
     (agents_dir / "shared").mkdir(exist_ok=True)
 
-    (bundle_dir / "system.md").write_text("You are the PO agent.")
+    (bundle_dir / "system.md").write_text("You are the bid-leveling agent.")
     (agents_dir / "shared" / "etiquette.md").write_text("Be concise.")
-    (bundle_dir / "sops" / "build-po.md").write_text("# SOP: build a PO\nSteps...")
-    (bundle_dir / "sandbox" / "po_flow_write.py").write_text("print('hi')\n")
+    (bundle_dir / "sops" / "bid-leveling-checklist.md").write_text(
+        "# SOP: level a bid package\nSteps..."
+    )
+    (bundle_dir / "sandbox" / "leveling_sheet.py").write_text("print('hi')\n")
 
     manifest = agents_dir / f"{name}.yaml"
     manifest.write_text(
@@ -60,12 +62,12 @@ system_prompt_file: {name}/system.md
 prompt_fragments:
   - shared/etiquette.md
 files:
-  - path: {name}/sops/build-po.md
+  - path: {name}/sops/bid-leveling-checklist.md
     target: document
-    title: "SOP: build a PO"
-  - path: {name}/sandbox/po_flow_write.py
+    title: "SOP: level a bid package"
+  - path: {name}/sandbox/leveling_sheet.py
     target: sandbox
-    dest: tools/po_flow_write.py
+    dest: tools/leveling_sheet.py
 adapters: [Documents, Computer]
 expected_tools: [computer_exec, get_document]
 feature_flags:
@@ -88,16 +90,16 @@ def agents_dir(tmp_path: Path) -> Path:
 
 
 def test_load_bundle_renders_prompt_in_order(agents_dir: Path):
-    bundle = load_bundle("po-3v", agents_dir)
-    assert bundle.system_prompt == "You are the PO agent.\n\nBe concise."
+    bundle = load_bundle("bidlevel", agents_dir)
+    assert bundle.system_prompt == "You are the bid-leveling agent.\n\nBe concise."
     assert bundle.bundle_hash.startswith("sha256:")
     assert bundle.manifest.memory == type(bundle.manifest.memory)()  # defaults
 
 
 def test_bundle_name_must_match_file_stem(tmp_path: Path):
     d = tmp_path / "agents"
-    _write_bundle(d, "po-3v")
-    (d / "renamed.yaml").write_text((d / "po-3v.yaml").read_text())
+    _write_bundle(d, "bidlevel")
+    (d / "renamed.yaml").write_text((d / "bidlevel.yaml").read_text())
     with pytest.raises(BundleError, match="must match the file stem"):
         load_bundle("renamed", d)
 
@@ -105,16 +107,16 @@ def test_bundle_name_must_match_file_stem(tmp_path: Path):
 def test_missing_referenced_file_fails(agents_dir: Path):
     (agents_dir / "shared" / "etiquette.md").unlink()
     with pytest.raises(BundleError, match="etiquette.md"):
-        load_bundle("po-3v", agents_dir)
+        load_bundle("bidlevel", agents_dir)
 
 
 def test_prompt_literal_and_file_mutually_exclusive(tmp_path: Path):
     d = tmp_path / "agents"
     _write_bundle(d)
-    manifest = d / "po-3v.yaml"
+    manifest = d / "bidlevel.yaml"
     manifest.write_text(manifest.read_text() + 'system_prompt: "inline too"\n')
     with pytest.raises(BundleError, match="exactly one of"):
-        load_bundle("po-3v", d)
+        load_bundle("bidlevel", d)
 
 
 def test_newer_spec_version_rejected(tmp_path: Path):
@@ -126,43 +128,47 @@ def test_newer_spec_version_rejected(tmp_path: Path):
         )
     )
     with pytest.raises(BundleError, match="newer than this harness checkout"):
-        load_bundle("po-3v", d)
+        load_bundle("bidlevel", d)
 
 
 def test_bundle_hash_changes_with_shared_fragment(agents_dir: Path):
-    before = load_bundle("po-3v", agents_dir).bundle_hash
+    before = load_bundle("bidlevel", agents_dir).bundle_hash
     (agents_dir / "shared" / "etiquette.md").write_text("Be very concise.")
-    after = load_bundle("po-3v", agents_dir).bundle_hash
+    after = load_bundle("bidlevel", agents_dir).bundle_hash
     assert before != after
 
 
 def test_bundle_hash_stable_across_loads(agents_dir: Path):
-    first = load_bundle("po-3v", agents_dir).bundle_hash
-    second = load_bundle("po-3v", agents_dir).bundle_hash
+    first = load_bundle("bidlevel", agents_dir).bundle_hash
+    second = load_bundle("bidlevel", agents_dir).bundle_hash
     assert first == second
 
 
 def test_render_bundle_payload_shape(agents_dir: Path):
-    payload = render_bundle_payload(load_bundle("po-3v", agents_dir))
-    assert payload["name"] == "po-3v"
+    payload = render_bundle_payload(load_bundle("bidlevel", agents_dir))
+    assert payload["name"] == "bidlevel"
     assert payload["spec_version"] == SPEC_VERSION
-    assert payload["config"]["system_prompt"].startswith("You are the PO agent.")
+    assert payload["config"]["system_prompt"].startswith("You are the bid-leveling agent.")
     assert payload["config"]["max_sleep_hours"] == 24
     assert payload["documents"] == [
-        {"title": "SOP: build a PO", "kind": "skill", "content": "# SOP: build a PO\nSteps..."}
+        {
+            "title": "SOP: level a bid package",
+            "kind": "skill",
+            "content": "# SOP: level a bid package\nSteps...",
+        }
     ]
-    decoded = base64.b64decode(payload["sandbox_files"]["tools/po_flow_write.py"])
+    decoded = base64.b64decode(payload["sandbox_files"]["tools/leveling_sheet.py"])
     assert decoded == b"print('hi')\n"
 
 
 def test_render_sync_manifest_lists_all_bundles(tmp_path: Path):
     d = tmp_path / "agents"
-    _write_bundle(d, "po-3v")
+    _write_bundle(d, "bidlevel")
     _write_bundle(d, "other-agent")
     manifest = render_sync_manifest(d, harness_git_sha="a" * 40)
     assert manifest["spec_version"] == SPEC_VERSION
     assert manifest["harness_git_sha"] == "a" * 40
-    assert sorted(a["name"] for a in manifest["agents"]) == ["other-agent", "po-3v"]
+    assert sorted(a["name"] for a in manifest["agents"]) == ["bidlevel", "other-agent"]
 
 
 def test_list_bundle_names_skips_legacy_configs(tmp_path: Path):
@@ -170,14 +176,14 @@ def test_list_bundle_names_skips_legacy_configs(tmp_path: Path):
     _write_bundle(d)
     # Legacy standalone config (has `id`, no spec_version) must be ignored.
     (d / "demo.yaml").write_text("id: demo\nmodel: m\nsystem_prompt: hi\n")
-    assert list_bundle_names(d) == ["po-3v"]
+    assert list_bundle_names(d) == ["bidlevel"]
 
 
 def test_secret_scan_flags_token(agents_dir: Path):
-    (agents_dir / "po-3v" / "system.md").write_text(
+    (agents_dir / "bidlevel" / "system.md").write_text(
         "Use key sk-abcdefghijklmnopqrstuvwxyz123456 for everything."
     )
-    findings = scan_for_secrets(load_bundle("po-3v", agents_dir))
+    findings = scan_for_secrets(load_bundle("bidlevel", agents_dir))
     assert findings and "secret key" in findings[0]
 
 
@@ -185,10 +191,10 @@ def test_path_traversal_rejected(tmp_path: Path):
     d = tmp_path / "agents"
     manifest = _write_bundle(d)
     manifest.write_text(
-        manifest.read_text().replace("po-3v/sops/build-po.md", "../outside.md")
+        manifest.read_text().replace("bidlevel/sops/bid-leveling-checklist.md", "../outside.md")
     )
     with pytest.raises(BundleError, match="relative path"):
-        load_bundle("po-3v", d)
+        load_bundle("bidlevel", d)
 
 
 @pytest.mark.parametrize("escape", ["../outside.md", "/etc/passwd", "a/../../b.md"])
@@ -197,10 +203,10 @@ def test_prompt_path_traversal_rejected(tmp_path: Path, field: str, escape: str)
     """system_prompt_file / prompt_fragments must not escape the agents dir."""
     d = tmp_path / "agents"
     manifest = _write_bundle(d)
-    original = "po-3v/system.md" if field == "system_prompt_file" else "shared/etiquette.md"
+    original = "bidlevel/system.md" if field == "system_prompt_file" else "shared/etiquette.md"
     manifest.write_text(manifest.read_text().replace(original, escape))
     with pytest.raises(BundleError, match="relative path"):
-        load_bundle("po-3v", d)
+        load_bundle("bidlevel", d)
 
 
 def test_bundle_hash_immune_to_framing_collision(tmp_path: Path):
@@ -208,34 +214,38 @@ def test_bundle_hash_immune_to_framing_collision(tmp_path: Path):
     d1 = tmp_path / "a" / "agents"
     _write_bundle(d1)
     # Content of one fragment crafted to embed a NUL + another path's framing.
-    (d1 / "shared" / "etiquette.md").write_bytes(b"X\x00po-3v/sops/build-po.md\x00Y")
+    (d1 / "shared" / "etiquette.md").write_bytes(
+        b"X\x00bidlevel/sops/bid-leveling-checklist.md\x00Y"
+    )
 
     d2 = tmp_path / "b" / "agents"
     _write_bundle(d2)
     (d2 / "shared" / "etiquette.md").write_bytes(b"X")
-    (d2 / "po-3v" / "sops" / "build-po.md").write_bytes(b"Y")
+    (d2 / "bidlevel" / "sops" / "bid-leveling-checklist.md").write_bytes(b"Y")
 
     h1 = _compute_bundle_hash(
-        d1 / "po-3v.yaml", d1, ["shared/etiquette.md", "po-3v/sops/build-po.md"]
+        d1 / "bidlevel.yaml", d1, ["shared/etiquette.md", "bidlevel/sops/bid-leveling-checklist.md"]
     )
     h2 = _compute_bundle_hash(
-        d2 / "po-3v.yaml", d2, ["shared/etiquette.md", "po-3v/sops/build-po.md"]
+        d2 / "bidlevel.yaml", d2, ["shared/etiquette.md", "bidlevel/sops/bid-leveling-checklist.md"]
     )
     assert h1 != h2
 
 
 def test_non_utf8_document_fails_validation(agents_dir: Path):
     """A binary document-target file must fail at load, not crash at render."""
-    (agents_dir / "po-3v" / "sops" / "build-po.md").write_bytes(b"\xff\xfe\x00binary")
+    (agents_dir / "bidlevel" / "sops" / "bid-leveling-checklist.md").write_bytes(
+        b"\xff\xfe\x00binary"
+    )
     with pytest.raises(BundleError, match="UTF-8"):
-        load_bundle("po-3v", agents_dir)
+        load_bundle("bidlevel", agents_dir)
 
 
 def test_non_utf8_sandbox_file_still_allowed(agents_dir: Path):
     """Sandbox files stay binary-safe (shipped base64, never decoded)."""
-    (agents_dir / "po-3v" / "sandbox" / "po_flow_write.py").write_bytes(b"\xff\xfe\x00bin")
-    payload = render_bundle_payload(load_bundle("po-3v", agents_dir))
-    decoded = base64.b64decode(payload["sandbox_files"]["tools/po_flow_write.py"])
+    (agents_dir / "bidlevel" / "sandbox" / "leveling_sheet.py").write_bytes(b"\xff\xfe\x00bin")
+    payload = render_bundle_payload(load_bundle("bidlevel", agents_dir))
+    decoded = base64.b64decode(payload["sandbox_files"]["tools/leveling_sheet.py"])
     assert decoded == b"\xff\xfe\x00bin"
 
 
@@ -247,9 +257,9 @@ def test_non_utf8_sandbox_file_still_allowed(agents_dir: Path):
 def test_expand_extends_merges_bundle_and_overlay(agents_dir: Path):
     data = {
         "id": "trial-123",
-        "extends": "po-3v",
+        "extends": "bidlevel",
         "system_prompt_prefix": "CONTRACT PREAMBLE",
-        "system_prompt_suffix": "Task: build POs for batch 7.",
+        "system_prompt_suffix": "Task: level bids for package 7.",
         "feature_flags": {"auto_associative_memory": "off"},
         "tools": [],
     }
@@ -258,8 +268,8 @@ def test_expand_extends_merges_bundle_and_overlay(agents_dir: Path):
     assert cfg.id == "trial-123"
     assert cfg.model == "anthropic/claude-sonnet-4-5"  # from bundle
     assert cfg.system_prompt == (
-        "CONTRACT PREAMBLE\n\nYou are the PO agent.\n\nBe concise."
-        "\n\nTask: build POs for batch 7."
+        "CONTRACT PREAMBLE\n\nYou are the bid-leveling agent.\n\nBe concise."
+        "\n\nTask: level bids for package 7."
     )
     # Overlay wins on flag collision.
     assert cfg.feature_flags["auto_associative_memory"] == "off"
@@ -268,20 +278,20 @@ def test_expand_extends_merges_bundle_and_overlay(agents_dir: Path):
 
 def test_expand_extends_model_override(agents_dir: Path):
     merged = expand_extends(
-        {"id": "t", "extends": "po-3v", "model": "openai/gpt-5"}, agents_dir=agents_dir
+        {"id": "t", "extends": "bidlevel", "model": "openai/gpt-5"}, agents_dir=agents_dir
     )
     assert merged["model"] == "openai/gpt-5"
 
 
 def test_expand_extends_requires_id(agents_dir: Path):
     with pytest.raises(BundleError, match="must set `id`"):
-        expand_extends({"extends": "po-3v"}, agents_dir=agents_dir)
+        expand_extends({"extends": "bidlevel"}, agents_dir=agents_dir)
 
 
 def test_expand_extends_rejects_system_prompt(agents_dir: Path):
     with pytest.raises(BundleError, match="must not also set"):
         expand_extends(
-            {"id": "t", "extends": "po-3v", "system_prompt": "x"}, agents_dir=agents_dir
+            {"id": "t", "extends": "bidlevel", "system_prompt": "x"}, agents_dir=agents_dir
         )
 
 
@@ -293,7 +303,7 @@ def test_loader_expands_extends_via_env(agents_dir: Path, tmp_path: Path, monkey
         json.dumps(
             {
                 "id": "trial-9",
-                "extends": "po-3v",
+                "extends": "bidlevel",
                 "system_prompt_suffix": "Do the task.",
                 "tools": [],
             }
@@ -366,21 +376,21 @@ def test_cli_validate_agents(agents_dir: Path, capsys):
     rc = main(["validate-agents", "--agents-dir", str(agents_dir)])
     assert rc == 0
     out = capsys.readouterr().out
-    assert out.startswith("po-3v sha256:")
+    assert out.startswith("bidlevel sha256:")
 
 
 def test_cli_validate_agents_fails_on_bad_bundle(agents_dir: Path, capsys):
-    (agents_dir / "po-3v" / "system.md").unlink()
+    (agents_dir / "bidlevel" / "system.md").unlink()
     rc = main(["validate-agents", "--agents-dir", str(agents_dir)])
     assert rc == 1
     assert "system.md" in capsys.readouterr().err
 
 
 def test_cli_render_agent(agents_dir: Path, capsys):
-    rc = main(["render-agent", "po-3v", "--agents-dir", str(agents_dir)])
+    rc = main(["render-agent", "bidlevel", "--agents-dir", str(agents_dir)])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["name"] == "po-3v"
+    assert payload["name"] == "bidlevel"
     assert payload["bundle_hash"].startswith("sha256:")
 
 
@@ -389,7 +399,7 @@ def test_cli_render_manifest(agents_dir: Path, capsys):
     assert rc == 0
     manifest = json.loads(capsys.readouterr().out)
     assert manifest["harness_git_sha"] == "b" * 40
-    assert [a["name"] for a in manifest["agents"]] == ["po-3v"]
+    assert [a["name"] for a in manifest["agents"]] == ["bidlevel"]
 
 
 def test_cli_generate_spec_check_passes(capsys):
@@ -409,4 +419,4 @@ def test_example_bundle_validates(capsys):
     examples = Path(__file__).resolve().parents[1] / "examples" / "bundles"
     rc = main(["validate-agents", "--agents-dir", str(examples)])
     assert rc == 0
-    assert capsys.readouterr().out.startswith("example-po sha256:")
+    assert capsys.readouterr().out.startswith("bidlevel sha256:")

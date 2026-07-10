@@ -7,33 +7,33 @@
 # shared/ fragment.
 #
 # Validate:   uv run harness validate-agents --agents-dir examples/bundles
-# Render:     uv run harness render-agent example-po --agents-dir examples/bundles
+# Render:     uv run harness render-agent bidlevel --agents-dir examples/bundles
 # Schema:     harness-spec.json (generated from src/harness/spec.py)
 
 spec_version: 1
-name: example-po
-display_name: Example PO Agent
+name: bidlevel
+display_name: Bid Leveling Assistant
 model: anthropic/claude-sonnet-4-5
 reasoning_effort: high
 max_tokens: 16384
 max_sleep_hours: 24
 timezone: America/New_York
 
-system_prompt_file: example-po/system.md
+system_prompt_file: bidlevel/system.md
 prompt_fragments:
   - shared/communication-style.md
 
 files:
   # `document` files become Bedrock Document rows (kind=skill), upserted
   # by title on sync; the agent reads them via get_document.
-  - path: example-po/sops/build-po.md
+  - path: bidlevel/sops/bid-leveling-checklist.md
     target: document
-    title: "SOP: build a purchase order"
+    title: "SOP: bid leveling checklist"
   # `sandbox` files are shipped into the agent's Computer (Blaxel)
   # sandbox by Bedrock's pre-wake apply step.
-  - path: example-po/sandbox/po_flow_write.py
+  - path: bidlevel/sandbox/leveling_sheet.py
     target: sandbox
-    dest: tools/po_flow_write.py
+    dest: tools/leveling_sheet.py
 
 # Adapter presence only -- credentials always stay in Bedrock.
 adapters:
