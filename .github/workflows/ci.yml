@@ -42,7 +42,7 @@ jobs:
         run: uv run harness generate-spec --check
 
       # Validate the example bundle layout. Real bundles live in the
-      # private orinlabs/agents repo (whose own CI validates + syncs them);
+      # (private) agents repo (whose own CI validates + syncs them);
       # this keeps the tooling honest against a realistic fixture. No
       # agent-sync happens from this repo.
       - name: Validate example agent bundles

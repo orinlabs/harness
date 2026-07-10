@@ -1,6 +1,6 @@
 # Example repo-managed agent bundle.
 #
-# Real bundles live in the private orinlabs/agents repo (one <name>.yaml +
+# Real bundles live in the (private) agents repo (one <name>.yaml +
 # <name>/ folder per production agent); this copy exists so (a) the schema
 # has a living, validated example and (b) CI exercises
 # `harness validate-agents` against a realistic layout, including a
@@ -24,13 +24,13 @@ prompt_fragments:
   - shared/communication-style.md
 
 files:
-  # `document` files become Bedrock Document rows (kind=skill), upserted
-  # by title on sync; the agent reads them via get_document.
+  # `document` files are delivered as agent documents (kind=skill),
+  # upserted by title on sync; the agent reads them via get_document.
   - path: bidlevel/sops/bid-leveling-checklist.md
     target: document
     title: "SOP: bid leveling checklist"
-  # `sandbox` files are shipped into the agent's Computer (Blaxel)
-  # sandbox by Bedrock's pre-wake apply step.
+  # `sandbox` files are shipped into the agent's sandbox, applied by
+  # the control plane before the agent wakes.
   - path: bidlevel/sandbox/leveling_sheet.py
     target: sandbox
     dest: tools/leveling_sheet.py

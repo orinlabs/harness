@@ -267,7 +267,7 @@ def expand_extends(data: dict, *, agents_dir: str | Path | None = None) -> dict:
 
         {
           "id": "<trial id>",              # required; runtime identity
-          "extends": "3vpo",
+          "extends": "bidlevel",
           "tools": [...],                  # env/world tools (overlay-owned)
           "model": "...",                  # optional; overrides the bundle pin
           "system_prompt_prefix": "...",   # e.g. the rollout contract preamble

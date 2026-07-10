@@ -3,7 +3,7 @@
   "$defs": {
     "BundleFile": {
       "additionalProperties": false,
-      "description": "A file shipped with the bundle.\n\n``target`` picks the delivery mechanism:\n\n* ``document`` -- becomes a Bedrock ``Document`` row (kind=skill by\n  default), upserted by title on sync. Readable via the agent's\n  ``get_document`` tools and visible in the portal.\n* ``sandbox`` -- shipped as a plain file into the agent's Computer\n  (Blaxel) sandbox by Bedrock's pre-wake apply step. ``dest`` is the\n  sandbox-relative destination path (defaults to the bundle-relative\n  source path).",
+      "description": "A file shipped with the bundle.\n\n``target`` picks the delivery mechanism:\n\n* ``document`` -- delivered as an agent document via the control\n  plane (kind=skill by default), upserted by title on sync. Readable\n  via the agent's ``get_document`` tools and visible in the portal.\n* ``sandbox`` -- shipped as a plain file into the agent's sandbox,\n  applied by the control plane before the agent wakes. ``dest`` is the\n  sandbox-relative destination path (defaults to the bundle-relative\n  source path).",
       "properties": {
         "dest": {
           "anyOf": [

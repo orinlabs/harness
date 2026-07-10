@@ -80,11 +80,11 @@ class BundleFile(BaseModel):
 
     ``target`` picks the delivery mechanism:
 
-    * ``document`` -- becomes a Bedrock ``Document`` row (kind=skill by
-      default), upserted by title on sync. Readable via the agent's
-      ``get_document`` tools and visible in the portal.
-    * ``sandbox`` -- shipped as a plain file into the agent's Computer
-      (Blaxel) sandbox by Bedrock's pre-wake apply step. ``dest`` is the
+    * ``document`` -- delivered as an agent document via the control
+      plane (kind=skill by default), upserted by title on sync. Readable
+      via the agent's ``get_document`` tools and visible in the portal.
+    * ``sandbox`` -- shipped as a plain file into the agent's sandbox,
+      applied by the control plane before the agent wakes. ``dest`` is the
       sandbox-relative destination path (defaults to the bundle-relative
       source path).
     """
