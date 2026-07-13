@@ -28,7 +28,7 @@
           "type": "string"
         },
         "path": {
-          "description": "Source path relative to the manifest's directory.",
+          "description": "Source path relative to the agents dir (the bundle folder's parent), e.g. '<name>/sops/checklist.md' or 'shared/tone.md'.",
           "title": "Path",
           "type": "string"
         },
@@ -90,7 +90,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Schema for ``agents/<name>.yaml`` in the agents repo.",
+  "description": "Schema for ``agents/<name>/index.yaml`` in the agents repo.",
   "properties": {
     "adapters": {
       "description": "Adapter names (presence only; credentials stay in Bedrock).",
@@ -261,7 +261,7 @@
         }
       ],
       "default": null,
-      "description": "Path to the prompt file, relative to the manifest's directory.",
+      "description": "Path to the prompt file, relative to the agents dir.",
       "title": "System Prompt File"
     },
     "timezone": {

@@ -994,7 +994,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument(
             "--agents-dir",
             default=None,
-            help="Directory holding <name>.yaml bundle manifests. Defaults to "
+            help="Directory holding <name>/index.yaml bundle folders. Defaults to "
             "$HARNESS_AGENTS_DIR, then ./agents.",
         )
         p.add_argument(
@@ -1007,7 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
         "validate-agents",
         help="Validate every agent bundle in an agents dir; print name + bundle hash.",
         description=(
-            "CI gate for the agents repo. Validates each <name>.yaml against "
+            "CI gate for the agents repo. Validates each <name>/index.yaml against "
             "the harness.spec schema, checks every referenced file exists, "
             "runs a secret tripwire scan, and prints `<name> <bundle_hash>` "
             "per bundle. The bundle hash covers the manifest plus its "
@@ -1026,7 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
         "render-agent",
         help="Render one bundle (prompt, documents, sandbox files, hash) as JSON.",
     )
-    render_agent_p.add_argument("name", help="Bundle name (file stem of <name>.yaml).")
+    render_agent_p.add_argument("name", help="Bundle name (folder holding <name>/index.yaml).")
     _add_agents_dir_flag(render_agent_p)
 
     render_manifest_p = subparsers.add_parser(

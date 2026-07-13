@@ -1,7 +1,8 @@
 # Example repo-managed agent bundle.
 #
-# Real bundles live in the (private) agents repo (one <name>.yaml +
-# <name>/ folder per production agent); this copy exists so (a) the schema
+# Real bundles live in the (private) agents repo (one <name>/ folder per
+# production agent, with the manifest at <name>/index.yaml); this copy
+# exists so (a) the schema
 # has a living, validated example and (b) CI exercises
 # `harness validate-agents` against a realistic layout, including a
 # shared/ fragment.

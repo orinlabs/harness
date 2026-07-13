@@ -49,7 +49,7 @@ def _write_bundle(
     )
     (bundle_dir / "sandbox" / "leveling_sheet.py").write_text("print('hi')\n")
 
-    manifest = agents_dir / f"{name}.yaml"
+    manifest = bundle_dir / "index.yaml"
     manifest.write_text(
         f"""\
 spec_version: {SPEC_VERSION}
@@ -96,11 +96,12 @@ def test_load_bundle_renders_prompt_in_order(agents_dir: Path):
     assert bundle.manifest.memory == type(bundle.manifest.memory)()  # defaults
 
 
-def test_bundle_name_must_match_file_stem(tmp_path: Path):
+def test_bundle_name_must_match_folder_name(tmp_path: Path):
     d = tmp_path / "agents"
     _write_bundle(d, "bidlevel")
-    (d / "renamed.yaml").write_text((d / "bidlevel.yaml").read_text())
-    with pytest.raises(BundleError, match="must match the file stem"):
+    (d / "renamed").mkdir()
+    (d / "renamed" / "index.yaml").write_text((d / "bidlevel" / "index.yaml").read_text())
+    with pytest.raises(BundleError, match="must match the bundle folder name"):
         load_bundle("renamed", d)
 
 
@@ -113,7 +114,7 @@ def test_missing_referenced_file_fails(agents_dir: Path):
 def test_prompt_literal_and_file_mutually_exclusive(tmp_path: Path):
     d = tmp_path / "agents"
     _write_bundle(d)
-    manifest = d / "bidlevel.yaml"
+    manifest = d / "bidlevel" / "index.yaml"
     manifest.write_text(manifest.read_text() + 'system_prompt: "inline too"\n')
     with pytest.raises(BundleError, match="exactly one of"):
         load_bundle("bidlevel", d)
@@ -174,8 +175,11 @@ def test_render_sync_manifest_lists_all_bundles(tmp_path: Path):
 def test_list_bundle_names_skips_legacy_configs(tmp_path: Path):
     d = tmp_path / "agents"
     _write_bundle(d)
-    # Legacy standalone config (has `id`, no spec_version) must be ignored.
+    # Legacy standalone config (top-level yaml, has `id`, no spec_version)
+    # must be ignored, as must a folder whose index.yaml isn't a manifest.
     (d / "demo.yaml").write_text("id: demo\nmodel: m\nsystem_prompt: hi\n")
+    (d / "legacy").mkdir()
+    (d / "legacy" / "index.yaml").write_text("id: legacy\nmodel: m\nsystem_prompt: hi\n")
     assert list_bundle_names(d) == ["bidlevel"]
 
 
@@ -224,10 +228,14 @@ def test_bundle_hash_immune_to_framing_collision(tmp_path: Path):
     (d2 / "bidlevel" / "sops" / "bid-leveling-checklist.md").write_bytes(b"Y")
 
     h1 = _compute_bundle_hash(
-        d1 / "bidlevel.yaml", d1, ["shared/etiquette.md", "bidlevel/sops/bid-leveling-checklist.md"]
+        d1 / "bidlevel" / "index.yaml",
+        d1,
+        ["shared/etiquette.md", "bidlevel/sops/bid-leveling-checklist.md"],
     )
     h2 = _compute_bundle_hash(
-        d2 / "bidlevel.yaml", d2, ["shared/etiquette.md", "bidlevel/sops/bid-leveling-checklist.md"]
+        d2 / "bidlevel" / "index.yaml",
+        d2,
+        ["shared/etiquette.md", "bidlevel/sops/bid-leveling-checklist.md"],
     )
     assert h1 != h2
 

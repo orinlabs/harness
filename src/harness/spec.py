@@ -1,9 +1,11 @@
 """Repo-managed agent bundle spec.
 
-A *bundle* is the git-authored definition of a production agent: a
-``<name>.yaml`` manifest plus an optional ``<name>/`` folder holding the
-system prompt, SOP/prompt fragments, and files to ship. Bundles live in
-the (private) agents repo, NOT in this repo -- the harness only owns the
+A *bundle* is the git-authored definition of a production agent: one
+``<name>/`` folder holding an ``index.yaml`` manifest plus the system
+prompt, SOP/prompt fragments, and files to ship. Paths inside the
+manifest resolve against the *agents dir* (the folder's parent), so
+``shared/`` fragments work without traversal. Bundles live in the
+(private) agents repo, NOT in this repo -- the harness only owns the
 schema and the validation/rendering tooling (``harness validate-agents``
 and ``harness render-agent``).
 
@@ -106,7 +108,12 @@ class BundleFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    path: str = Field(description="Source path relative to the manifest's directory.")
+    path: str = Field(
+        description=(
+            "Source path relative to the agents dir (the bundle folder's "
+            "parent), e.g. '<name>/sops/checklist.md' or 'shared/tone.md'."
+        )
+    )
     target: Literal["document", "sandbox"]
     # document-target options
     title: str | None = Field(
@@ -133,7 +140,7 @@ class BundleFile(BaseModel):
 
 
 class RepoAgentManifest(BaseModel):
-    """Schema for ``agents/<name>.yaml`` in the agents repo."""
+    """Schema for ``agents/<name>/index.yaml`` in the agents repo."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -159,7 +166,7 @@ class RepoAgentManifest(BaseModel):
     )
     system_prompt_file: str | None = Field(
         default=None,
-        description="Path to the prompt file, relative to the manifest's directory.",
+        description="Path to the prompt file, relative to the agents dir.",
     )
     prompt_fragments: list[str] = Field(
         default_factory=list,

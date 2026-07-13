@@ -1,9 +1,9 @@
 """Load, render, and hash repo-managed agent bundles.
 
 A bundle lives in an *agents dir* (the checkout of the private agents
-repo, or any directory with the same layout):
+repo, or any directory with the same layout). One folder per agent:
 
-    <agents-dir>/<name>.yaml        # RepoAgentManifest (see harness.spec)
+    <agents-dir>/<name>/index.yaml  # RepoAgentManifest (see harness.spec)
     <agents-dir>/<name>/...         # prompt files, SOPs, sandbox files
     <agents-dir>/shared/...         # fragments shared across bundles
 
@@ -87,16 +87,18 @@ def resolve_agents_dir(explicit: str | Path | None = None) -> Path:
 
 
 def list_bundle_names(agents_dir: Path) -> list[str]:
-    """Bundle names = ``*.yaml``/``*.yml`` files that parse as manifests.
+    """Bundle names = directories with an ``index.yaml``/``index.yml`` manifest.
 
-    Non-manifest agent configs (e.g. the legacy standalone schema with a
-    top-level ``id``) are skipped so a mixed directory doesn't explode.
+    One folder per agent; ``shared/`` (and any other folder without an
+    index manifest) is skipped naturally. Non-manifest configs (e.g. the
+    legacy standalone schema with a top-level ``id``) are skipped so a
+    mixed directory doesn't explode.
     """
     names: list[str] = []
-    for path in sorted(agents_dir.glob("*.y*ml")):
+    for path in sorted(agents_dir.glob("*/index.y*ml")):
         data = _read_yaml(path)
         if isinstance(data, dict) and "spec_version" in data:
-            names.append(path.stem)
+            names.append(path.parent.name)
     return names
 
 
@@ -106,7 +108,7 @@ def list_bundle_names(agents_dir: Path) -> list[str]:
 
 
 def load_bundle(name: str, agents_dir: str | Path | None = None) -> LoadedBundle:
-    """Load ``<agents-dir>/<name>.yaml``, validate, render, and hash it."""
+    """Load ``<agents-dir>/<name>/index.yaml``, validate, render, and hash it."""
     base = resolve_agents_dir(agents_dir)
     manifest_path = _find_manifest(base, name)
     data = _read_yaml(manifest_path)
@@ -120,7 +122,8 @@ def load_bundle(name: str, agents_dir: str | Path | None = None) -> LoadedBundle
 
     if manifest.name != name:
         raise BundleError(
-            f"{manifest_path}: manifest name {manifest.name!r} must match the file stem {name!r}"
+            f"{manifest_path}: manifest name {manifest.name!r} must match the "
+            f"bundle folder name {name!r}"
         )
 
     referenced = _referenced_files(manifest)
@@ -319,10 +322,10 @@ def expand_extends(data: dict, *, agents_dir: str | Path | None = None) -> dict:
 
 def _find_manifest(agents_dir: Path, name: str) -> Path:
     for ext in (".yaml", ".yml"):
-        p = agents_dir / f"{name}{ext}"
+        p = agents_dir / name / f"index{ext}"
         if p.is_file():
             return p
-    raise BundleError(f"no bundle manifest for {name!r} in {agents_dir}")
+    raise BundleError(f"no bundle manifest ({name}/index.yaml) for {name!r} in {agents_dir}")
 
 
 def _read_yaml(path: Path):
@@ -373,7 +376,11 @@ def _compute_bundle_hash(manifest_path: Path, base: Path, referenced: list[str])
     can't collide by crafting content that mimics entry framing.
     """
     h = hashlib.sha256()
-    entries = [(manifest_path.name, manifest_path)] + [(rel, base / rel) for rel in referenced]
+    # Key the manifest by its agents-dir-relative path (<name>/index.yaml):
+    # every bundle's manifest is named index.yaml, so the bare filename
+    # would no longer distinguish bundles.
+    manifest_rel = manifest_path.relative_to(base).as_posix()
+    entries = [(manifest_rel, manifest_path)] + [(rel, base / rel) for rel in referenced]
     for rel, path in entries:
         content_digest = hashlib.sha256(path.read_bytes()).hexdigest()
         h.update(f"{rel}\x00{content_digest}\n".encode())
