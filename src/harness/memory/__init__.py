@@ -1,3 +1,4 @@
+from harness.memory.base import MemoryBackend, build_memory
 from harness.memory.context import MemoryContextBuilder, MemoryData
 from harness.memory.export import (
     EXPORT_BEGIN_MARKER,
@@ -17,9 +18,11 @@ from harness.memory.types import PeriodType
 __all__ = [
     "EXPORT_BEGIN_MARKER",
     "EXPORT_END_MARKER",
+    "MemoryBackend",
     "MemoryContextBuilder",
     "MemoryData",
     "MemoryService",
+    "build_memory",
     "PeriodType",
     "SanitizationResult",
     "SummaryUpdater",

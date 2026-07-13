@@ -50,7 +50,7 @@ from typing import Any
 
 import yaml
 
-from harness.config import AgentConfig, ExternalToolSpec, ToolAuth
+from harness.config import AgentConfig, ExternalToolSpec, MemoryConfig, ToolAuth
 
 # Fixed, repo-relative. "./agents/<name>.yaml".
 _AGENTS_DIR_NAME = "agents"
@@ -109,6 +109,7 @@ def build_agent_config(data: dict[str, Any]) -> AgentConfig:
         max_tokens=_opt_int(data.get("max_tokens")),
         timezone=_opt_str(data.get("timezone") or data.get("time_zone")),
         feature_flags=_feature_flags(data.get("feature_flags")),
+        memory=_memory(data.get("memory")),
         tools=[_tool(t) for t in data.get("tools", []) or []],
     )
 
@@ -169,6 +170,25 @@ def _opt_int(value: Any) -> int | None:
     if parsed <= 0:
         raise ValueError(f"expected positive integer value, got {parsed}")
     return parsed
+
+
+def _memory(value: Any) -> MemoryConfig:
+    """Coerce the optional ``memory`` block into a ``MemoryConfig``.
+
+    Absent/None means defaults (today's behavior). Unknown keys are
+    rejected so a typo'd option fails loudly instead of silently running
+    the default backend.
+    """
+    if value is None:
+        return MemoryConfig()
+    if not isinstance(value, dict):
+        raise ValueError(f"memory must be a mapping, got {type(value).__name__}")
+    allowed = {"system", "summarizer_model"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"memory: unknown key(s): {', '.join(sorted(unknown))}")
+    kwargs = {k: str(v) for k, v in value.items() if v is not None}
+    return MemoryConfig(**kwargs)
 
 
 def _feature_flags(value: Any) -> dict[str, str]:

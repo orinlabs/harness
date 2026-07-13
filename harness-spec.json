@@ -1,0 +1,223 @@
+{
+  "$comment": "Input spec: the agent config accepted by this harness commit. Generated from harness.spec; do not edit by hand: uv run python -m harness.spec > harness-spec.json",
+  "$defs": {
+    "ExternalToolSpecModel": {
+      "additionalProperties": false,
+      "description": "One entry of ``tools[]`` -- an HTTP-invoked tool.\n\nMirrors ``harness.config.ExternalToolSpec``; the harness POSTs\n``{\"args\", \"agent_id\", \"run_id\"}`` to ``url`` and expects back\n``{\"text\", \"images\"?}``.",
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/ToolAuthSpec"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "forward_trace_context": {
+          "default": false,
+          "title": "Forward Trace Context",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "description": "JSON Schema for the tool's arguments.",
+          "title": "Parameters",
+          "type": "object"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "null/omitted uses the harness default timeout.",
+          "title": "Timeout Seconds"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "parameters",
+        "url"
+      ],
+      "title": "ExternalToolSpecModel",
+      "type": "object"
+    },
+    "MemorySpec": {
+      "additionalProperties": false,
+      "description": "Per-agent memory selection (see ``harness.config.MemoryConfig``).\n\nOmitting the block entirely is always safe: every field's null/absent\nstate means \"whatever the running harness decides\". Memory tunables\nonly become spec fields when their absence has a well-defined\n\"harness decides\" meaning -- otherwise every rendered config would\nbake in whatever the default was on the day it was rendered.",
+      "properties": {
+        "summarizer_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for memory summarization. null/omitted means 'whatever the running harness defaults to' (currently 'openai/gpt-5-nano', resolved by the memory factory at construction time); a set value pins it. The default is deliberately NOT baked in here: if it were, every rendered config would silently pin today's default, and a fleet-wide summarizer upgrade would require editing every config.",
+          "title": "Summarizer Model"
+        },
+        "system": {
+          "const": "tiered_sqlite",
+          "default": "tiered_sqlite",
+          "title": "System",
+          "type": "string"
+        }
+      },
+      "title": "MemorySpec",
+      "type": "object"
+    },
+    "ToolAuthSpec": {
+      "additionalProperties": false,
+      "description": "Auth for an external tool call (see ``harness.config.ToolAuth``).",
+      "properties": {
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "kind": {
+          "default": "none",
+          "enum": [
+            "none",
+            "bearer_env",
+            "bearer_literal",
+            "headers"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token"
+        },
+        "token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Env"
+        }
+      },
+      "title": "ToolAuthSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The flat agent config the harness runtime accepts.\n\nStrict mirror of ``harness.config_loader.build_agent_config`` /\n``harness.config.AgentConfig``. ``id`` is the runtime identity,\ninjected by whoever instantiates the agent (a Bedrock UUID in\nproduction, a trial id in evals) -- authoring formats upstream of\nthis spec deliberately have no ``id``.",
+  "properties": {
+    "feature_flags": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Per-agent flags, name -> stored value (typically \"on\"/\"off\").",
+      "title": "Feature Flags",
+      "type": "object"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "max_tokens": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Tokens"
+    },
+    "memory": {
+      "$ref": "#/$defs/MemorySpec"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string"
+    },
+    "reasoning_effort": {
+      "anyOf": [
+        {
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reasoning Effort"
+    },
+    "system_prompt": {
+      "title": "System Prompt",
+      "type": "string"
+    },
+    "timezone": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "IANA timezone for agent-local, user-visible times.",
+      "title": "Timezone"
+    },
+    "tools": {
+      "description": "Flat tool list -- no adapter grouping ever reaches the harness.",
+      "items": {
+        "$ref": "#/$defs/ExternalToolSpecModel"
+      },
+      "title": "Tools",
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "model",
+    "system_prompt"
+  ],
+  "title": "AgentConfigSpec",
+  "type": "object"
+}

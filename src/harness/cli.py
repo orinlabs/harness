@@ -31,6 +31,17 @@ Subcommands:
                                           # can extract it from combined
                                           # exec output.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
+    harness validate-config FILE          # Validate an agent config file
+                                          # against THIS checkout: strict
+                                          # spec (unknown keys are errors)
+                                          # + the real loader. The
+                                          # compatibility gate external
+                                          # callers (Bedrock, agents-repo
+                                          # CI) run per harness commit.
+    harness generate-spec [--check]       # Print the agent-config input
+                                          # JSON Schema; --check exits 1
+                                          # when the committed
+                                          # harness-spec.json is stale.
 
 Environment is loaded from the first `.env` found by walking up from cwd
 (so a per-repo `.env` shadows an org-level `.env` one or more directories
@@ -614,6 +625,64 @@ def _cmd_export_memory(args, parser: argparse.ArgumentParser) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommands: input-spec tooling (validate-config / generate-spec)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_validate_config(args, parser: argparse.ArgumentParser) -> int:
+    """Validate an agent config file against THIS harness checkout.
+
+    The compatibility oracle for external callers: Bedrock (at dispatch)
+    and the agents repo's CI run this from the harness checkout at the
+    ref they intend to run, so "is this config compatible with harness @
+    SHA" is answered by the exact code that would consume it. Strict spec
+    validation (unknown keys are errors) + the real config loader.
+    """
+    from harness.spec import validate_config_file
+
+    errors = validate_config_file(Path(args.path))
+    if errors:
+        for err in errors:
+            print(f"ERROR: {err}", file=sys.stderr)
+        return 1
+    print(f"{args.path}: OK")
+    return 0
+
+
+def _cmd_generate_spec(args, parser: argparse.ArgumentParser) -> int:
+    """Print the agent-config input JSON Schema, or --check the committed copy.
+
+    ``--check`` compares ``harness-spec.json`` at the repo root against the
+    schema generated from the live Pydantic models and exits 1 when stale.
+    CI runs this so the committed schema can never drift from the code.
+    """
+    import json as _json
+
+    from harness.spec import spec_json_schema
+
+    generated = spec_json_schema()
+    if not args.check:
+        print(_json.dumps(generated, indent=2, sort_keys=True))
+        return 0
+
+    spec_path = Path(__file__).resolve().parents[2] / "harness-spec.json"
+    try:
+        committed = _json.loads(spec_path.read_text())
+    except FileNotFoundError:
+        parser.exit(1, f"generate-spec --check: {spec_path} does not exist\n")
+    except ValueError as e:
+        parser.exit(1, f"generate-spec --check: {spec_path} is not valid JSON: {e}\n")
+    if committed != generated:
+        parser.exit(
+            1,
+            "generate-spec --check: harness-spec.json is stale. Regenerate with:\n"
+            "  uv run harness generate-spec > harness-spec.json\n",
+        )
+    print("harness-spec.json is up to date")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Argparse + entrypoint
 # ---------------------------------------------------------------------------
 
@@ -855,6 +924,40 @@ def main(argv: list[str] | None = None) -> int:
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
 
+    validate_config_p = subparsers.add_parser(
+        "validate-config",
+        help="Validate an agent config file against this harness checkout.",
+        description=(
+            "The compatibility oracle: strict input-spec validation (unknown "
+            "keys are errors, so configs written for a newer harness fail "
+            "loudly) plus the real config loader. External callers (Bedrock "
+            "at dispatch, the agents repo's CI) run this from the harness "
+            "checkout at the ref they intend to run."
+        ),
+    )
+    validate_config_p.add_argument("path", help="Path to the agent config (YAML or JSON).")
+    validate_config_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
+
+    generate_spec_p = subparsers.add_parser(
+        "generate-spec",
+        help="Print the agent-config input JSON Schema (or --check the committed copy).",
+    )
+    generate_spec_p.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit 1 if the committed harness-spec.json differs from the "
+        "schema generated from the live models.",
+    )
+    generate_spec_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
+
     args = parser.parse_args(argv)
 
     _configure_logging(args.log_level)
@@ -890,6 +993,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_forget_memory(args, forget_p)
     if args.command == "export-memory":
         return _cmd_export_memory(args, export_p)
+    if args.command == "validate-config":
+        return _cmd_validate_config(args, validate_config_p)
+    if args.command == "generate-spec":
+        return _cmd_generate_spec(args, generate_spec_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval
