@@ -1,83 +1,100 @@
-"""Repo-managed agent bundle spec.
+"""Harness runtime-config input spec.
 
-A *bundle* is the git-authored definition of a production agent: one
-``<name>/`` folder holding an ``index.yaml`` manifest plus the system
-prompt, SOP/prompt fragments, and files to ship. Paths inside the
-manifest resolve against the *agents dir* (the folder's parent), so
-``shared/`` fragments work without traversal. Bundles live in the
-(private) agents repo, NOT in this repo -- the harness only owns the
-schema and the validation/rendering tooling (``harness validate-agents``
-and ``harness render-agent``).
+The harness runtime takes exactly one input: a flat agent config -- a
+YAML/JSON file on disk, or the JSON Bedrock serves through its
+``harness-config`` endpoint. This module is the *published contract* for
+that input:
 
-Contract notes:
-
-* ``SPEC_VERSION`` is the manifest schema version this checkout
-  understands. The agents-repo CI stamps it into the sync manifest so
-  Bedrock can refuse payloads newer than it supports.
+* ``AgentConfigSpec`` is a strict Pydantic mirror of what
+  ``harness.config_loader.build_agent_config`` accepts. Unknown keys are
+  errors here (``extra="forbid"``) even where the loader would ignore
+  them: ``harness validate-config`` uses this model precisely so that a
+  config written for a *newer* harness fails loudly instead of having its
+  new fields silently dropped.
 * ``harness-spec.json`` at the repo root is *generated* from
-  ``RepoAgentManifest.model_json_schema()``. A unit test asserts the
-  committed file matches the models, so external consumers (Bedrock, the
-  portal, the agents repo) get a machine-readable schema without a
-  second hand-maintained source of truth. Regenerate with:
+  ``AgentConfigSpec.model_json_schema()`` and committed, so external
+  consumers (Bedrock, the agents repo's CI) can check whether a rendered
+  config is compatible with ANY harness commit by fetching that commit's
+  copy -- no harness process required. A unit test asserts the committed
+  file matches the models. Regenerate with:
 
       uv run python -m harness.spec > harness-spec.json
 
-* Manifests deliberately have no ``id``: the runtime agent id is a
-  Bedrock UUID (production) or a trial id (evals), injected by whoever
-  instantiates the bundle. ``name`` identifies the bundle itself.
-* Manifests must never carry secrets. Adapter credentials live in
-  Bedrock's per-agent adapter configs; tool endpoints/auth are deployment
-  facts stamped by Bedrock at run time.
+Versioning is by git commit -- the schema travels with the code, so
+"compatible with harness @ SHA" means "validates against harness-spec.json
+@ SHA" (fast path) or "``harness validate-config`` exits 0 at that
+checkout" (authoritative path; it additionally runs the real loader).
+
+The *authoring* format for repo-managed agents (bundle folders,
+``index.yaml``, prompt fragments, shipped files) is owned by the private
+agents repo and its renderer. The harness knows nothing about it;
+renderers must emit configs that satisfy THIS spec.
 """
 
 from __future__ import annotations
 
-import re
+import json
+from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-SPEC_VERSION = 1
-
-# Bundle names double as file/dir names and Bedrock's ``repo_agent_name``
-# key; keep them boring.
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-# The memory system named by ``MemorySpec.system`` today. New backends
-# register here so old manifests fail loudly on a checkout that predates
-# the backend they ask for.
-KNOWN_MEMORY_SYSTEMS = ("tiered_sqlite",)
+import yaml
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 DEFAULT_SUMMARIZER_MODEL = "openai/gpt-5-nano"
 
+# The memory systems this checkout can construct (see
+# ``harness.memory.build_memory``). New backends register here so configs
+# that ask for them fail validation on checkouts that predate them.
+KNOWN_MEMORY_SYSTEMS = ("tiered_sqlite",)
 
-def _require_bundle_relative(value: str, field: str) -> None:
-    """Reject absolute paths and ``..`` segments.
 
-    Every path in a manifest resolves against the agents dir and is then
-    read, hashed, and replicated into sync payloads -- an escaping path
-    would exfiltrate arbitrary host files into the rendered prompt.
+class ToolAuthSpec(BaseModel):
+    """Auth for an external tool call (see ``harness.config.ToolAuth``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["none", "bearer_env", "bearer_literal", "headers"] = "none"
+    token_env: str | None = None
+    token: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class ExternalToolSpecModel(BaseModel):
+    """One entry of ``tools[]`` -- an HTTP-invoked tool.
+
+    Mirrors ``harness.config.ExternalToolSpec``; the harness POSTs
+    ``{"args", "agent_id", "run_id"}`` to ``url`` and expects back
+    ``{"text", "images"?}``.
     """
-    if value.startswith("/") or ".." in value.split("/"):
-        raise ValueError(f"{field} must be a relative path inside the bundle: {value!r}")
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str
+    parameters: dict = Field(description="JSON Schema for the tool's arguments.")
+    url: str
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="null/omitted uses the harness default timeout.",
+    )
+    auth: ToolAuthSpec = Field(default_factory=ToolAuthSpec)
+    forward_trace_context: bool = False
 
 
 class MemorySpec(BaseModel):
-    """Per-agent memory configuration.
+    """Per-agent memory selection (see ``harness.config.MemoryConfig``).
 
     Omitting the block entirely is always safe: every field's null/absent
-    state means "whatever the running harness decides". That is the
-    general rule for this model -- memory tunables only become spec
-    fields when their absence has a well-defined "harness decides"
-    meaning. Otherwise every synced config would bake in whatever the
-    default was on the day it was rendered.
+    state means "whatever the running harness decides". Memory tunables
+    only become spec fields when their absence has a well-defined
+    "harness decides" meaning -- otherwise every rendered config would
+    bake in whatever the default was on the day it was rendered.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid")
 
     system: Literal["tiered_sqlite"] = "tiered_sqlite"
-    # Summarization runs on a cheap model, never the agent's own model
-    # (see Harness.__init__ for the cost rationale).
     summarizer_model: str | None = Field(
         default=None,
         description=(
@@ -85,156 +102,101 @@ class MemorySpec(BaseModel):
             f"running harness defaults to' (currently {DEFAULT_SUMMARIZER_MODEL!r}, "
             "resolved by the memory factory at construction time); a set value "
             "pins it. The default is deliberately NOT baked in here: if it were, "
-            "every rendered config and bundle hash would silently pin today's "
-            "default, and a fleet-wide summarizer upgrade would require editing "
-            "every bundle yaml."
+            "every rendered config would silently pin today's default, and a "
+            "fleet-wide summarizer upgrade would require editing every config."
         ),
     )
 
 
-class BundleFile(BaseModel):
-    """A file shipped with the bundle.
+class AgentConfigSpec(BaseModel):
+    """The flat agent config the harness runtime accepts.
 
-    ``target`` picks the delivery mechanism:
-
-    * ``document`` -- delivered as an agent document via the control
-      plane (kind=skill by default), upserted by title on sync. Readable
-      via the agent's ``get_document`` tools and visible in the portal.
-    * ``sandbox`` -- shipped as a plain file into the agent's sandbox,
-      applied by the control plane before the agent wakes. ``dest`` is the
-      sandbox-relative destination path (defaults to the bundle-relative
-      source path).
+    Strict mirror of ``harness.config_loader.build_agent_config`` /
+    ``harness.config.AgentConfig``. ``id`` is the runtime identity,
+    injected by whoever instantiates the agent (a Bedrock UUID in
+    production, a trial id in evals) -- authoring formats upstream of
+    this spec deliberately have no ``id``.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    path: str = Field(
-        description=(
-            "Source path relative to the agents dir (the bundle folder's "
-            "parent), e.g. '<name>/sops/checklist.md' or 'shared/tone.md'."
-        )
-    )
-    target: Literal["document", "sandbox"]
-    # document-target options
-    title: str | None = Field(
-        default=None,
-        description="Document title (document target only). Defaults to the file stem.",
-    )
-    kind: Literal["note", "skill"] = "skill"
-    # sandbox-target options
-    dest: str | None = Field(
-        default=None,
-        description="Destination path relative to the sandbox working dir (sandbox target only).",
-    )
-
-    @model_validator(mode="after")
-    def _check_target_fields(self) -> BundleFile:
-        if self.target == "document" and self.dest is not None:
-            raise ValueError("files[].dest is only valid with target: sandbox")
-        if self.target == "sandbox" and self.title is not None:
-            raise ValueError("files[].title is only valid with target: document")
-        _require_bundle_relative(self.path, "files[].path")
-        if self.dest is not None:
-            _require_bundle_relative(self.dest, "files[].dest")
-        return self
-
-
-class RepoAgentManifest(BaseModel):
-    """Schema for ``agents/<name>/index.yaml`` in the agents repo."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    spec_version: int = Field(ge=1)
-    name: str
-    display_name: str | None = Field(
-        default=None,
-        description="Human-facing agent name in Bedrock. Defaults to `name`.",
-    )
-
-    # --- model / loop settings (repo-owned in production) ---------------
+    id: str
     model: str
+    system_prompt: str
     reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     max_tokens: int | None = Field(default=None, gt=0)
-    max_turns: int | None = Field(default=None, gt=0)
-    max_sleep_hours: int | None = Field(default=None, gt=0)
-    timezone: str | None = None
-
-    # --- prompt ----------------------------------------------------------
-    system_prompt: str | None = Field(
+    timezone: str | None = Field(
         default=None,
-        description="Literal prompt. Mutually exclusive with system_prompt_file.",
+        validation_alias=AliasChoices("timezone", "time_zone"),
+        description="IANA timezone for agent-local, user-visible times.",
     )
-    system_prompt_file: str | None = Field(
-        default=None,
-        description="Path to the prompt file, relative to the agents dir.",
+    feature_flags: dict[str, str] = Field(
+        default_factory=dict,
+        description='Per-agent flags, name -> stored value (typically "on"/"off").',
     )
-    prompt_fragments: list[str] = Field(
-        default_factory=list,
-        description="Extra prompt files appended after the system prompt, in order.",
-    )
-
-    # --- shipped files ----------------------------------------------------
-    files: list[BundleFile] = Field(default_factory=list)
-
-    # --- bedrock-owned surfaces the bundle declares ------------------------
-    adapters: list[str] = Field(
-        default_factory=list,
-        description="Adapter names (presence only; credentials stay in Bedrock).",
-    )
-    expected_tools: list[str] = Field(
-        default_factory=list,
-        description="Tool names the prompt assumes exist. Bedrock warns when unsatisfied.",
-    )
-    feature_flags: dict[str, str] = Field(default_factory=dict)
     memory: MemorySpec = Field(default_factory=MemorySpec)
-
-    # --- sync bookkeeping ---------------------------------------------------
-    adopt_agent_id: str | None = Field(
-        default=None,
-        description=(
-            "Existing Bedrock agent UUID to adopt in place on first sync. "
-            "Honored only while that agent is not yet repo-managed."
-        ),
-    )
-    previous_names: list[str] = Field(
+    tools: list[ExternalToolSpecModel] = Field(
         default_factory=list,
-        description="Former bundle names, so a rename is not treated as delete+create.",
+        description="Flat tool list -- no adapter grouping ever reaches the harness.",
     )
-
-    @model_validator(mode="after")
-    def _check(self) -> RepoAgentManifest:
-        if not _NAME_RE.match(self.name):
-            raise ValueError(
-                f"name must match {_NAME_RE.pattern} (lowercase, digits, hyphens): {self.name!r}"
-            )
-        has_literal = self.system_prompt is not None
-        has_file = self.system_prompt_file is not None
-        if has_literal == has_file:
-            raise ValueError("exactly one of system_prompt / system_prompt_file is required")
-        if self.system_prompt_file is not None:
-            _require_bundle_relative(self.system_prompt_file, "system_prompt_file")
-        for fragment in self.prompt_fragments:
-            _require_bundle_relative(fragment, "prompt_fragments[]")
-        if self.spec_version > SPEC_VERSION:
-            raise ValueError(
-                f"manifest spec_version={self.spec_version} is newer than this "
-                f"harness checkout supports (SPEC_VERSION={SPEC_VERSION})"
-            )
-        return self
 
 
 def spec_json_schema() -> dict:
     """The JSON Schema committed as ``harness-spec.json``."""
-    schema = RepoAgentManifest.model_json_schema()
+    schema = AgentConfigSpec.model_json_schema()
     schema["$comment"] = (
-        f"Generated from harness.spec (SPEC_VERSION={SPEC_VERSION}). "
-        "Do not edit by hand: uv run python -m harness.spec > harness-spec.json"
+        "Input spec: the agent config accepted by this harness commit. "
+        "Generated from harness.spec; do not edit by hand: "
+        "uv run python -m harness.spec > harness-spec.json"
     )
     return schema
 
 
+def validate_config_data(data: dict) -> list[str]:
+    """Validate a parsed config dict against this checkout. Returns errors.
+
+    Two layers, both must pass:
+
+    1. The strict spec model -- catches unknown keys (config newer than
+       this harness) and shape/type errors.
+    2. The real loader (``build_agent_config``) -- the code that will
+       actually consume the config at run time, for semantic checks the
+       schema can't express.
+    """
+    from pydantic import ValidationError
+
+    from harness.config_loader import build_agent_config
+
+    errors: list[str] = []
+    try:
+        AgentConfigSpec.model_validate(data)
+    except ValidationError as e:
+        errors.extend(
+            f"spec: {'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()
+        )
+    try:
+        build_agent_config(data)
+    except Exception as e:  # noqa: BLE001 -- loader raises plain ValueError
+        errors.append(f"loader: {e}")
+    return errors
+
+
+def validate_config_file(path: Path) -> list[str]:
+    """Parse ``path`` (YAML or JSON) and validate it. Returns errors."""
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        return [f"cannot read {path}: {e}"]
+    try:
+        data = json.loads(raw) if path.suffix == ".json" else yaml.safe_load(raw)
+    except (json.JSONDecodeError, yaml.YAMLError) as e:
+        return [f"{path}: not valid YAML/JSON: {e}"]
+    if not isinstance(data, dict):
+        return [f"{path}: expected a mapping at the top level"]
+    return validate_config_data(data)
+
+
 if __name__ == "__main__":
-    import json
     import sys
 
     json.dump(spec_json_schema(), sys.stdout, indent=2, sort_keys=True)

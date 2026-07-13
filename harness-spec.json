@@ -1,69 +1,63 @@
 {
-  "$comment": "Generated from harness.spec (SPEC_VERSION=1). Do not edit by hand: uv run python -m harness.spec > harness-spec.json",
+  "$comment": "Input spec: the agent config accepted by this harness commit. Generated from harness.spec; do not edit by hand: uv run python -m harness.spec > harness-spec.json",
   "$defs": {
-    "BundleFile": {
+    "ExternalToolSpecModel": {
       "additionalProperties": false,
-      "description": "A file shipped with the bundle.\n\n``target`` picks the delivery mechanism:\n\n* ``document`` -- delivered as an agent document via the control\n  plane (kind=skill by default), upserted by title on sync. Readable\n  via the agent's ``get_document`` tools and visible in the portal.\n* ``sandbox`` -- shipped as a plain file into the agent's sandbox,\n  applied by the control plane before the agent wakes. ``dest`` is the\n  sandbox-relative destination path (defaults to the bundle-relative\n  source path).",
+      "description": "One entry of ``tools[]`` -- an HTTP-invoked tool.\n\nMirrors ``harness.config.ExternalToolSpec``; the harness POSTs\n``{\"args\", \"agent_id\", \"run_id\"}`` to ``url`` and expects back\n``{\"text\", \"images\"?}``.",
       "properties": {
-        "dest": {
+        "auth": {
+          "$ref": "#/$defs/ToolAuthSpec"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "forward_trace_context": {
+          "default": false,
+          "title": "Forward Trace Context",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "description": "JSON Schema for the tool's arguments.",
+          "title": "Parameters",
+          "type": "object"
+        },
+        "timeout_seconds": {
           "anyOf": [
             {
-              "type": "string"
+              "exclusiveMinimum": 0,
+              "type": "number"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Destination path relative to the sandbox working dir (sandbox target only).",
-          "title": "Dest"
+          "description": "null/omitted uses the harness default timeout.",
+          "title": "Timeout Seconds"
         },
-        "kind": {
-          "default": "skill",
-          "enum": [
-            "note",
-            "skill"
-          ],
-          "title": "Kind",
+        "url": {
+          "title": "Url",
           "type": "string"
-        },
-        "path": {
-          "description": "Source path relative to the agents dir (the bundle folder's parent), e.g. '<name>/sops/checklist.md' or 'shared/tone.md'.",
-          "title": "Path",
-          "type": "string"
-        },
-        "target": {
-          "enum": [
-            "document",
-            "sandbox"
-          ],
-          "title": "Target",
-          "type": "string"
-        },
-        "title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Document title (document target only). Defaults to the file stem.",
-          "title": "Title"
         }
       },
       "required": [
-        "path",
-        "target"
+        "name",
+        "description",
+        "parameters",
+        "url"
       ],
-      "title": "BundleFile",
+      "title": "ExternalToolSpecModel",
       "type": "object"
     },
     "MemorySpec": {
       "additionalProperties": false,
-      "description": "Per-agent memory configuration.\n\nOmitting the block entirely is always safe: every field's null/absent\nstate means \"whatever the running harness decides\". That is the\ngeneral rule for this model -- memory tunables only become spec\nfields when their absence has a well-defined \"harness decides\"\nmeaning. Otherwise every synced config would bake in whatever the\ndefault was on the day it was rendered.",
+      "description": "Per-agent memory selection (see ``harness.config.MemoryConfig``).\n\nOmitting the block entirely is always safe: every field's null/absent\nstate means \"whatever the running harness decides\". Memory tunables\nonly become spec fields when their absence has a well-defined\n\"harness decides\" meaning -- otherwise every rendered config would\nbake in whatever the default was on the day it was rendered.",
       "properties": {
         "summarizer_model": {
           "anyOf": [
@@ -75,7 +69,7 @@
             }
           ],
           "default": null,
-          "description": "Model for memory summarization. null/omitted means 'whatever the running harness defaults to' (currently 'openai/gpt-5-nano', resolved by the memory factory at construction time); a set value pins it. The default is deliberately NOT baked in here: if it were, every rendered config and bundle hash would silently pin today's default, and a fleet-wide summarizer upgrade would require editing every bundle yaml.",
+          "description": "Model for memory summarization. null/omitted means 'whatever the running harness defaults to' (currently 'openai/gpt-5-nano', resolved by the memory factory at construction time); a set value pins it. The default is deliberately NOT baked in here: if it were, every rendered config would silently pin today's default, and a fleet-wide summarizer upgrade would require editing every config.",
           "title": "Summarizer Model"
         },
         "system": {
@@ -87,79 +81,72 @@
       },
       "title": "MemorySpec",
       "type": "object"
+    },
+    "ToolAuthSpec": {
+      "additionalProperties": false,
+      "description": "Auth for an external tool call (see ``harness.config.ToolAuth``).",
+      "properties": {
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "kind": {
+          "default": "none",
+          "enum": [
+            "none",
+            "bearer_env",
+            "bearer_literal",
+            "headers"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token"
+        },
+        "token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Env"
+        }
+      },
+      "title": "ToolAuthSpec",
+      "type": "object"
     }
   },
   "additionalProperties": false,
-  "description": "Schema for ``agents/<name>/index.yaml`` in the agents repo.",
+  "description": "The flat agent config the harness runtime accepts.\n\nStrict mirror of ``harness.config_loader.build_agent_config`` /\n``harness.config.AgentConfig``. ``id`` is the runtime identity,\ninjected by whoever instantiates the agent (a Bedrock UUID in\nproduction, a trial id in evals) -- authoring formats upstream of\nthis spec deliberately have no ``id``.",
   "properties": {
-    "adapters": {
-      "description": "Adapter names (presence only; credentials stay in Bedrock).",
-      "items": {
-        "type": "string"
-      },
-      "title": "Adapters",
-      "type": "array"
-    },
-    "adopt_agent_id": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Existing Bedrock agent UUID to adopt in place on first sync. Honored only while that agent is not yet repo-managed.",
-      "title": "Adopt Agent Id"
-    },
-    "display_name": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Human-facing agent name in Bedrock. Defaults to `name`.",
-      "title": "Display Name"
-    },
-    "expected_tools": {
-      "description": "Tool names the prompt assumes exist. Bedrock warns when unsatisfied.",
-      "items": {
-        "type": "string"
-      },
-      "title": "Expected Tools",
-      "type": "array"
-    },
     "feature_flags": {
       "additionalProperties": {
         "type": "string"
       },
+      "description": "Per-agent flags, name -> stored value (typically \"on\"/\"off\").",
       "title": "Feature Flags",
       "type": "object"
     },
-    "files": {
-      "items": {
-        "$ref": "#/$defs/BundleFile"
-      },
-      "title": "Files",
-      "type": "array"
-    },
-    "max_sleep_hours": {
-      "anyOf": [
-        {
-          "exclusiveMinimum": 0,
-          "type": "integer"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Max Sleep Hours"
+    "id": {
+      "title": "Id",
+      "type": "string"
     },
     "max_tokens": {
       "anyOf": [
@@ -174,45 +161,12 @@
       "default": null,
       "title": "Max Tokens"
     },
-    "max_turns": {
-      "anyOf": [
-        {
-          "exclusiveMinimum": 0,
-          "type": "integer"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Max Turns"
-    },
     "memory": {
       "$ref": "#/$defs/MemorySpec"
     },
     "model": {
       "title": "Model",
       "type": "string"
-    },
-    "name": {
-      "title": "Name",
-      "type": "string"
-    },
-    "previous_names": {
-      "description": "Former bundle names, so a rename is not treated as delete+create.",
-      "items": {
-        "type": "string"
-      },
-      "title": "Previous Names",
-      "type": "array"
-    },
-    "prompt_fragments": {
-      "description": "Extra prompt files appended after the system prompt, in order.",
-      "items": {
-        "type": "string"
-      },
-      "title": "Prompt Fragments",
-      "type": "array"
     },
     "reasoning_effort": {
       "anyOf": [
@@ -233,36 +187,9 @@
       "default": null,
       "title": "Reasoning Effort"
     },
-    "spec_version": {
-      "minimum": 1,
-      "title": "Spec Version",
-      "type": "integer"
-    },
     "system_prompt": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Literal prompt. Mutually exclusive with system_prompt_file.",
-      "title": "System Prompt"
-    },
-    "system_prompt_file": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Path to the prompt file, relative to the agents dir.",
-      "title": "System Prompt File"
+      "title": "System Prompt",
+      "type": "string"
     },
     "timezone": {
       "anyOf": [
@@ -274,14 +201,23 @@
         }
       ],
       "default": null,
+      "description": "IANA timezone for agent-local, user-visible times.",
       "title": "Timezone"
+    },
+    "tools": {
+      "description": "Flat tool list -- no adapter grouping ever reaches the harness.",
+      "items": {
+        "$ref": "#/$defs/ExternalToolSpecModel"
+      },
+      "title": "Tools",
+      "type": "array"
     }
   },
   "required": [
-    "spec_version",
-    "name",
-    "model"
+    "id",
+    "model",
+    "system_prompt"
   ],
-  "title": "RepoAgentManifest",
+  "title": "AgentConfigSpec",
   "type": "object"
 }

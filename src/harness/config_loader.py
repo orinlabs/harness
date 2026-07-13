@@ -73,16 +73,6 @@ def load_agent_config_from_path(path: Path) -> AgentConfig:
         data = yaml.safe_load(raw)
     if not isinstance(data, dict):
         raise ValueError(f"{path}: expected a mapping at the top level")
-    if "extends" in data:
-        # `extends: <bundle-name>` inherits a repo-managed bundle (prompt,
-        # model, memory, flags) and overlays runtime identity + tools.
-        # Used by the environments repo's trial configs so evals run the
-        # exact production bundle. Resolution: $HARNESS_AGENTS_DIR, else
-        # <cwd>/agents. Lazy import: bundles pulls in pydantic models the
-        # plain loader path doesn't need.
-        from harness.bundles import expand_extends
-
-        data = expand_extends(data)
     return build_agent_config(data)
 
 

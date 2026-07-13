@@ -48,9 +48,9 @@ class MemoryConfig:
     # None means "whatever the running harness defaults to"
     # (``harness.spec.DEFAULT_SUMMARIZER_MODEL``), resolved by
     # ``harness.memory.build_memory`` at construction time. A set value
-    # pins the model. Synced bundle configs carry null unless the bundle
-    # pins one, so a fleet-wide summarizer upgrade is a harness change,
-    # not an every-yaml edit.
+    # pins the model. Rendered configs carry null unless they pin one, so
+    # a fleet-wide summarizer upgrade is a harness change, not an
+    # every-config edit.
     summarizer_model: str | None = None
 
 
@@ -112,9 +112,8 @@ class AgentConfig:
     # boolean check; use ``feature_flags.get(name, default)`` for value
     # reads.
     feature_flags: dict[str, str] = field(default_factory=dict)
-    # Memory backend selection; see MemoryConfig. Repo-managed bundles set
-    # this from their manifest's `memory:` block; everything else gets the
-    # defaults.
+    # Memory backend selection; see MemoryConfig. Set from the config's
+    # optional `memory:` block; everything else gets the defaults.
     memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def is_enabled(self, flag: str) -> bool:

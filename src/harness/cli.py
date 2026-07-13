@@ -31,25 +31,17 @@ Subcommands:
                                           # can extract it from combined
                                           # exec output.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
-    harness validate-agents [--agents-dir DIR]
-                                          # Validate every repo-managed
-                                          # agent bundle in an agents dir
-                                          # against harness.spec; print
-                                          # `<name> <bundle_hash>` per
-                                          # bundle. CI gate for the
-                                          # agents repo.
-    harness render-agent NAME [--agents-dir DIR]
-                                          # Render one bundle (resolved
-                                          # prompt, documents, sandbox
-                                          # files, hash) as JSON.
-    harness render-manifest [--agents-dir DIR] [--commit SHA]
-                                          # Render the full sync manifest
-                                          # (all bundles) that the agents
-                                          # repo CI POSTs to Bedrock.
-    harness generate-spec [--check]       # Print the bundle-manifest JSON
-                                          # Schema; --check exits 1 when
-                                          # the committed harness-spec.json
-                                          # is stale.
+    harness validate-config FILE          # Validate an agent config file
+                                          # against THIS checkout: strict
+                                          # spec (unknown keys are errors)
+                                          # + the real loader. The
+                                          # compatibility gate external
+                                          # callers (Bedrock, agents-repo
+                                          # CI) run per harness commit.
+    harness generate-spec [--check]       # Print the agent-config input
+                                          # JSON Schema; --check exits 1
+                                          # when the committed
+                                          # harness-spec.json is stale.
 
 Environment is loaded from the first `.env` found by walking up from cwd
 (so a per-repo `.env` shadows an org-level `.env` one or more directories
@@ -64,9 +56,6 @@ Optional:
     GITHUB_TOKEN          private-repo fetch auth (used by `boot` only)
     HARNESS_SIM_START_TIME  simulated start time (epoch seconds); all time
                           reads become this moment + elapsed run time
-    HARNESS_AGENTS_DIR    directory of repo-managed agent bundles; used by
-                          the bundle subcommands and by configs that
-                          `extends:` a bundle (defaults to ./agents)
     MODEL                 override the agent's configured model
     REASONING_EFFORT      override reasoning_effort (minimal|low|medium|high|xhigh)
     LOG_LEVEL             default: INFO
@@ -636,87 +625,32 @@ def _cmd_export_memory(args, parser: argparse.ArgumentParser) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Subcommands: bundle tooling (validate-agents / render-agent / render-manifest)
+# Subcommands: input-spec tooling (validate-config / generate-spec)
 # ---------------------------------------------------------------------------
 
 
-def _cmd_validate_agents(args, parser: argparse.ArgumentParser) -> int:
-    """Validate every bundle in the agents dir; print name + hash per bundle.
+def _cmd_validate_config(args, parser: argparse.ArgumentParser) -> int:
+    """Validate an agent config file against THIS harness checkout.
 
-    Exit 0 when everything validates, 1 with per-bundle errors otherwise.
-    Also runs the secret tripwire scan -- findings are hard failures, the
-    whole point of bundles is that their contents are safe to replicate.
+    The compatibility oracle for external callers: Bedrock (at dispatch)
+    and the agents repo's CI run this from the harness checkout at the
+    ref they intend to run, so "is this config compatible with harness @
+    SHA" is answered by the exact code that would consume it. Strict spec
+    validation (unknown keys are errors) + the real config loader.
     """
-    import json as _json
+    from harness.spec import validate_config_file
 
-    from harness.bundles import (
-        BundleError,
-        list_bundle_names,
-        load_bundle,
-        resolve_agents_dir,
-        scan_for_secrets,
-    )
-
-    agents_dir = resolve_agents_dir(args.agents_dir)
-    if not agents_dir.is_dir():
-        parser.exit(1, f"validate-agents: {agents_dir} is not a directory\n")
-
-    names = list_bundle_names(agents_dir)
-    if not names:
-        parser.exit(1, f"validate-agents: no bundle manifests found in {agents_dir}\n")
-
-    errors: list[str] = []
-    results: list[dict] = []
-    for name in names:
-        try:
-            bundle = load_bundle(name, agents_dir)
-        except BundleError as e:
-            errors.append(str(e))
-            continue
-        findings = scan_for_secrets(bundle)
-        if findings:
-            errors.extend(f"{name}: {f}" for f in findings)
-            continue
-        results.append({"name": name, "bundle_hash": bundle.bundle_hash})
-        print(f"{name} {bundle.bundle_hash}")
-
-    if args.json:
-        print(_json.dumps({"agents": results, "errors": errors}))
+    errors = validate_config_file(Path(args.path))
     if errors:
         for err in errors:
             print(f"ERROR: {err}", file=sys.stderr)
         return 1
-    return 0
-
-
-def _cmd_render_agent(args, parser: argparse.ArgumentParser) -> int:
-    import json as _json
-
-    from harness.bundles import BundleError, load_bundle, render_bundle_payload
-
-    try:
-        bundle = load_bundle(args.name, args.agents_dir)
-    except BundleError as e:
-        parser.exit(1, f"render-agent: {e}\n")
-    print(_json.dumps(render_bundle_payload(bundle), indent=2))
-    return 0
-
-
-def _cmd_render_manifest(args, parser: argparse.ArgumentParser) -> int:
-    import json as _json
-
-    from harness.bundles import BundleError, render_sync_manifest
-
-    try:
-        manifest = render_sync_manifest(args.agents_dir, harness_git_sha=args.commit)
-    except BundleError as e:
-        parser.exit(1, f"render-manifest: {e}\n")
-    print(_json.dumps(manifest))
+    print(f"{args.path}: OK")
     return 0
 
 
 def _cmd_generate_spec(args, parser: argparse.ArgumentParser) -> int:
-    """Print the manifest JSON Schema, or --check the committed copy.
+    """Print the agent-config input JSON Schema, or --check the committed copy.
 
     ``--check`` compares ``harness-spec.json`` at the repo root against the
     schema generated from the live Pydantic models and exits 1 when stale.
@@ -990,59 +924,27 @@ def main(argv: list[str] | None = None) -> int:
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
 
-    def _add_agents_dir_flag(p: argparse.ArgumentParser) -> None:
-        p.add_argument(
-            "--agents-dir",
-            default=None,
-            help="Directory holding <name>/index.yaml bundle folders. Defaults to "
-            "$HARNESS_AGENTS_DIR, then ./agents.",
-        )
-        p.add_argument(
-            "--log-level",
-            default=os.environ.get("LOG_LEVEL", "INFO"),
-            help="Log level: DEBUG|INFO|WARNING|ERROR.",
-        )
-
-    validate_p = subparsers.add_parser(
-        "validate-agents",
-        help="Validate every agent bundle in an agents dir; print name + bundle hash.",
+    validate_config_p = subparsers.add_parser(
+        "validate-config",
+        help="Validate an agent config file against this harness checkout.",
         description=(
-            "CI gate for the agents repo. Validates each <name>/index.yaml against "
-            "the harness.spec schema, checks every referenced file exists, "
-            "runs a secret tripwire scan, and prints `<name> <bundle_hash>` "
-            "per bundle. The bundle hash covers the manifest plus its "
-            "resolved file closure, so shared-fragment edits change every "
-            "dependent bundle's hash."
+            "The compatibility oracle: strict input-spec validation (unknown "
+            "keys are errors, so configs written for a newer harness fail "
+            "loudly) plus the real config loader. External callers (Bedrock "
+            "at dispatch, the agents repo's CI) run this from the harness "
+            "checkout at the ref they intend to run."
         ),
     )
-    _add_agents_dir_flag(validate_p)
-    validate_p.add_argument(
-        "--json",
-        action="store_true",
-        help="Additionally print a JSON summary line ({agents, errors}).",
-    )
-
-    render_agent_p = subparsers.add_parser(
-        "render-agent",
-        help="Render one bundle (prompt, documents, sandbox files, hash) as JSON.",
-    )
-    render_agent_p.add_argument("name", help="Bundle name (folder holding <name>/index.yaml).")
-    _add_agents_dir_flag(render_agent_p)
-
-    render_manifest_p = subparsers.add_parser(
-        "render-manifest",
-        help="Render the full sync manifest the agents-repo CI POSTs to Bedrock.",
-    )
-    _add_agents_dir_flag(render_manifest_p)
-    render_manifest_p.add_argument(
-        "--commit",
-        default=None,
-        help="Git SHA of the agents-repo commit this manifest was rendered from.",
+    validate_config_p.add_argument("path", help="Path to the agent config (YAML or JSON).")
+    validate_config_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
     )
 
     generate_spec_p = subparsers.add_parser(
         "generate-spec",
-        help="Print the bundle-manifest JSON Schema (or --check the committed copy).",
+        help="Print the agent-config input JSON Schema (or --check the committed copy).",
     )
     generate_spec_p.add_argument(
         "--check",
@@ -1091,12 +993,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_forget_memory(args, forget_p)
     if args.command == "export-memory":
         return _cmd_export_memory(args, export_p)
-    if args.command == "validate-agents":
-        return _cmd_validate_agents(args, validate_p)
-    if args.command == "render-agent":
-        return _cmd_render_agent(args, render_agent_p)
-    if args.command == "render-manifest":
-        return _cmd_render_manifest(args, render_manifest_p)
+    if args.command == "validate-config":
+        return _cmd_validate_config(args, validate_config_p)
     if args.command == "generate-spec":
         return _cmd_generate_spec(args, generate_spec_p)
     if args.command == "eval":

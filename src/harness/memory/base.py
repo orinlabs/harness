@@ -1,7 +1,7 @@
 """Memory backend protocol + factory.
 
 ``Harness`` talks to memory through exactly this surface. Formalizing it
-as a protocol (instead of hardcoding ``MemoryService``) lets a bundle's
+as a protocol (instead of hardcoding ``MemoryService``) lets a config's
 ``memory.system`` pick between backends without touching the loop.
 ``build_memory`` is the single construction point, keyed on
 ``AgentConfig.memory.system``.
@@ -63,5 +63,5 @@ def build_memory(config: AgentConfig, *, timezone_name: str) -> MemoryBackend:
         )
     raise ValueError(
         f"unknown memory system {system!r} (this harness checkout knows: tiered_sqlite). "
-        "The agent's bundle may be newer than the code at the pinned git ref."
+        "The agent's config may be newer than the code at the pinned git ref."
     )
