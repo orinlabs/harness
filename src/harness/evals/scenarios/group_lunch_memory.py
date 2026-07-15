@@ -24,7 +24,6 @@ class GroupLunchMemory(Simulation):
     )
     duration_days = 14
     eval_mode = "deterministic"
-    feature_flags = {"auto_associative_memory": "off"}
     agent_overrides = AgentOverrides(
         model="claude-sonnet-4-6",
         max_turns=20,

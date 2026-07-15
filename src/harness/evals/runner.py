@@ -58,7 +58,6 @@ def _simulation_hash(sim: type[Simulation]) -> str:
         "duration_days": sim.duration_days,
         "eval_mode": sim.eval_mode,
         "agent_overrides": asdict(sim.agent_overrides),
-        "feature_flags": sim.feature_flags,
         "users": [asdict(u) for u in sim.users],
     }
     serialized = json.dumps(data, sort_keys=True, default=str)
@@ -124,7 +123,6 @@ class SimulationRunner:
         override_model: str | None = None,
         # T7 will do the HTTP lookup to resolve this into a template snapshot.
         override_template_id: str | None = None,
-        override_feature_flags: dict[str, str] | None = None,
         override_reasoning_effort: str = "",
     ):
         self.simulation_cls = simulation_cls
@@ -136,7 +134,6 @@ class SimulationRunner:
         self._agent_config = agent_config
         self._override_model = override_model
         self._override_template_id = override_template_id
-        self._override_feature_flags = override_feature_flags or {}
         self._override_reasoning_effort = override_reasoning_effort
         self._run: EvalRunRecord | None = None
         self.checkpoint_results: list[dict] = []
@@ -165,25 +162,6 @@ class SimulationRunner:
 
         sim_cls.ensure_tools()
 
-        # Merge scenario-declared feature flags with any runtime overrides
-        # the caller supplied; runtime wins. The merged dict gets stamped
-        # onto ``self._agent_config.feature_flags`` below so ``Harness``
-        # picks them up via ``AgentConfig.is_enabled(...)`` exactly as it
-        # would on a Bedrock-backed run.
-        merged_feature_flags = {**sim_cls.feature_flags, **self._override_feature_flags}
-        if merged_feature_flags:
-            logger.info("Applying feature flags: %s", merged_feature_flags)
-            if self._agent_config is not None:
-                from dataclasses import replace as _dc_replace
-
-                merged_with_existing = {
-                    **(self._agent_config.feature_flags or {}),
-                    **merged_feature_flags,
-                }
-                self._agent_config = _dc_replace(
-                    self._agent_config, feature_flags=merged_with_existing
-                )
-
         content_hash = _simulation_hash(sim_cls)
         # stdout for local eval runs; HarnessRun trace stream is the durable artifact.
         _emit(
@@ -206,8 +184,6 @@ class SimulationRunner:
 
         config_overrides = asdict(overrides)
         config_overrides["duration_days"] = sim_cls.duration_days
-        if merged_feature_flags:
-            config_overrides["feature_flags"] = merged_feature_flags
         if effective_reasoning:
             config_overrides["reasoning_effort"] = effective_reasoning
 

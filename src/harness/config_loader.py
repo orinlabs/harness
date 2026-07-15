@@ -19,8 +19,6 @@ YAML schema (JSON is equivalent):
     reasoning_effort: medium  # optional
     max_tokens: 8192          # optional; recommended for Anthropic reasoning
     timezone: America/Los_Angeles  # optional; agent-local timezone for user-visible times
-    feature_flags:            # optional; per-agent overrides keyed by name
-      auto_associative_memory: "off"
 
     tools:                    # flat list -- no adapter grouping
       - name: get_forecast
@@ -108,7 +106,6 @@ def build_agent_config(data: dict[str, Any]) -> AgentConfig:
         reasoning_effort=_opt_str(data.get("reasoning_effort")),
         max_tokens=_opt_int(data.get("max_tokens")),
         timezone=_opt_str(data.get("timezone") or data.get("time_zone")),
-        feature_flags=_feature_flags(data.get("feature_flags")),
         memory=_memory(data.get("memory")),
         tools=[_tool(t) for t in data.get("tools", []) or []],
     )
@@ -189,24 +186,6 @@ def _memory(value: Any) -> MemoryConfig:
         raise ValueError(f"memory: unknown key(s): {', '.join(sorted(unknown))}")
     kwargs = {k: str(v) for k, v in value.items() if v is not None}
     return MemoryConfig(**kwargs)
-
-
-def _feature_flags(value: Any) -> dict[str, str]:
-    """Coerce the optional ``feature_flags`` block into ``dict[str, str]``.
-
-    Accepts ``None`` (no flags), a real mapping (the typical case), or any
-    other value (rejected with a clear error). Values are stringified so a
-    YAML ``true`` / ``false`` becomes the literal string ``"True"`` /
-    ``"False"`` — but new YAML configs should quote ``"on"`` / ``"off"``
-    explicitly to match Bedrock's wire format.
-    """
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError(
-            f"feature_flags must be a mapping of name -> string value, got {type(value).__name__}"
-        )
-    return {str(k): str(v) for k, v in value.items()}
 
 
 def _require_keys(data: dict[str, Any], keys: tuple[str, ...], *, where: str) -> None:

@@ -31,7 +31,6 @@ def _config(**overrides) -> dict:
         "reasoning_effort": "high",
         "max_tokens": 8192,
         "timezone": "America/New_York",
-        "feature_flags": {"auto_associative_memory": "on"},
         "memory": {"system": "tiered_sqlite", "summarizer_model": None},
         "tools": [
             {
