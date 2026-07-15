@@ -185,9 +185,6 @@ class Simulation(metaclass=SimulationMeta):
     duration_days: int = 1
     eval_mode: str = "deterministic"
     agent_overrides: AgentOverrides = AgentOverrides()
-    # TODO(T9): rewire feature flags post-product-deletion. Scenarios can still
-    # declare `feature_flags = {...}` but the runner ignores them for now.
-    feature_flags: dict[str, str] = {}
     users: list[UserDefinition] = []
     memory_seed: MemorySeed | None = None
 

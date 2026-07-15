@@ -130,10 +130,6 @@ class AgentConfigSpec(BaseModel):
         validation_alias=AliasChoices("timezone", "time_zone"),
         description="IANA timezone for agent-local, user-visible times.",
     )
-    feature_flags: dict[str, str] = Field(
-        default_factory=dict,
-        description='Per-agent flags, name -> stored value (typically "on"/"off").',
-    )
     memory: MemorySpec = Field(default_factory=MemorySpec)
     tools: list[ExternalToolSpecModel] = Field(
         default_factory=list,

@@ -25,7 +25,6 @@ class DraftBeforeSendHeavy(Simulation):
     )
     duration_days = 1
     eval_mode = "stochastic"
-    feature_flags = {"auto_associative_memory": "off"}
     agent_overrides = AgentOverrides(
         model="claude-sonnet-4-6",
         max_turns=50,

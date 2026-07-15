@@ -136,14 +136,6 @@
   "additionalProperties": false,
   "description": "The flat agent config the harness runtime accepts.\n\nStrict mirror of ``harness.config_loader.build_agent_config`` /\n``harness.config.AgentConfig``. ``id`` is the runtime identity,\ninjected by whoever instantiates the agent (a Bedrock UUID in\nproduction, a trial id in evals) -- authoring formats upstream of\nthis spec deliberately have no ``id``.",
   "properties": {
-    "feature_flags": {
-      "additionalProperties": {
-        "type": "string"
-      },
-      "description": "Per-agent flags, name -> stored value (typically \"on\"/\"off\").",
-      "title": "Feature Flags",
-      "type": "object"
-    },
     "id": {
       "title": "Id",
       "type": "string"

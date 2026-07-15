@@ -1,11 +1,11 @@
 """Tests for ``AgentConfig`` config plumbing.
 
 Covers:
-- ``AgentConfig.feature_flags`` defaults and ``is_enabled`` semantics
-- ``config_loader`` reading ``feature_flags`` from YAML / dict input
-- The Bedrock-JSON path (``_config_from_bedrock_json``) forwarding
-  ``feature_flags`` from the platform's ``harness-config`` payload
 - ``max_tokens`` for Anthropic reasoning budget control
+- Backward compatibility: legacy feature-flag keys (``summarizer_v2``,
+  ``feature_flags``) are silently ignored by the loader now that the
+  feature-flag mechanism is removed end to end (Bedrock no longer sends
+  it; nothing in the harness ever consumed a flag at runtime).
 """
 
 from __future__ import annotations
@@ -27,103 +27,6 @@ def _minimal_data(**overrides):
     return base
 
 
-# ---------------------------------------------------------------------------
-# AgentConfig dataclass
-# ---------------------------------------------------------------------------
-
-
-def test_feature_flags_defaults_to_empty_dict():
-    cfg = AgentConfig(id="a", model="m", system_prompt="s")
-    assert cfg.feature_flags == {}
-    assert cfg.max_tokens is None
-
-
-def test_is_enabled_true_only_for_literal_on():
-    cfg = AgentConfig(
-        id="a",
-        model="m",
-        system_prompt="s",
-        feature_flags={"auto_associative_memory": "on"},
-    )
-    assert cfg.is_enabled("auto_associative_memory") is True
-
-
-def test_is_enabled_case_insensitive():
-    cfg = AgentConfig(
-        id="a",
-        model="m",
-        system_prompt="s",
-        feature_flags={"flag_a": "ON", "flag_b": " On ", "flag_c": "oN"},
-    )
-    assert cfg.is_enabled("flag_a") is True
-    assert cfg.is_enabled("flag_b") is True
-    assert cfg.is_enabled("flag_c") is True
-
-
-@pytest.mark.parametrize(
-    "value",
-    ["off", "", "true", "1", "enabled", "yes", "OFFISH"],
-)
-def test_is_enabled_false_for_non_on_values(value):
-    cfg = AgentConfig(
-        id="a",
-        model="m",
-        system_prompt="s",
-        feature_flags={"f": value},
-    )
-    assert cfg.is_enabled("f") is False
-
-
-def test_is_enabled_false_for_missing_flag():
-    cfg = AgentConfig(id="a", model="m", system_prompt="s")
-    assert cfg.is_enabled("never_defined") is False
-
-
-def test_feature_flags_carries_freeform_values():
-    """Non-boolean flags work — e.g. a tier name or a model variant."""
-    cfg = AgentConfig(
-        id="a",
-        model="m",
-        system_prompt="s",
-        feature_flags={"approval_tier": "tier_3", "model_variant": "preview"},
-    )
-    assert cfg.feature_flags.get("approval_tier") == "tier_3"
-    assert cfg.feature_flags.get("model_variant") == "preview"
-    # Non-"on" values still don't satisfy is_enabled (it's the boolean shortcut).
-    assert cfg.is_enabled("approval_tier") is False
-
-
-# ---------------------------------------------------------------------------
-# config_loader.build_agent_config (YAML + Bedrock-JSON share this)
-# ---------------------------------------------------------------------------
-
-
-def test_build_agent_config_no_feature_flags_block():
-    cfg = build_agent_config(_minimal_data())
-    assert cfg.feature_flags == {}
-
-
-def test_build_agent_config_reads_feature_flags_block():
-    cfg = build_agent_config(
-        _minimal_data(feature_flags={"elicitation_v2": "on", "auto_associative_memory": "off"})
-    )
-    assert cfg.feature_flags == {"elicitation_v2": "on", "auto_associative_memory": "off"}
-    assert cfg.is_enabled("elicitation_v2") is True
-    assert cfg.is_enabled("auto_associative_memory") is False
-
-
-def test_build_agent_config_stringifies_non_string_values():
-    cfg = build_agent_config(_minimal_data(feature_flags={"x": 42, "y": True}))
-    # Coerced to str so the wire shape is uniform downstream.
-    assert cfg.feature_flags == {"x": "42", "y": "True"}
-
-
-def test_build_agent_config_rejects_non_mapping_feature_flags():
-    bad_payload = _minimal_data(feature_flags=["elicitation_v2", "auto_associative_memory"])
-    with pytest.raises(ValueError, match="feature_flags must be a mapping"):
-        build_agent_config(bad_payload)
-
-
 def test_build_agent_config_forwards_max_tokens():
     cfg = build_agent_config(_minimal_data(max_tokens=8192))
 
@@ -136,61 +39,32 @@ def test_build_agent_config_rejects_invalid_max_tokens():
 
 
 # ---------------------------------------------------------------------------
-# Bedrock JSON ingest path
-# ---------------------------------------------------------------------------
-
-
-def test_bedrock_json_forwards_feature_flags():
-    """``_config_from_bedrock_json`` flattens adapters but must preserve
-    top-level keys including ``feature_flags``."""
-    from harness.cloud.bedrock.config import _config_from_bedrock_json
-
-    bedrock_payload = {
-        "id": "agent-1",
-        "model": "anthropic/claude-opus-4.7",
-        "system_prompt": "hi",
-        "reasoning_effort": "medium",
-        "max_tokens": 16384,
-        "feature_flags": {"auto_associative_memory": "on", "elicitation_v2": "off"},
-        "adapters": [
-            {
-                "name": "Contacts",
-                "description": "Contacts adapter",
-                "tools": [
-                    {
-                        "name": "list_contacts",
-                        "description": "list",
-                        "parameters": {"type": "object", "properties": {}},
-                        "url": "http://bedrock/api/.../list_contacts/invoke/",
-                    }
-                ],
-            }
-        ],
-    }
-    cfg = _config_from_bedrock_json(bedrock_payload)
-    assert cfg.feature_flags == {"auto_associative_memory": "on", "elicitation_v2": "off"}
-    assert cfg.max_tokens == 16384
-    assert cfg.is_enabled("auto_associative_memory") is True
-    assert cfg.is_enabled("elicitation_v2") is False
-    # Sanity: tools still flattened.
-    assert len(cfg.tools) == 1
-    assert cfg.tools[0].name == "list_contacts"
-
-
-# ---------------------------------------------------------------------------
-# Backward compatibility: legacy YAML keys are silently ignored
+# Backward compatibility: legacy feature-flag keys are silently ignored
 # ---------------------------------------------------------------------------
 
 
 def test_legacy_summarizer_v2_yaml_key_is_silently_ignored():
-    """Older agent YAMLs / Bedrock payloads still ship ``summarizer_v2: ...``
-    at the top level. The flag was removed when v1 became the only path, so
-    the loader must not raise -- it should drop the key and produce a usable
-    config. Locks in the contract so old YAMLs keep loading after the field
-    is gone from ``AgentConfig``."""
+    """Older agent YAMLs still ship ``summarizer_v2: ...`` at the top level.
+    The flag was removed when v1 became the only path, so the loader must
+    not raise -- it should drop the key and produce a usable config."""
     cfg = build_agent_config(_minimal_data(summarizer_v2=True))
     assert cfg.id == "agent-1"
-    # The flag is gone from AgentConfig entirely; ``is_enabled`` falls
-    # through to its "missing flag => off" branch.
-    assert cfg.is_enabled("summarizer_v2") is False
     assert not hasattr(cfg, "summarizer_v2")
+
+
+def test_legacy_feature_flags_block_is_silently_ignored():
+    """Older agent YAMLs / Bedrock payloads may still carry a whole
+    ``feature_flags`` block. The mechanism is gone from ``AgentConfig``;
+    the loader must drop the block and keep loading."""
+    cfg = build_agent_config(
+        _minimal_data(feature_flags={"summarizer_v2": "on", "anything": "off"})
+    )
+    assert cfg.id == "agent-1"
+    assert not hasattr(cfg, "feature_flags")
+    assert not hasattr(cfg, "is_enabled")
+
+
+def test_agent_config_has_no_feature_flag_surface():
+    cfg = AgentConfig(id="a", model="m", system_prompt="s")
+    assert not hasattr(cfg, "feature_flags")
+    assert cfg.max_tokens is None
