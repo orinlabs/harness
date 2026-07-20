@@ -31,6 +31,14 @@ Subcommands:
                                           # can extract it from combined
                                           # exec output.
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
+    harness workflow [RUN_ID]             # In-sandbox workflow runner for
+                                          # the `current` platform: fetch
+                                          # the run's envelope, execute its
+                                          # script/agent/gate steps, journal
+                                          # every transition/record back to
+                                          # current, exit at gates. Needs
+                                          # CURRENT_URL + CURRENT_RUN_TOKEN
+                                          # + HARNESS_RUN_ID in env.
     harness validate-config FILE          # Validate an agent config file
                                           # against THIS checkout: strict
                                           # spec (unknown keys are errors)
@@ -61,6 +69,8 @@ Optional:
     LOG_LEVEL             default: INFO
     BEDROCK_URL           enables Bedrock lookup + tracing to Bedrock
     BEDROCK_TOKEN         bedrock org-scoped API key
+    CURRENT_URL           `harness workflow` only: current API base URL
+    CURRENT_RUN_TOKEN     `harness workflow` only: run-scoped bearer token
 """
 
 from __future__ import annotations
@@ -547,6 +557,52 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _cmd_workflow(args, parser: argparse.ArgumentParser) -> int:
+    """Run a `current` workflow envelope in this sandbox.
+
+    Env contract (current sets these when dispatching the sandbox):
+      CURRENT_URL          current API base URL
+      CURRENT_RUN_TOKEN    run-scoped bearer token
+      HARNESS_RUN_ID       workflow run UUID (or the positional arg)
+      OPENROUTER_API_KEY   for agent steps
+
+    The runner journals every step transition and record back to current
+    before advancing (Postgres there is the source of truth; this sandbox
+    is disposable), exits 0 when it parks at a gate, and posts a run_report
+    record before any terminal exit.
+    """
+    _load_env()
+
+    if args.run_id:
+        os.environ["HARNESS_RUN_ID"] = args.run_id
+
+    missing = [
+        k
+        for k in ("CURRENT_URL", "CURRENT_RUN_TOKEN", "HARNESS_RUN_ID", "OPENROUTER_API_KEY")
+        if not os.environ.get(k)
+    ]
+    if missing:
+        parser.exit(2, f"workflow: missing required env: {', '.join(missing)}\n")
+
+    from harness.cloud.current import CurrentClient
+    from harness.workflow import WorkflowRunner
+
+    client = CurrentClient.from_env()
+    runner = WorkflowRunner(
+        client,
+        working_dir=Path(args.workdir).resolve() if args.workdir else None,
+        data_root=Path(args.data_root),
+    )
+    try:
+        return runner.run()
+    except KeyboardInterrupt:
+        logger.warning("workflow run interrupted run=%s", client.run_id)
+        return 130
+    except Exception:
+        logger.exception("workflow run failed run=%s", client.run_id)
+        return 1
+
+
 def _cmd_reset_memory(args, parser: argparse.ArgumentParser) -> int:
     _load_env()
 
@@ -924,6 +980,48 @@ def main(argv: list[str] | None = None) -> int:
     eval_p.add_argument("scenario", help="Scenario name (matches Simulation.name).")
     _add_common_flags(eval_p)
 
+    workflow_p = subparsers.add_parser(
+        "workflow",
+        help="Run a `current` workflow envelope in this sandbox (in-sandbox step runner).",
+        description=(
+            "The single command current invokes inside a Daytona sandbox. "
+            "Fetches the run's envelope (ordered script/agent/gate steps + "
+            "journal) from current, executes it in a run working directory, "
+            "and POSTs every step transition and record back before "
+            "advancing. Exits 0 when parked at a gate (current re-dispatches "
+            "after a decision); posts a run_report record before any "
+            "terminal exit.\n\n"
+            "Env contract current should set on the exec call:\n"
+            "  CURRENT_URL         current API base URL\n"
+            "  CURRENT_RUN_TOKEN   run-scoped bearer token\n"
+            "  HARNESS_RUN_ID      workflow run UUID\n"
+            "  OPENROUTER_API_KEY  for agent steps"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    workflow_p.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="Workflow run UUID. Falls back to $HARNESS_RUN_ID.",
+    )
+    workflow_p.add_argument(
+        "--workdir",
+        default=None,
+        help="Run working directory. Defaults to ~/wf-run-<run_id>.",
+    )
+    workflow_p.add_argument(
+        "--data-root",
+        default="/data",
+        help="Workspace volume root for input hydration / output promotion "
+        "(default: /data; missing paths are skipped silently).",
+    )
+    workflow_p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG|INFO|WARNING|ERROR.",
+    )
+
     validate_config_p = subparsers.add_parser(
         "validate-config",
         help="Validate an agent config file against this harness checkout.",
@@ -997,6 +1095,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_validate_config(args, validate_config_p)
     if args.command == "generate-spec":
         return _cmd_generate_spec(args, generate_spec_p)
+    if args.command == "workflow":
+        return _cmd_workflow(args, workflow_p)
     if args.command == "eval":
         # Lazy import — `harness.evals` must not be pulled on the agent path.
         from harness.evals.cli_entry import run as _cmd_eval
