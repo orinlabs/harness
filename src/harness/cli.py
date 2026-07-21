@@ -989,7 +989,7 @@ def main(argv: list[str] | None = None) -> int:
             "journal) from current, executes it in a run working directory, "
             "and POSTs every step transition and record back before "
             "advancing. Exits 0 when parked at a gate (current re-dispatches "
-            "after a decision); posts a run_report record before any "
+            "after an approval); posts a run_report record before any "
             "terminal exit.\n\n"
             "Env contract current should set on the exec call:\n"
             "  CURRENT_URL         current API base URL\n"

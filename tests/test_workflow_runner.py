@@ -3,7 +3,7 @@
 Covers the four invariants:
   * journal first (transition/record ordering asserted on the wire),
   * exit at gates (proposal record + waiting_on_gate + exit 0),
-  * resume from journal (succeeded steps skipped, gate decisions honored,
+  * resume from journal (succeeded steps skipped, gate approvals honored,
     `when:` approved/rejected branches),
   * terminal run_report before exit.
 
@@ -57,7 +57,7 @@ def definition_response(
     *,
     control: dict | None = None,
     steps_state: list[dict] | None = None,
-    decisions: list[dict] | None = None,
+    approvals: list[dict] | None = None,
     project: str | None = PROJECT,
 ) -> dict:
     return {
@@ -70,7 +70,7 @@ def definition_response(
             "kind": "scripted",
             "control": {
                 "display_name": "Test Workflow",
-                "required_adapters": [],
+                "required_integrations": [],
                 "inputs": [],
                 "outputs": [],
                 "files": [],
@@ -85,7 +85,7 @@ def definition_response(
             if steps_state is not None
             else [{"step_id": s["id"], "status": "pending", "attempts": 0} for s in steps]
         ),
-        "decisions": decisions or [],
+        "approvals": approvals or [],
     }
 
 
@@ -225,7 +225,7 @@ def test_project_input_hydration(fake_current, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# (b) Gate exit + resume with decision (approved and rejected branches)
+# (b) Gate exit + resume with approval (approved and rejected branches)
 # ---------------------------------------------------------------------------
 
 
@@ -279,7 +279,7 @@ def test_gate_posts_proposal_and_exits_zero(fake_current, tmp_path):
     assert fake_current.records_of("run_report") == []
 
 
-def _resume_after_gate(fake_current, decision_state: str | None) -> None:
+def _resume_after_gate(fake_current, approval_state: str | None) -> None:
     """Mutate the fake's journal to look like a resume after the gate."""
     fake_current.definition_response["steps_state"] = [
         {"step_id": "prep", "status": "succeeded", "attempts": 1},
@@ -287,12 +287,12 @@ def _resume_after_gate(fake_current, decision_state: str | None) -> None:
         {"step_id": "on-approved", "status": "pending", "attempts": 0},
         {"step_id": "on-rejected", "status": "pending", "attempts": 0},
     ]
-    if decision_state is not None:
-        fake_current.definition_response["decisions"] = [
+    if approval_state is not None:
+        fake_current.definition_response["approvals"] = [
             {
                 "gate_step_id": "approve",
                 "proposal_record_id": "33333333-3333-3333-3333-333333333333",
-                "state": decision_state,
+                "state": approval_state,
             }
         ]
     fake_current.reset_journal()
@@ -338,7 +338,7 @@ def test_gate_resume_runs_rejected_branch_and_skips_approved(fake_current, tmp_p
     ]
 
 
-def test_gate_resume_without_decision_exits_again(fake_current, tmp_path):
+def test_gate_resume_without_approval_exits_again(fake_current, tmp_path):
     """Re-dispatched before anyone decided: re-post waiting_on_gate
     (idempotent) and get out without re-running anything or re-posting the
     proposal record."""

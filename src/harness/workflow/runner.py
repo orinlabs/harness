@@ -14,10 +14,10 @@ The four invariants this module exists to uphold:
    disposable; the journal is not.
 2. **Exit at gates.** A gate step posts an ``agent_proposal`` record, posts
    ``waiting_on_gate``, and exits 0. A process is never parked waiting for
-   a human — current re-dispatches a fresh sandbox once a decision lands.
+   a human — current re-dispatches a fresh sandbox once an approval lands.
 3. **Resume from the journal.** On start we replay ``steps_state``: steps
    already ``succeeded``/``skipped`` are not re-run; a gate sitting in
-   ``waiting_on_gate`` with a decision present resolves and downstream
+   ``waiting_on_gate`` with an approval present resolves and downstream
    ``when:`` guards are evaluated. Re-posting an already-recorded
    transition is safe (the endpoint is idempotent).
 4. **Terminal report.** Before a terminal exit (run succeeded or failed —
@@ -117,7 +117,7 @@ class WorkflowRunner:
         definition: dict[str, Any] = resp["definition"]
         self.project = resp.get("project")
         steps_state = {s["step_id"]: dict(s) for s in resp.get("steps_state") or []}
-        decisions = {d["gate_step_id"]: dict(d) for d in resp.get("decisions") or []}
+        approvals = {a["gate_step_id"]: dict(a) for a in resp.get("approvals") or []}
 
         logger.info(
             "workflow run start: run=%s workflow=%r kind=%s steps=%d workdir=%s",
@@ -147,10 +147,10 @@ class WorkflowRunner:
                 )
                 continue
 
-            # A gate we previously parked on: resolved iff a decision landed.
+            # A gate we previously parked on: resolved iff an approval landed.
             if step.get("kind") == "gate" and state["status"] == "waiting_on_gate":
-                if step_id not in decisions:
-                    logger.info("gate %s still awaiting decision; exiting", step_id)
+                if step_id not in approvals:
+                    logger.info("gate %s still awaiting approval; exiting", step_id)
                     self.client.post_transition(
                         step_id=step_id,
                         status="waiting_on_gate",
@@ -158,7 +158,7 @@ class WorkflowRunner:
                     )
                     return 0
                 logger.info(
-                    "gate %s resolved: %s", step_id, decisions[step_id].get("state")
+                    "gate %s resolved: %s", step_id, approvals[step_id].get("state")
                 )
                 self.client.post_transition(
                     step_id=step_id, status="succeeded", attempt=max(prior_attempts, 1)
@@ -169,7 +169,7 @@ class WorkflowRunner:
                 continue
 
             # `when:` guard — "<gate-step-id>.approved|rejected".
-            if not self._when_satisfied(step, decisions):
+            if not self._when_satisfied(step, approvals):
                 logger.info("step %s skipped (when=%r unmet)", step_id, step.get("when"))
                 self.client.post_transition(
                     step_id=step_id, status="skipped", attempt=max(prior_attempts, 1)
@@ -485,13 +485,13 @@ class WorkflowRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _when_satisfied(step: dict[str, Any], decisions: dict[str, dict]) -> bool:
+    def _when_satisfied(step: dict[str, Any], approvals: dict[str, dict]) -> bool:
         when = step.get("when")
         if not when:
             return True
         gate_id, _, expected = str(when).partition(".")
-        decision = decisions.get(gate_id)
-        return decision is not None and decision.get("state") == expected
+        approval = approvals.get(gate_id)
+        return approval is not None and approval.get("state") == expected
 
     @staticmethod
     def _pending_report(

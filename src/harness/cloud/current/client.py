@@ -94,7 +94,7 @@ class CurrentClient:
     # -- endpoints ----------------------------------------------------------
 
     def get_definition(self) -> dict[str, Any]:
-        """GET the run definition + journal (steps_state, decisions)."""
+        """GET the run definition + journal (steps_state, approvals)."""
         resp = self._request("GET", self._url("definition"))
         return resp.json()
 

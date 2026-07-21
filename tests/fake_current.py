@@ -7,7 +7,7 @@ real; only the implementation behind the wire is fake.
 Endpoints (v0 contract):
   GET  /api/workflows/runs/{run_id}/definition/     -> the configured definition
                                                      response (definition +
-                                                     steps_state + decisions)
+                                                     steps_state + approvals)
   POST /api/workflows/runs/{run_id}/transitions/  -> 200, recorded in order
   POST /api/workflows/runs/{run_id}/records/      -> 201 {"id": uuid}, or a
                                                      test-injected status per
