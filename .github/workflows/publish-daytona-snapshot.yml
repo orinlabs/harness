@@ -13,9 +13,19 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      snapshot_name:
+        description: >-
+          Daytona snapshot name to publish to. Leave as harness-latest only
+          for real main-branch releases -- that's the name current dispatches
+          to by default in production. Use a different name (e.g.
+          harness-staging) to publish a branch build without touching the
+          production snapshot.
+        required: false
+        default: harness-latest
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.inputs.snapshot_name || 'harness-latest' }}
   cancel-in-progress: true
 
 permissions:
@@ -24,7 +34,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  SNAPSHOT_NAME: harness-latest
+  SNAPSHOT_NAME: ${{ github.event.inputs.snapshot_name || 'harness-latest' }}
 
 jobs:
   publish:
