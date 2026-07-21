@@ -107,11 +107,11 @@ class CurrentClient:
         error: str | None = None,
     ) -> None:
         """POST a step transition. Idempotent server-side; 200/201 = success."""
-        self._request(
-            "POST",
-            self._url("transitions"),
-            json={"step_id": step_id, "status": status, "attempt": attempt, "error": error},
-        )
+        body: dict[str, Any] = {"step_id": step_id, "status": status, "attempt": attempt}
+        # The platform's serializer rejects an explicit null; omit instead.
+        if error is not None:
+            body["error"] = error
+        self._request("POST", self._url("transitions"), json=body)
 
     def post_record(
         self,
@@ -129,18 +129,19 @@ class CurrentClient:
         schema — surfaced as ``CurrentAPIError(status_code=422)`` so the
         runner can report it as a step failure rather than crashing.
         """
-        resp = self._request(
-            "POST",
-            self._url("records"),
-            json={
-                "record_type": record_type,
-                "project": project,
-                "step_id": step_id,
-                "data": data,
-                "extras": extras or [],
-                "produced_at": produced_at,
-            },
-        )
+        body: dict[str, Any] = {
+            "record_type": record_type,
+            "data": data,
+            "extras": extras or [],
+            "produced_at": produced_at,
+        }
+        # The platform's serializer rejects explicit nulls on optional
+        # fields; omit them instead.
+        if project is not None:
+            body["project"] = project
+        if step_id is not None:
+            body["step_id"] = step_id
+        resp = self._request("POST", self._url("records"), json=body)
         return resp.json() if resp.content else {}
 
     # -- plumbing -----------------------------------------------------------
