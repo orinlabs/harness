@@ -306,7 +306,7 @@ def test_gate_resume_runs_approved_branch_and_skips_rejected(fake_current, tmp_p
         {"id": "prep", "status": "succeeded", "attempts": 1},
         {"id": "approve", "status": "succeeded", "attempts": 1},
         {"id": "on-approved", "status": "succeeded", "attempts": 1},
-        {"id": "on-rejected", "status": "skipped", "attempts": 0},
+        {"id": "on-rejected", "status": "skipped"},
     ]
 
 
@@ -406,7 +406,7 @@ def test_failure_aborts_run_by_default(fake_current, tmp_path):
             "attempts": 1,
             "error": data["steps"][0]["error"],
         },
-        {"id": "never", "status": "pending", "attempts": 0},
+        {"id": "never", "status": "pending"},
     ]
     assert data["promoted_outputs"] == []
     # run_report is the last event; the failed transition preceded it.

@@ -169,7 +169,9 @@ class WorkflowRunner:
                 self.client.post_transition(
                     step_id=step_id, status="skipped", attempt=max(prior_attempts, 1)
                 )
-                report_steps.append({"id": step_id, "status": "skipped", "attempts": 0})
+                # No `attempts`: the run_report schema requires >= 1 when
+                # present, and a skipped step was never attempted.
+                report_steps.append({"id": step_id, "status": "skipped"})
                 continue
 
             if step.get("kind") == "gate":
@@ -494,13 +496,16 @@ class WorkflowRunner:
         entries = []
         for step in remaining:
             state = steps_state.get(step["id"]) or {}
-            entries.append(
-                {
-                    "id": step["id"],
-                    "status": state.get("status") or "pending",
-                    "attempts": int(state.get("attempts") or 0),
-                }
-            )
+            entry: dict[str, Any] = {
+                "id": step["id"],
+                "status": state.get("status") or "pending",
+            }
+            # No `attempts` key for never-attempted steps: the run_report
+            # schema requires >= 1 when present.
+            attempts = int(state.get("attempts") or 0)
+            if attempts > 0:
+                entry["attempts"] = attempts
+            entries.append(entry)
         return entries
 
     def _post_run_report(
