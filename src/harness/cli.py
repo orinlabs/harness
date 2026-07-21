@@ -995,7 +995,9 @@ def main(argv: list[str] | None = None) -> int:
             "  CURRENT_URL         current API base URL\n"
             "  CURRENT_RUN_TOKEN   run-scoped bearer token\n"
             "  HARNESS_RUN_ID      workflow run UUID\n"
-            "  OPENROUTER_API_KEY  for agent steps"
+            "  OPENROUTER_API_KEY  for agent steps\n"
+            "  CURRENT_DATA_ROOT   workspace volume mount path (optional; "
+            "see --data-root)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1008,13 +1010,14 @@ def main(argv: list[str] | None = None) -> int:
     workflow_p.add_argument(
         "--workdir",
         default=None,
-        help="Run working directory. Defaults to ~/wf-run-<run_id>.",
+        help="Run working directory. Defaults to ~/workflow/<run_id>.",
     )
     workflow_p.add_argument(
         "--data-root",
-        default="/data",
+        default=os.environ.get("CURRENT_DATA_ROOT", "/data"),
         help="Workspace volume root for input hydration / output promotion "
-        "(default: /data; missing paths are skipped silently).",
+        "(default: $CURRENT_DATA_ROOT if set, else /data; missing paths are "
+        "skipped silently).",
     )
     workflow_p.add_argument(
         "--log-level",

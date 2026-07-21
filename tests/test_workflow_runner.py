@@ -114,6 +114,18 @@ def run_report(fake: FakeCurrent) -> dict:
     return reports[0]
 
 
+def test_default_working_dir_is_under_workflow_home():
+    """When `working_dir` isn't passed, the runner stages under a stable
+    `~/workflow/<run_id>/` root -- not the run-id-bearing `~/wf-run-<id>`
+    name every other test here overrides via `make_runner`'s
+    `kwargs.setdefault("working_dir", ...)`."""
+    from harness.workflow import WorkflowRunner
+
+    client = CurrentClient("http://example.invalid", "test-run-token", RUN_ID)
+    runner = WorkflowRunner(client)
+    assert runner.working_dir == Path.home() / "workflow" / RUN_ID
+
+
 # ---------------------------------------------------------------------------
 # (a) Scripted happy path
 # ---------------------------------------------------------------------------

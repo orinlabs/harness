@@ -24,12 +24,17 @@ The four invariants this module exists to uphold:
    not a gate exit) the runner posts a ``run_report`` record summarizing
    step outcomes, records emitted, and promoted outputs.
 
-Step working directory layout (``~/wf-run-{run_id}/`` by default)::
+Step working directory layout (``~/workflow/{run_id}/`` by default)::
 
-    inputs/   hydrated from the workspace volume (/data) when present
+    inputs/   hydrated from the workspace volume (data_root) when present
     work/     scratch
-    out/      step outputs; promoted to /data on run success when the
+    out/      step outputs; promoted to data_root on run success when the
               definition declares "project" in control.outputs
+
+``data_root`` defaults to ``/data`` but is sourced from the
+``CURRENT_DATA_ROOT`` env var when current sets it (single-sourced from
+current's own volume-mount-path constant, so the two sides can't
+silently drift) — see ``--data-root`` in ``cli.py``.
 
 Failure semantics: ``retry: {attempts: N}`` is a *total* attempt budget per
 step; ``on_failure: fail`` (the default) aborts the run as terminal
@@ -96,7 +101,7 @@ class WorkflowRunner:
         self.client = client
         self.run_id = client.run_id
         self.working_dir = (
-            Path(working_dir) if working_dir else Path.home() / f"wf-run-{self.run_id}"
+            Path(working_dir) if working_dir else Path.home() / "workflow" / self.run_id
         )
         self.data_root = Path(data_root)
         self.project: str | None = None
