@@ -1,9 +1,9 @@
-"""Workflow runner: interpret a `current` envelope inside a disposable sandbox.
+"""Workflow runner: interpret a `current` definition inside a disposable sandbox.
 
 ``harness workflow`` is the third harness mode (after ``agent`` and
 ``boot``): current dispatches a sandbox with ``CURRENT_URL`` /
 ``CURRENT_RUN_TOKEN`` / ``HARNESS_RUN_ID`` set, the runner fetches the
-run's envelope (an ordered list of script / agent / gate steps plus the
+run's definition (an ordered list of script / agent / gate steps plus the
 journal so far), executes it, and reports every state change back over
 HTTP. Postgres on the current side is the source of truth.
 
@@ -29,7 +29,7 @@ Step working directory layout (``~/wf-run-{run_id}/`` by default)::
     inputs/   hydrated from the workspace volume (/data) when present
     work/     scratch
     out/      step outputs; promoted to /data on run success when the
-              envelope declares "project" in control.outputs
+              definition declares "project" in control.outputs
 
 Failure semantics: ``retry: {attempts: N}`` is a *total* attempt budget per
 step; ``on_failure: fail`` (the default) aborts the run as terminal
@@ -108,8 +108,8 @@ class WorkflowRunner:
     # ------------------------------------------------------------------
 
     def run(self) -> int:
-        resp = self.client.get_envelope()
-        envelope: dict[str, Any] = resp["envelope"]
+        resp = self.client.get_definition()
+        definition: dict[str, Any] = resp["definition"]
         self.project = resp.get("project")
         steps_state = {s["step_id"]: dict(s) for s in resp.get("steps_state") or []}
         decisions = {d["gate_step_id"]: dict(d) for d in resp.get("decisions") or []}
@@ -117,18 +117,18 @@ class WorkflowRunner:
         logger.info(
             "workflow run start: run=%s workflow=%r kind=%s steps=%d workdir=%s",
             self.run_id,
-            envelope.get("name"),
-            envelope.get("kind"),
-            len(envelope.get("steps") or []),
+            definition.get("name"),
+            definition.get("kind"),
+            len(definition.get("steps") or []),
             self.working_dir,
         )
-        self._prepare_working_dir(envelope)
+        self._prepare_working_dir(definition)
 
         started_at = _now_iso()
         report_steps: list[dict[str, Any]] = []
         run_failed = False
 
-        steps: list[dict[str, Any]] = envelope.get("steps") or []
+        steps: list[dict[str, Any]] = definition.get("steps") or []
         for index, step in enumerate(steps):
             step_id = step["id"]
             state = steps_state.get(step_id) or {"status": "pending", "attempts": 0}
@@ -253,9 +253,9 @@ class WorkflowRunner:
 
         # Terminal: promote outputs (success only), then journal the report.
         status = "failed" if run_failed else "succeeded"
-        promoted = [] if run_failed else self._promote_outputs(envelope)
+        promoted = [] if run_failed else self._promote_outputs(definition)
         self._post_run_report(
-            envelope,
+            definition,
             status=status,
             started_at=started_at,
             finished_at=_now_iso(),
@@ -269,11 +269,11 @@ class WorkflowRunner:
     # Working directory: staging, control files, hydration, promotion
     # ------------------------------------------------------------------
 
-    def _prepare_working_dir(self, envelope: dict[str, Any]) -> None:
+    def _prepare_working_dir(self, definition: dict[str, Any]) -> None:
         for name in _STAGING_DIRS:
             (self.working_dir / name).mkdir(parents=True, exist_ok=True)
 
-        control = envelope.get("control") or {}
+        control = definition.get("control") or {}
         for entry in control.get("files") or []:
             dest = self.working_dir / entry["dest"]
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -299,14 +299,14 @@ class WorkflowRunner:
         shutil.copytree(src, dest, dirs_exist_ok=True)
         logger.info("hydrated %s -> %s", src, dest)
 
-    def _promote_outputs(self, envelope: dict[str, Any]) -> list[dict[str, str]]:
+    def _promote_outputs(self, definition: dict[str, Any]) -> list[dict[str, str]]:
         """Copy ``out/`` to the project's workflow-outputs area on the volume.
 
-        Only when the envelope declares ``"project"`` in ``control.outputs``
+        Only when the definition declares ``"project"`` in ``control.outputs``
         and both a project and the ``/data`` volume exist. Returns the
         ``promoted_outputs`` entries for the run_report.
         """
-        control = envelope.get("control") or {}
+        control = definition.get("control") or {}
         if "project" not in (control.get("outputs") or []) or not self.project:
             return []
         if not self.data_root.is_dir():
@@ -383,7 +383,7 @@ class WorkflowRunner:
         NOT offered: the step ends when the model stops calling tools, and
         hitting ``max_turns`` first is a step failure.
         """
-        # Deferred imports: keep `harness workflow` startup (and envelope
+        # Deferred imports: keep `harness workflow` startup (and definition
         # fetch failures) from paying the agent-loop import cost.
         from harness.core.runtime import LocalAgentRuntime
         from harness.core.tracing import StdoutTraceSink
@@ -505,7 +505,7 @@ class WorkflowRunner:
 
     def _post_run_report(
         self,
-        envelope: dict[str, Any],
+        definition: dict[str, Any],
         *,
         status: str,
         started_at: str,
@@ -519,8 +519,8 @@ class WorkflowRunner:
             project=self.project,
             produced_at=finished_at,
             data={
-                "workflow": envelope.get("name"),
-                "definition_hash": envelope.get("rendered_hash"),
+                "workflow": definition.get("name"),
+                "definition_hash": definition.get("rendered_hash"),
                 "status": status,
                 "started_at": started_at,
                 "finished_at": finished_at,

@@ -5,15 +5,15 @@ real HTTP so serialization, auth headers, and error paths are exercised for
 real; only the implementation behind the wire is fake.
 
 Endpoints (v0 contract):
-  GET  /api/workflows/runs/{run_id}/envelope/     -> the configured envelope
-                                                     response (envelope +
+  GET  /api/workflows/runs/{run_id}/definition/     -> the configured definition
+                                                     response (definition +
                                                      steps_state + decisions)
   POST /api/workflows/runs/{run_id}/transitions/  -> 200, recorded in order
   POST /api/workflows/runs/{run_id}/records/      -> 201 {"id": uuid}, or a
                                                      test-injected status per
                                                      record_type (e.g. 422)
 
-Tests mutate ``envelope_response`` between runner invocations to simulate
+Tests mutate ``definition_response`` between runner invocations to simulate
 current's journal advancing (e.g. a gate decision landing before a resume).
 ``events`` interleaves transitions and records in arrival order so tests can
 assert journal-first ordering across both endpoints.
@@ -36,7 +36,7 @@ class FakeCurrent:
     run_id: str = "run-1"
     host: str = "127.0.0.1"
     port: int = 0
-    envelope_response: dict[str, Any] = field(default_factory=dict)
+    definition_response: dict[str, Any] = field(default_factory=dict)
     # record_type -> (status, body) override; e.g. {"agent_proposal": (422, {...})}
     record_failures: dict[str, tuple[int, Any]] = field(default_factory=dict)
     transitions: list[dict] = field(default_factory=list)
@@ -55,7 +55,7 @@ class FakeCurrent:
         return [r for r in self.records if r["record_type"] == record_type]
 
     def reset_journal(self) -> None:
-        """Clear captured traffic (keeps the envelope response) between runs."""
+        """Clear captured traffic (keeps the definition response) between runs."""
         self.transitions.clear()
         self.records.clear()
         self.events.clear()
@@ -123,8 +123,8 @@ def _make_handler(fake: FakeCurrent):
 
         def do_GET(self):
             fake.auth_headers.append(self.headers.get("Authorization") or "")
-            if self.path == f"{prefix}/envelope/":
-                self._write(200, fake.envelope_response)
+            if self.path == f"{prefix}/definition/":
+                self._write(200, fake.definition_response)
                 return
             self._write(404, {"error": f"no route for GET {self.path}"})
 

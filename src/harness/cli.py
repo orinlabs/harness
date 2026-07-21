@@ -33,7 +33,7 @@ Subcommands:
     harness eval  SCENARIO   [options]    # Run a scenario eval end-to-end.
     harness workflow [RUN_ID]             # In-sandbox workflow runner for
                                           # the `current` platform: fetch
-                                          # the run's envelope, execute its
+                                          # the run's definition, execute its
                                           # script/agent/gate steps, journal
                                           # every transition/record back to
                                           # current, exit at gates. Needs
@@ -558,7 +558,7 @@ def _cmd_agent(args, parser: argparse.ArgumentParser) -> int:
 
 
 def _cmd_workflow(args, parser: argparse.ArgumentParser) -> int:
-    """Run a `current` workflow envelope in this sandbox.
+    """Run a `current` workflow definition in this sandbox.
 
     Env contract (current sets these when dispatching the sandbox):
       CURRENT_URL          current API base URL
@@ -982,10 +982,10 @@ def main(argv: list[str] | None = None) -> int:
 
     workflow_p = subparsers.add_parser(
         "workflow",
-        help="Run a `current` workflow envelope in this sandbox (in-sandbox step runner).",
+        help="Run a `current` workflow definition in this sandbox (in-sandbox step runner).",
         description=(
             "The single command current invokes inside a Daytona sandbox. "
-            "Fetches the run's envelope (ordered script/agent/gate steps + "
+            "Fetches the run's definition (ordered script/agent/gate steps + "
             "journal) from current, executes it in a run working directory, "
             "and POSTs every step transition and record back before "
             "advancing. Exits 0 when parked at a gate (current re-dispatches "

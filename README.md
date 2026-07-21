@@ -13,7 +13,7 @@ Harness runs in two modes:
   back to Bedrock. Triggered automatically when `BEDROCK_URL` and
   `BEDROCK_TOKEN` are set.
 - **Workflow (current).** `harness workflow` interprets a workflow
-  envelope (ordered script/agent/gate steps) fetched from the `current`
+  definition (ordered script/agent/gate steps) fetched from the `current`
   platform and journals every step transition and record back over HTTP
   before advancing. Needs `CURRENT_URL`, `CURRENT_RUN_TOKEN`, and
   `HARNESS_RUN_ID`. The sandbox is disposable; current's Postgres is the

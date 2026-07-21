@@ -6,7 +6,7 @@ that reads ``CURRENT_URL`` / ``CURRENT_RUN_TOKEN`` and owns the shared
 
 Contract (v0, authoritative copy in orinlabs/workflows designs/002):
 
-    GET  {CURRENT_URL}/api/workflows/runs/{run_id}/envelope/
+    GET  {CURRENT_URL}/api/workflows/runs/{run_id}/definition/
     POST {CURRENT_URL}/api/workflows/runs/{run_id}/transitions/
     POST {CURRENT_URL}/api/workflows/runs/{run_id}/records/
 
@@ -93,9 +93,9 @@ class CurrentClient:
 
     # -- endpoints ----------------------------------------------------------
 
-    def get_envelope(self) -> dict[str, Any]:
-        """GET the run envelope + journal (steps_state, decisions)."""
-        resp = self._request("GET", self._url("envelope"))
+    def get_definition(self) -> dict[str, Any]:
+        """GET the run definition + journal (steps_state, decisions)."""
+        resp = self._request("GET", self._url("definition"))
         return resp.json()
 
     def post_transition(

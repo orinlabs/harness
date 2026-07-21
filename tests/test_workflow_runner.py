@@ -30,7 +30,7 @@ PROJECT = "11111111-1111-1111-1111-111111111111"
 
 
 # ---------------------------------------------------------------------------
-# Envelope / runner builders
+# Definition / runner builders
 # ---------------------------------------------------------------------------
 
 
@@ -52,7 +52,7 @@ def gate_step(step_id: str, proposal: str, **extra) -> dict:
     return {"id": step_id, "kind": "gate", "proposal": proposal, **extra}
 
 
-def envelope_response(
+def definition_response(
     steps: list[dict],
     *,
     control: dict | None = None,
@@ -64,8 +64,8 @@ def envelope_response(
         "run_id": RUN_ID,
         "workspace": "22222222-2222-2222-2222-222222222222",
         "project": project,
-        "envelope": {
-            "envelope_version": 1,
+        "definition": {
+            "definition_version": 1,
             "name": "test-workflow",
             "kind": "scripted",
             "control": {
@@ -124,7 +124,7 @@ def test_scripted_happy_path_journals_in_order(fake_current, tmp_path):
     next action; control files are staged; outputs are promoted on success;
     the run_report record is the last thing on the wire."""
     (tmp_path / "data").mkdir()  # workspace volume present -> promotion active
-    fake_current.envelope_response = envelope_response(
+    fake_current.definition_response = definition_response(
         [
             script_step(
                 "s1",
@@ -194,7 +194,7 @@ def test_project_input_hydration(fake_current, tmp_path):
     src = tmp_path / "data" / "projects" / PROJECT
     src.mkdir(parents=True)
     (src / "brief.md").write_text("the brief")
-    fake_current.envelope_response = envelope_response(
+    fake_current.definition_response = definition_response(
         [
             script_step(
                 "s1",
@@ -233,7 +233,7 @@ def _gated_steps() -> list[dict]:
 
 
 def test_gate_posts_proposal_and_exits_zero(fake_current, tmp_path):
-    fake_current.envelope_response = envelope_response(_gated_steps())
+    fake_current.definition_response = definition_response(_gated_steps())
 
     exit_code = make_runner(fake_current, tmp_path).run()
 
@@ -269,14 +269,14 @@ def test_gate_posts_proposal_and_exits_zero(fake_current, tmp_path):
 
 def _resume_after_gate(fake_current, decision_state: str | None) -> None:
     """Mutate the fake's journal to look like a resume after the gate."""
-    fake_current.envelope_response["steps_state"] = [
+    fake_current.definition_response["steps_state"] = [
         {"step_id": "prep", "status": "succeeded", "attempts": 1},
         {"step_id": "approve", "status": "waiting_on_gate", "attempts": 1},
         {"step_id": "on-approved", "status": "pending", "attempts": 0},
         {"step_id": "on-rejected", "status": "pending", "attempts": 0},
     ]
     if decision_state is not None:
-        fake_current.envelope_response["decisions"] = [
+        fake_current.definition_response["decisions"] = [
             {
                 "gate_step_id": "approve",
                 "proposal_record_id": "33333333-3333-3333-3333-333333333333",
@@ -287,7 +287,7 @@ def _resume_after_gate(fake_current, decision_state: str | None) -> None:
 
 
 def test_gate_resume_runs_approved_branch_and_skips_rejected(fake_current, tmp_path):
-    fake_current.envelope_response = envelope_response(_gated_steps())
+    fake_current.definition_response = definition_response(_gated_steps())
     assert make_runner(fake_current, tmp_path).run() == 0  # parks at the gate
 
     _resume_after_gate(fake_current, "approved")
@@ -311,7 +311,7 @@ def test_gate_resume_runs_approved_branch_and_skips_rejected(fake_current, tmp_p
 
 
 def test_gate_resume_runs_rejected_branch_and_skips_approved(fake_current, tmp_path):
-    fake_current.envelope_response = envelope_response(_gated_steps())
+    fake_current.definition_response = definition_response(_gated_steps())
     assert make_runner(fake_current, tmp_path).run() == 0
 
     _resume_after_gate(fake_current, "rejected")
@@ -330,7 +330,7 @@ def test_gate_resume_without_decision_exits_again(fake_current, tmp_path):
     """Re-dispatched before anyone decided: re-post waiting_on_gate
     (idempotent) and get out without re-running anything or re-posting the
     proposal record."""
-    fake_current.envelope_response = envelope_response(_gated_steps())
+    fake_current.definition_response = definition_response(_gated_steps())
     assert make_runner(fake_current, tmp_path).run() == 0
 
     _resume_after_gate(fake_current, None)
@@ -349,7 +349,7 @@ _FAILING_SCRIPT = "import sys\nsys.stderr.write('boom: cannot reticulate')\nsys.
 
 
 def test_retry_exhaustion_then_on_failure_continue(fake_current, tmp_path):
-    fake_current.envelope_response = envelope_response(
+    fake_current.definition_response = definition_response(
         [
             script_step(
                 "flaky", _FAILING_SCRIPT, retry={"attempts": 2}, on_failure="continue"
@@ -383,7 +383,7 @@ def test_failure_aborts_run_by_default(fake_current, tmp_path):
     """`on_failure: fail` (the default): terminal failed run, downstream steps
     never run, run_report (status=failed) still posted after the failed
     transition."""
-    fake_current.envelope_response = envelope_response(
+    fake_current.definition_response = definition_response(
         [
             script_step("broken", _FAILING_SCRIPT),
             script_step("never", "print('unreachable')"),
@@ -420,7 +420,7 @@ def test_failure_aborts_run_by_default(fake_current, tmp_path):
 
 
 def test_resume_skips_already_succeeded_steps(fake_current, tmp_path):
-    fake_current.envelope_response = envelope_response(
+    fake_current.definition_response = definition_response(
         [
             # Would fail loudly if re-run: the journal, not the script, must
             # decide whether it runs again.
@@ -560,7 +560,7 @@ def test_agent_step_uses_local_tools_and_ends_when_idle(
     )
     monkeypatch.setattr(llm_mod, "complete", scripted)
 
-    fake_current.envelope_response = envelope_response([agent_step("think")])
+    fake_current.definition_response = definition_response([agent_step("think")])
     exit_code = make_runner(fake_current, tmp_path).run()
 
     assert exit_code == 0
@@ -592,7 +592,7 @@ def test_agent_step_max_turns_exhaustion_is_a_step_failure(
     )
     monkeypatch.setattr(llm_mod, "complete", scripted)
 
-    fake_current.envelope_response = envelope_response(
+    fake_current.definition_response = definition_response(
         [agent_step("loops-forever", max_turns=2)]
     )
     exit_code = make_runner(fake_current, tmp_path).run()
@@ -613,7 +613,7 @@ def test_agent_step_max_turns_exhaustion_is_a_step_failure(
 
 
 def test_proposal_record_422_fails_the_gate_step(fake_current, tmp_path):
-    fake_current.envelope_response = envelope_response([gate_step("g1", "bad_proposal")])
+    fake_current.definition_response = definition_response([gate_step("g1", "bad_proposal")])
     fake_current.record_failures["agent_proposal"] = (
         422,
         {"detail": "payload does not match declared schema"},
