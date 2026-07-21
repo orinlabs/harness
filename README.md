@@ -12,9 +12,16 @@ Harness runs in two modes:
 - **Cloud (Bedrock).** Config is fetched from Bedrock; traces + sleep go
   back to Bedrock. Triggered automatically when `BEDROCK_URL` and
   `BEDROCK_TOKEN` are set.
+- **Workflow (current).** `harness workflow` interprets a workflow
+  definition (ordered script/agent/gate steps) fetched from the `current`
+  platform and journals every step transition and record back over HTTP
+  before advancing. Needs `CURRENT_URL`, `CURRENT_RUN_TOKEN`, and
+  `HARNESS_RUN_ID`. The sandbox is disposable; current's Postgres is the
+  source of truth, so the runner exits at approval gates and resumes from
+  the journal on re-dispatch.
 
 The mode is picked per-run based on what's in the environment; the same
-binary handles both.
+binary handles all of them.
 
 ## Storage
 

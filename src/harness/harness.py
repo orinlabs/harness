@@ -174,7 +174,22 @@ class Harness:
         trace_sink: TraceSink | None = None,
         runtime: AgentRuntime | None = None,
         max_sleep_until: datetime | str | None = None,
+        max_turns: int | None = None,
+        stop_when_idle: bool = False,
+        include_builtin_tools: bool = True,
     ):
+        # Workflow-mode knobs (harness.workflow.runner). Defaults reproduce
+        # the classic agent loop exactly:
+        #   * ``max_turns`` caps the loop (default: constants.MAX_TURNS).
+        #   * ``stop_when_idle=True`` ends the run when the model stops
+        #     calling tools, instead of nudging it to continue.
+        #   * ``include_builtin_tools=False`` drops the default built-ins
+        #     (sleep) from the tool map.
+        # ``exhausted_max_turns`` is set after run() so callers can tell
+        # "model went idle" apart from "loop hit the turn cap".
+        self._max_turns = max_turns if max_turns is not None else MAX_TURNS
+        self._stop_when_idle = stop_when_idle
+        self.exhausted_max_turns = False
         self.config = config
         # Pick defaults from the environment when the caller didn't pass
         # explicit dependencies. autoconfigure() returns Bedrock-backed
@@ -204,7 +219,9 @@ class Harness:
                 config.id,
                 self.ctx.max_sleep_until.isoformat(),
             )
-        self.tool_map: dict[str, Tool] = build_tool_map(config.tools)
+        self.tool_map: dict[str, Tool] = build_tool_map(
+            config.tools, include_builtins=include_builtin_tools
+        )
         # Expose the tool map on the per-run context so built-in tools can
         # invoke siblings (e.g. sleep -> list_notifications pre-flight check).
         self.ctx.tool_map = self.tool_map
@@ -258,11 +275,12 @@ class Harness:
                 },
             ) as run_span:
                 try:
-                    for turn in range(MAX_TURNS):
+                    for turn in range(self._max_turns):
                         self.ctx.turn = turn
                         with text_span(f"turn_{turn}") as turn_span:
                             if not self._step(turn_span):
                                 return
+                    self.exhausted_max_turns = True
                 except BaseException as exc:  # noqa: BLE001
                     # SystemExit (SIGTERM from a supervisor's /stop or a
                     # supersede), KeyboardInterrupt, and anything else
@@ -562,6 +580,12 @@ class Harness:
             return False
 
         if not resp.tool_calls:
+            if self._stop_when_idle:
+                logger.info(
+                    "turn %d no tool_calls and stop_when_idle -> exiting loop",
+                    self.ctx.turn,
+                )
+                return False
             logger.info("turn %d no tool_calls -> nudging memory", self.ctx.turn)
             self.memory.nudge()
 

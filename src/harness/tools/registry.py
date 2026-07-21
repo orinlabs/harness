@@ -20,10 +20,21 @@ def _builtins() -> list[Tool]:
     return [SleepTool()]
 
 
-def build_tool_map(tools: list[ExternalToolSpec | Tool]) -> dict[str, Tool]:
+def build_tool_map(
+    tools: list[ExternalToolSpec | Tool],
+    *,
+    include_builtins: bool = True,
+) -> dict[str, Tool]:
+    """Assemble the tool map.
+
+    ``include_builtins=False`` skips the default built-ins (currently just
+    ``sleep``). Workflow-mode agent steps use this: they terminate by the
+    model going idle, not by sleeping, so offering ``sleep`` there would
+    only invite the model to park a disposable sandbox.
+    """
     tool_map: dict[str, Tool] = {}
 
-    builtin_tools = _builtins()
+    builtin_tools = _builtins() if include_builtins else []
     for tool in builtin_tools:
         if tool.name in tool_map:
             raise ValueError(f"duplicate built-in tool: {tool.name!r}")
