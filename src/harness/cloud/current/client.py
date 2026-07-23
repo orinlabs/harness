@@ -122,6 +122,7 @@ class CurrentClient:
         project: str | None = None,
         extras: list[Any] | None = None,
         produced_at: str | None = None,
+        supersedes: str | None = None,
     ) -> dict[str, Any]:
         """POST a record row. Returns the created body (``{"id": uuid}``).
 
@@ -141,6 +142,8 @@ class CurrentClient:
             body["project"] = project
         if step_id is not None:
             body["step_id"] = step_id
+        if supersedes is not None:
+            body["supersedes"] = supersedes
         resp = self._request("POST", self._url("records"), json=body)
         return resp.json() if resp.content else {}
 

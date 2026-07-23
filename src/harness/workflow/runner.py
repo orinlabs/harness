@@ -15,6 +15,9 @@ The four invariants this module exists to uphold:
 2. **Exit at gates.** A gate step posts an ``agent_proposal`` record, posts
    ``waiting_on_gate``, and exits 0. A process is never parked waiting for
    a human — current re-dispatches a fresh sandbox once an approval lands.
+   Exception: a gate with ``on_missing_proposal: skip`` and no staged
+   ``out/proposal.json`` has nothing to review; it records ``skipped`` and
+   the run continues (downstream ``when:`` guards on it stay unmet).
 3. **Resume from the journal.** On start we replay ``steps_state``: steps
    already ``succeeded``/``skipped`` are not re-run; a gate sitting in
    ``waiting_on_gate`` with an approval present resolves and downstream
@@ -30,6 +33,17 @@ Step working directory layout (``~/workflow/{run_id}/`` by default)::
     work/     scratch
     out/      step outputs; promoted to data_root on run success when the
               definition declares "project" in control.outputs
+
+``out/records/<record_type>.json`` is a second, narrower convention: a
+staged record (or list of them) for a type the definition declares in
+``emits[]`` with ``auto_commit: true`` — e.g. a model-learned fact like
+``po_fact``. At run end (alongside promotion) the runner commits every
+such file itself: an auto-approved ``agent_proposal`` first (so "which
+runs changed workspace state" stays a proposal query away, even though no
+human decided anything), then the record(s). Types without
+``auto_commit: true`` are untouched here — e.g. ``purchase_order`` is
+posted explicitly by its own script step, which reads (but never
+deletes) the same staging file.
 
 ``data_root`` defaults to ``/data`` but is sourced from the
 ``CURRENT_DATA_ROOT`` env var when current sets it (single-sourced from
@@ -180,6 +194,24 @@ class WorkflowRunner:
                 continue
 
             if step.get("kind") == "gate":
+                # `on_missing_proposal: skip`: no prior step staged
+                # out/proposal.json, so there is nothing to review — record
+                # the gate as skipped and keep going. Downstream
+                # `when: <gate>.approved` steps then skip too (no approval
+                # ever lands), so the run completes without parking.
+                if (
+                    step.get("on_missing_proposal") == "skip"
+                    and not (self.working_dir / "out" / "proposal.json").is_file()
+                ):
+                    logger.info(
+                        "gate %s: no out/proposal.json and on_missing_proposal=skip; skipping",
+                        step_id,
+                    )
+                    self.client.post_transition(
+                        step_id=step_id, status="skipped", attempt=max(prior_attempts, 1)
+                    )
+                    report_steps.append({"id": step_id, "status": "skipped"})
+                    continue
                 outcome = self._run_gate_step(step)
                 if outcome is None:
                     # Proposal + waiting_on_gate journaled; leave the sandbox.
@@ -258,9 +290,12 @@ class WorkflowRunner:
             report_steps.extend(self._pending_report(steps[index + 1 :], steps_state))
             break
 
-        # Terminal: promote outputs (success only), then journal the report.
+        # Terminal: promote outputs and commit staged records (success
+        # only), then journal the report.
         status = "failed" if run_failed else "succeeded"
         promoted = [] if run_failed else self._promote_outputs(definition)
+        if not run_failed:
+            self._commit_staged_records(definition)
         self._post_run_report(
             definition,
             status=status,
@@ -339,6 +374,115 @@ class WorkflowRunner:
             )
         logger.info("promoted %d output file(s) to %s", len(promoted), dest_root)
         return promoted
+
+    def _commit_staged_records(self, definition: dict[str, Any]) -> None:
+        """Commit ``out/records/<type>.json`` for every ``emits[]`` type this
+        definition marks ``auto_commit: true`` — the filesystem write path
+        for facts a definition just appends/supersedes (e.g. ``po_fact``),
+        with no human approval needed. Every commit still posts an
+        auto-approved ``agent_proposal`` first, so "which runs changed
+        workspace state" stays one proposal query away even though nothing
+        was decided by a person — see the module docstring.
+
+        Types without ``auto_commit: true`` are left completely alone: a
+        script step may stage (and consume) the same directory convention
+        itself, e.g. ``purchase_order`` (posted explicitly by
+        ``po-generation``'s ``save`` step, which reads but never deletes
+        ``out/records/purchase_order.json``) — committing it here too would
+        double-post it.
+        """
+        auto_commit_types = {
+            e["record_type"]
+            for e in definition.get("emits") or []
+            if isinstance(e, dict) and e.get("auto_commit") and e.get("record_type")
+        }
+        if not auto_commit_types:
+            return
+        records_dir = self.working_dir / "out" / "records"
+        if not records_dir.is_dir():
+            return
+        for path in sorted(p for p in records_dir.glob("*.json") if p.is_file()):
+            record_type = path.stem
+            if record_type not in auto_commit_types:
+                continue
+            try:
+                loaded = json.loads(path.read_text())
+            except (ValueError, OSError) as e:
+                logger.warning("out/records/%s is unreadable; skipping: %s", path.name, e)
+                continue
+            entries = loaded if isinstance(loaded, list) else [loaded]
+            entries = [e for e in entries if isinstance(e, dict)]
+            if not entries:
+                continue
+            self._commit_record_entries(record_type, entries)
+
+    def _commit_record_entries(self, record_type: str, entries: list[dict[str, Any]]) -> None:
+        """Post one auto-approved ``agent_proposal`` covering every staged
+        entry of ``record_type``, then the record(s) themselves.
+
+        Each entry is the record's ``data`` block, with two reserved
+        sidecar keys popped off before validation: ``supersedes`` (id of
+        the record this corrects) and ``project_id`` (defaults to the
+        run's own project). A proposal-post rejection (e.g. schema-invalid
+        payload text) skips the whole file loudly; an individual record
+        rejection skips just that entry — either way nothing crashes the
+        run, since these are best-effort commits at the very end of it.
+        """
+        clean_entries = []
+        for entry in entries:
+            entry = dict(entry)
+            supersedes = entry.pop("supersedes", None)
+            project_id = entry.pop("project_id", None)
+            clean_entries.append(
+                {"data": entry, "supersedes": supersedes, "project_id": project_id}
+            )
+
+        try:
+            self.client.post_record(
+                record_type="agent_proposal",
+                step_id=None,
+                project=self.project,
+                produced_at=_now_iso(),
+                data={
+                    "proposal": f"auto:{record_type}",
+                    "summary": (
+                        f"Auto-approved: this run staged {len(clean_entries)} "
+                        f"{record_type} record(s) — an existing-type append/"
+                        "correction, not a new schema, so no human approval "
+                        "was needed."
+                    ),
+                    "payload": {
+                        "record_type": record_type,
+                        "entries": [c["data"] for c in clean_entries],
+                    },
+                    "idempotency_key": f"wf-{self.run_id}-records-{record_type}",
+                    "auto_approved": True,
+                },
+            )
+        except CurrentAPIError as e:
+            logger.warning(
+                "auto-approved proposal for staged %s records rejected; not committing "
+                "any of them: %s",
+                record_type,
+                e,
+            )
+            return
+        self._records_emitted["agent_proposal"] += 1
+
+        for clean in clean_entries:
+            try:
+                self.client.post_record(
+                    record_type=record_type,
+                    step_id=None,
+                    project=clean["project_id"] or self.project,
+                    produced_at=_now_iso(),
+                    data=clean["data"],
+                    supersedes=clean["supersedes"],
+                )
+            except CurrentAPIError as e:
+                logger.warning("staged %s record rejected; skipping it: %s", record_type, e)
+                continue
+            self._records_emitted[record_type] += 1
 
     # ------------------------------------------------------------------
     # Step execution

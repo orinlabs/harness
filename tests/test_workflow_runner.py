@@ -56,6 +56,7 @@ def definition_response(
     steps: list[dict],
     *,
     control: dict | None = None,
+    emits: list[dict] | None = None,
     steps_state: list[dict] | None = None,
     approvals: list[dict] | None = None,
     project: str | None = PROJECT,
@@ -76,7 +77,7 @@ def definition_response(
                 "files": [],
                 **(control or {}),
             },
-            "emits": [],
+            "emits": emits or [],
             "steps": steps,
             "rendered_hash": "sha256:feedbeef",
         },
@@ -336,6 +337,68 @@ def test_gate_resume_runs_rejected_branch_and_skips_approved(fake_current, tmp_p
         ("on-rejected", "running", 1),
         ("on-rejected", "succeeded", 1),
     ]
+
+
+def test_gate_on_missing_proposal_skip_lets_run_complete(fake_current, tmp_path):
+    """A gate with `on_missing_proposal: skip` and no staged out/proposal.json
+    has nothing to review: it records `skipped`, emits no agent_proposal, and
+    the run completes without parking. Downstream `when: <gate>.approved`
+    steps skip too (no approval ever lands)."""
+    fake_current.definition_response = definition_response(
+        [
+            script_step("prep", "print('nothing actionable; no proposal staged')"),
+            gate_step("approve", "ship_report", on_missing_proposal="skip"),
+            script_step("on-approved", "print('approved path')", when="approve.approved"),
+        ]
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    assert fake_current.transition_tuples() == [
+        ("prep", "running", 1),
+        ("prep", "succeeded", 1),
+        ("approve", "skipped", 1),
+        ("on-approved", "skipped", 1),
+    ]
+    assert fake_current.records_of("agent_proposal") == []
+    data = run_report(fake_current)["data"]
+    assert data["status"] == "succeeded"
+    assert data["steps"] == [
+        {"id": "prep", "status": "succeeded", "attempts": 1},
+        {"id": "approve", "status": "skipped"},
+        {"id": "on-approved", "status": "skipped"},
+    ]
+
+
+def test_gate_on_missing_proposal_skip_still_parks_when_proposal_staged(
+    fake_current, tmp_path
+):
+    """`on_missing_proposal: skip` only fires when nothing was staged: with an
+    out/proposal.json present the gate parks exactly like a default gate."""
+    fake_current.definition_response = definition_response(
+        [
+            script_step(
+                "prep",
+                "import json, pathlib\n"
+                "pathlib.Path('out').mkdir(exist_ok=True)\n"
+                "pathlib.Path('out/proposal.json').write_text(json.dumps("
+                "{'summary': 'Ship the Q3 report.'}))\n",
+            ),
+            gate_step("approve", "ship_report", on_missing_proposal="skip"),
+        ]
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    assert fake_current.transition_tuples() == [
+        ("prep", "running", 1),
+        ("prep", "succeeded", 1),
+        ("approve", "waiting_on_gate", 1),
+    ]
+    [proposal] = fake_current.records_of("agent_proposal")
+    assert proposal["data"]["summary"] == "Ship the Q3 report."
 
 
 def test_gate_resume_without_approval_exits_again(fake_current, tmp_path):
@@ -640,3 +703,198 @@ def test_proposal_record_422_fails_the_gate_step(fake_current, tmp_path):
     assert "schema" in failed["error"]
     data = run_report(fake_current)["data"]
     assert data["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# (e) Staged-record auto-commit: out/records/<type>.json + emits[].auto_commit
+# ---------------------------------------------------------------------------
+
+PO_FACT_EMIT = {
+    "record_type": "po_fact",
+    "schema": {"type": "object"},
+    "auto_commit": True,
+}
+
+
+def _stage_records_script(step_id: str, filename: str, payload: object) -> dict:
+    """A script step that stages ``out/records/<filename>`` with the given
+    JSON-serializable payload (a dict or a list of dicts)."""
+    code = (
+        "import json, pathlib\n"
+        "pathlib.Path('out/records').mkdir(parents=True, exist_ok=True)\n"
+        f"pathlib.Path('out/records/{filename}').write_text(json.dumps({payload!r}))\n"
+    )
+    return script_step(step_id, code)
+
+
+def _record_event_types(fake: FakeCurrent) -> list[str]:
+    return [body["record_type"] for kind, body in fake.events if kind == "record"]
+
+
+def test_staged_record_auto_commit_posts_proposal_then_records(fake_current, tmp_path):
+    """A definition declaring `po_fact` with `auto_commit: true` gets its
+    staged out/records/po_fact.json committed at run end: one auto-approved
+    agent_proposal covering every entry, then each record -- no gate, no
+    human decision, and nothing hits the wire until the run has already
+    succeeded."""
+    entries = [
+        {
+            "scope": "vendor",
+            "vendor_name": "Loop Global, Inc.",
+            "kind": "vendor_address",
+            "text": "Loop Global HQ: 1700 E Walnut Ave, Fl 6, El Segundo, CA 90245",
+            "source": "Slack, @mohit, 2026-07-22",
+        }
+    ]
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", entries)],
+        emits=[PO_FACT_EMIT],
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    [proposal] = fake_current.records_of("agent_proposal")
+    assert proposal["data"]["proposal"] == "auto:po_fact"
+    assert proposal["data"]["auto_approved"] is True
+    assert proposal["data"]["idempotency_key"] == f"wf-{RUN_ID}-records-po_fact"
+    assert proposal["data"]["payload"] == {"record_type": "po_fact", "entries": entries}
+
+    [record] = fake_current.records_of("po_fact")
+    assert record["project"] == PROJECT
+    assert record["data"] == entries[0]
+    assert "supersedes" not in record  # nothing to supersede in this entry
+
+    # Proposal, then the record, then (later) the terminal run_report --
+    # never a record with no matching proposal ahead of it.
+    assert _record_event_types(fake_current) == ["agent_proposal", "po_fact", "run_report"]
+
+
+def test_staged_record_without_auto_commit_is_left_alone(fake_current, tmp_path):
+    """emits[] without `auto_commit: true` (the default, e.g.
+    purchase_order) is never auto-committed by the runner -- a script step
+    owns posting that type itself, and the runner must not double-post
+    from the same out/records/ staging convention."""
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("draft", "purchase_order.json", {"status": "draft"})],
+        emits=[{"record_type": "purchase_order", "schema": {"type": "object"}}],
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    assert fake_current.records_of("purchase_order") == []
+    assert fake_current.records_of("agent_proposal") == []
+
+
+def test_staged_record_undeclared_type_is_left_alone(fake_current, tmp_path):
+    """A staged file whose stem isn't any declared emits[] record_type is
+    ignored -- the harness never invents commits for a type the
+    definition never declared at all."""
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "mystery_fact.json", {"x": 1})],
+        emits=[PO_FACT_EMIT],
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    assert fake_current.records_of("mystery_fact") == []
+    assert fake_current.records_of("agent_proposal") == []
+
+
+def test_staged_record_schema_rejection_is_skipped_not_fatal(fake_current, tmp_path):
+    """A 422 from the records endpoint (a schema-invalid staged entry) is
+    logged and skipped, not fatal -- this commit is best-effort at the very
+    end of a run that has already succeeded."""
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", [{"bad": "shape"}])],
+        emits=[PO_FACT_EMIT],
+    )
+    fake_current.record_failures["po_fact"] = (422, {"detail": "does not match schema"})
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    [proposal] = fake_current.records_of("agent_proposal")
+    assert proposal["data"]["proposal"] == "auto:po_fact"
+    assert fake_current.records_of("po_fact") == []  # rejected, not retried
+    assert run_report(fake_current)["data"]["status"] == "succeeded"
+
+
+def test_staged_record_proposal_rejection_skips_the_whole_type(fake_current, tmp_path):
+    """When even the auto-approved proposal itself is rejected, no record of
+    that type is posted either -- a record with no matching proposal ahead
+    of it would break the "every state change has a proposal" audit
+    guarantee."""
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", [{"scope": "global"}])],
+        emits=[PO_FACT_EMIT],
+    )
+    fake_current.record_failures["agent_proposal"] = (422, {"detail": "bad payload"})
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    assert fake_current.records_of("agent_proposal") == []
+    assert fake_current.records_of("po_fact") == []
+    assert run_report(fake_current)["data"]["status"] == "succeeded"
+
+
+def test_staged_record_supersedes_and_project_id_sidecars(fake_current, tmp_path):
+    """`supersedes` and `project_id` are reserved sidecar keys on a staged
+    entry: popped off before the entry becomes the record's `data`, and
+    routed to the record POST's own `supersedes` / `project` fields."""
+    other_project = "44444444-4444-4444-4444-444444444444"
+    entries = [
+        {
+            "scope": "project",
+            "kind": "tax_rate",
+            "text": "Confirmed 6% for this site",
+            "source": "Teams, @mohit, 2026-07-22",
+            "project_id": other_project,
+            "supersedes": "55555555-5555-5555-5555-555555555555",
+        }
+    ]
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", entries)],
+        emits=[PO_FACT_EMIT],
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    [record] = fake_current.records_of("po_fact")
+    assert record["project"] == other_project
+    assert record["supersedes"] == "55555555-5555-5555-5555-555555555555"
+    assert record["data"] == {
+        "scope": "project",
+        "kind": "tax_rate",
+        "text": "Confirmed 6% for this site",
+        "source": "Teams, @mohit, 2026-07-22",
+    }
+    [proposal] = fake_current.records_of("agent_proposal")
+    proposal_entry = proposal["data"]["payload"]["entries"][0]
+    assert "supersedes" not in proposal_entry
+    assert "project_id" not in proposal_entry
+
+
+def test_staged_record_single_object_not_wrapped_in_list_is_accepted(fake_current, tmp_path):
+    """A staged file may be one bare record object, not just a list of
+    them -- the common case of teaching exactly one fact this run."""
+    fake_current.definition_response = definition_response(
+        [
+            _stage_records_script(
+                "teach",
+                "po_fact.json",
+                {"scope": "global", "kind": "other", "text": "hi", "source": "test"},
+            )
+        ],
+        emits=[PO_FACT_EMIT],
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    [record] = fake_current.records_of("po_fact")
+    assert record["data"]["text"] == "hi"
