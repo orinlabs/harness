@@ -225,6 +225,71 @@ def test_project_input_hydration(fake_current, tmp_path):
     assert fake_current.transition_tuples()[-1] == ("s1", "succeeded", 1)
 
 
+def test_company_outputs_promote_to_a_stable_overwritable_path(fake_current, tmp_path):
+    """`control.outputs: [company]` promotes out/ to /data/company/ with no
+    run-id segment, overwriting what a prior run left and leaving files this
+    run didn't rewrite alone -- the round trip that makes a workspace-wide
+    store readable back through inputs/company on the next run."""
+    company = tmp_path / "data" / "company"
+    company.mkdir(parents=True)
+    (company / "state.json").write_text('{"watermark": "old"}')
+    (company / "untouched.txt").write_text("still here")
+    fake_current.definition_response = definition_response(
+        [
+            script_step(
+                "s1",
+                "import pathlib\n"
+                # Prior run's state hydrated in; this run supersedes it.
+                "assert pathlib.Path('inputs/company/state.json').read_text()"
+                " == '{\"watermark\": \"old\"}'\n"
+                "pathlib.Path('out/sitetracker').mkdir(parents=True)\n"
+                "pathlib.Path('out/state.json').write_text('{\"watermark\": \"new\"}')\n"
+                "pathlib.Path('out/sitetracker/inventory.json').write_text('{}')\n",
+            )
+        ],
+        control={"inputs": ["company"], "outputs": ["company"]},
+    )
+
+    assert make_runner(fake_current, tmp_path).run() == 0
+
+    assert (company / "state.json").read_text() == '{"watermark": "new"}'
+    assert (company / "sitetracker" / "inventory.json").read_text() == "{}"
+    # Promotion touches only what out/ holds; the rest of the store survives.
+    assert (company / "untouched.txt").read_text() == "still here"
+    promoted = run_report(fake_current)["data"]["promoted_outputs"]
+    assert sorted(p["path"] for p in promoted) == [
+        "out/sitetracker/inventory.json",
+        "out/state.json",
+    ]
+    # No run-id segment anywhere: a reader needs no knowledge of run ids.
+    assert all(RUN_ID not in p["dest"] for p in promoted)
+
+
+def test_company_outputs_promote_without_a_project(fake_current, tmp_path):
+    """Company scope is workspace-wide, so it must promote for a run that
+    carries no project -- which every discovery-style run does."""
+    (tmp_path / "data").mkdir()
+    fake_current.definition_response = definition_response(
+        [script_step("s1", "import pathlib; pathlib.Path('out/x.txt').write_text('x')")],
+        control={"outputs": ["company"]},
+        project=None,
+    )
+
+    assert make_runner(fake_current, tmp_path).run() == 0
+    assert (tmp_path / "data" / "company" / "x.txt").read_text() == "x"
+
+
+def test_project_scope_alone_never_writes_the_company_store(fake_current, tmp_path):
+    (tmp_path / "data").mkdir()
+    fake_current.definition_response = definition_response(
+        [script_step("s1", "import pathlib; pathlib.Path('out/x.txt').write_text('x')")],
+        control={"outputs": ["project"]},
+    )
+
+    assert make_runner(fake_current, tmp_path).run() == 0
+    assert not (tmp_path / "data" / "company").exists()
+
+
 # ---------------------------------------------------------------------------
 # (b) Gate exit + resume with approval (approved and rejected branches)
 # ---------------------------------------------------------------------------
