@@ -31,8 +31,9 @@ Step working directory layout (``~/workflow/{run_id}/`` by default)::
 
     inputs/   hydrated from the workspace volume (data_root) when present
     work/     scratch
-    out/      step outputs; promoted to data_root on run success when the
-              definition declares "project" in control.outputs
+    out/      step outputs; promoted to data_root on run success for each
+              scope the definition declares in control.outputs ("project"
+              and/or "company")
 
 ``out/records/<record_type>.json`` is a second, narrower convention: a
 staged record (or list of them) for a type the definition declares in
@@ -342,37 +343,63 @@ class WorkflowRunner:
         logger.info("hydrated %s -> %s", src, dest)
 
     def _promote_outputs(self, definition: dict[str, Any]) -> list[dict[str, str]]:
-        """Copy ``out/`` to the project's workflow-outputs area on the volume.
+        """Copy ``out/`` onto the workspace volume, once per declared scope.
 
-        Only when the definition declares ``"project"`` in ``control.outputs``
-        and both a project and the ``/data`` volume exist. Returns the
-        ``promoted_outputs`` entries for the run_report.
+        ``control.outputs`` names the scopes, and the two differ in shape
+        because they answer different questions:
+
+        - ``project`` writes ``projects/<id>/workflow-outputs/<run_id>/``.
+          Append-only: every run gets its own directory, so the history of
+          what each run produced stays readable and nothing is ever lost.
+          Skipped when the run carries no project.
+        - ``company`` writes ``company/`` directly, at a stable path, and
+          OVERWRITES. This is the one place promotion is not append-only,
+          deliberately: the scope exists to carry a workspace-wide store
+          that the next run reads back and updates (a sync watermark, a
+          cached org inventory), and a store whose entries can never be
+          replaced is not a store. Run-id-scoped copies would leave every
+          reader guessing which one is current. Files a run does not
+          rewrite are left alone, so a run costs only its own deltas.
+
+        Company promotion has no last-writer arbitration, so two runs of
+        the same workflow overlapping can interleave writes. Discovery-style
+        workflows are scheduled singletons; anything fanning out wants a
+        per-writer subdirectory instead.
+
+        Returns the ``promoted_outputs`` entries for the run_report.
         """
         control = definition.get("control") or {}
-        if "project" not in (control.get("outputs") or []) or not self.project:
+        outputs = control.get("outputs") or []
+        dest_roots: list[Path] = []
+        if "project" in outputs and self.project:
+            dest_roots.append(
+                self.data_root / "projects" / str(self.project) / "workflow-outputs" / self.run_id
+            )
+        if "company" in outputs:
+            dest_roots.append(self.data_root / "company")
+        if not dest_roots:
             return []
         if not self.data_root.is_dir():
             logger.info("no %s volume; skipping output promotion", self.data_root)
             return []
 
         out_dir = self.working_dir / "out"
-        dest_root = (
-            self.data_root / "projects" / str(self.project) / "workflow-outputs" / self.run_id
-        )
+        sources = sorted(p for p in out_dir.rglob("*") if p.is_file())
         promoted: list[dict[str, str]] = []
-        for path in sorted(p for p in out_dir.rglob("*") if p.is_file()):
-            rel = path.relative_to(out_dir)
-            dest = dest_root / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, dest)
-            promoted.append(
-                {
-                    "path": str(Path("out") / rel),
-                    "dest": str(dest),
-                    "content_hash": _sha256_file(dest),
-                }
-            )
-        logger.info("promoted %d output file(s) to %s", len(promoted), dest_root)
+        for dest_root in dest_roots:
+            for path in sources:
+                rel = path.relative_to(out_dir)
+                dest = dest_root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dest)
+                promoted.append(
+                    {
+                        "path": str(Path("out") / rel),
+                        "dest": str(dest),
+                        "content_hash": _sha256_file(dest),
+                    }
+                )
+            logger.info("promoted %d output file(s) to %s", len(sources), dest_root)
         return promoted
 
     def _commit_staged_records(self, definition: dict[str, Any]) -> None:
