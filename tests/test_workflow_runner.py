@@ -963,3 +963,112 @@ def test_staged_record_single_object_not_wrapped_in_list_is_accepted(fake_curren
     assert exit_code == 0
     [record] = fake_current.records_of("po_fact")
     assert record["data"]["text"] == "hi"
+
+
+# ---------------------------------------------------------------------------
+# (f) Terminal-sequence resilience: promotion failure / runner crash
+# ---------------------------------------------------------------------------
+
+_PO_FACT_ENTRIES = [{"scope": "global", "kind": "other", "text": "hi", "source": "test"}]
+
+
+def _promoting_definition() -> dict:
+    """One step that stages both an auto-commit record and a plain output
+    file, with company promotion declared -- the shape whose terminal
+    sequence (commit records, promote out/, post run_report) these tests
+    stress."""
+    return definition_response(
+        [
+            script_step(
+                "produce",
+                "import json, pathlib\n"
+                "pathlib.Path('out/records').mkdir(parents=True, exist_ok=True)\n"
+                "pathlib.Path('out/records/po_fact.json').write_text(json.dumps("
+                f"{_PO_FACT_ENTRIES!r}))\n"
+                "pathlib.Path('out/big.txt').write_text('archive payload')\n",
+            )
+        ],
+        emits=[PO_FACT_EMIT],
+        control={"outputs": ["company"]},
+    )
+
+
+def test_promotion_failure_still_commits_records_and_posts_run_report(
+    fake_current, tmp_path, monkeypatch
+):
+    """Promotion is the riskiest I/O of the run (a bulk copy onto the
+    network-backed workspace volume). When it blows up, the staged records
+    must already be committed and the run_report must still post, carrying
+    the promotion error in `summary` -- otherwise the run lingers `running`
+    until the stale sweep and the ledger silently loses the run's records."""
+    (tmp_path / "data").mkdir()
+    fake_current.definition_response = _promoting_definition()
+
+    def exploding_copy2(src, dst, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("harness.workflow.runner.shutil.copy2", exploding_copy2)
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0  # every step succeeded; only promotion failed
+    [record] = fake_current.records_of("po_fact")
+    assert record["data"]["text"] == "hi"
+    data = run_report(fake_current)["data"]
+    assert data["status"] == "succeeded"
+    assert data["promoted_outputs"] == []
+    assert data["summary"].startswith("Output promotion failed: OSError")
+
+
+def test_staged_records_commit_before_outputs_promote(fake_current, tmp_path, monkeypatch):
+    """Wire order: the durable ledger (staged records) commits before the
+    first byte of promotion I/O, so a promotion hang or crash can never
+    cost the records."""
+    import shutil as shutil_mod
+
+    (tmp_path / "data").mkdir()
+    fake_current.definition_response = _promoting_definition()
+
+    real_copy2 = shutil_mod.copy2
+    wire_at_first_copy: list[list[str]] = []
+
+    def spying_copy2(src, dst, **kwargs):
+        if not wire_at_first_copy:
+            wire_at_first_copy.append(_record_event_types(fake_current))
+        return real_copy2(src, dst, **kwargs)
+
+    monkeypatch.setattr("harness.workflow.runner.shutil.copy2", spying_copy2)
+
+    assert make_runner(fake_current, tmp_path).run() == 0
+
+    assert wire_at_first_copy == [["agent_proposal", "po_fact"]]
+    data = run_report(fake_current)["data"]
+    assert data["status"] == "succeeded"
+    assert sorted(p["path"] for p in data["promoted_outputs"]) == [
+        "out/big.txt",
+        "out/records/po_fact.json",
+    ]
+
+
+def test_runner_crash_posts_failed_run_report_and_reraises(fake_current, tmp_path, monkeypatch):
+    """An uncaught exception anywhere past the definition fetch must still
+    finalize the run: a best-effort failed run_report posts (with the steps
+    journaled so far and the crash in `summary`), then the exception
+    propagates so the process exits nonzero."""
+    from harness.workflow import WorkflowRunner
+
+    fake_current.definition_response = definition_response([script_step("s1", "print('ok')")])
+
+    def boom(self, definition):
+        raise RuntimeError("terminal bookkeeping blew up")
+
+    monkeypatch.setattr(WorkflowRunner, "_commit_staged_records", boom)
+
+    with pytest.raises(RuntimeError, match="terminal bookkeeping blew up"):
+        make_runner(fake_current, tmp_path).run()
+
+    data = run_report(fake_current)["data"]
+    assert data["status"] == "failed"
+    assert data["summary"] == "Runner crashed: RuntimeError: terminal bookkeeping blew up"
+    assert data["steps"] == [{"id": "s1", "status": "succeeded", "attempts": 1}]
+    assert data["promoted_outputs"] == []

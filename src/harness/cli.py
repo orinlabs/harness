@@ -599,6 +599,11 @@ def _cmd_workflow(args, parser: argparse.ArgumentParser) -> int:
         logger.warning("workflow run interrupted run=%s", client.run_id)
         return 130
     except Exception:
+        # runner.run() already posted a best-effort failed run_report on
+        # its way out (it has the definition context a schema-valid report
+        # needs), so the run finalizes `failed` rather than lingering
+        # `running` until the platform's stale sweep. Nothing to add here
+        # beyond the log.
         logger.exception("workflow run failed run=%s", client.run_id)
         return 1
 
