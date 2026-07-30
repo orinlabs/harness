@@ -944,6 +944,89 @@ def test_staged_record_supersedes_and_project_id_sidecars(fake_current, tmp_path
     assert "project_id" not in proposal_entry
 
 
+def test_staged_record_extras_sidecar(fake_current, tmp_path):
+    """`extras` is the third reserved sidecar: real values the schema has no
+    field for ride beside `data` on the record envelope. Record schemas are
+    additionalProperties: false, so an extras key left inside `data` would
+    422 the entry it was meant to preserve."""
+    extras = [
+        {
+            "key": "vendor_rep",
+            "value": "Dana Ruiz",
+            "provenance": {"source_doc": "Slack, @mohit, 2026-07-22"},
+        }
+    ]
+    entries = [
+        {
+            "scope": "vendor",
+            "kind": "vendor_address",
+            "text": "Loop Global HQ: 1700 E Walnut Ave, El Segundo, CA 90245",
+            "source": "Slack, @mohit, 2026-07-22",
+            "extras": extras,
+        }
+    ]
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", entries)],
+        emits=[PO_FACT_EMIT],
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    [record] = fake_current.records_of("po_fact")
+    assert record["extras"] == extras
+    assert "extras" not in record["data"]
+    [proposal] = fake_current.records_of("agent_proposal")
+    assert "extras" not in proposal["data"]["payload"]["entries"][0]
+
+
+def test_staged_record_rejection_is_surfaced_on_the_run_report(fake_current, tmp_path):
+    """Auto-commit runs after the last step, so a rejected entry cannot fail
+    one and the run still succeeds. Without the run_report summary the loss
+    would exist only in the sandbox log, which dies with the sandbox."""
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", [{"bad": "shape"}, {"also": "bad"}])],
+        emits=[PO_FACT_EMIT],
+    )
+    fake_current.record_failures["po_fact"] = (422, {"detail": "does not match schema"})
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    summary = run_report(fake_current)["data"]["summary"]
+    assert "rejected" in summary
+    assert "2 po_fact" in summary
+
+
+def test_proposal_rejection_counts_every_dropped_entry_on_the_run_report(fake_current, tmp_path):
+    """A rejected proposal drops the whole file, so all of its entries are
+    counted -- not just the one the loop happened to reach."""
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", [{"a": 1}, {"b": 2}, {"c": 3}])],
+        emits=[PO_FACT_EMIT],
+    )
+    fake_current.record_failures["agent_proposal"] = (422, {"detail": "bad payload"})
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    assert "3 po_fact" in run_report(fake_current)["data"]["summary"]
+
+
+def test_clean_auto_commit_leaves_no_rejection_note(fake_current, tmp_path):
+    """The note is for losses only: a run whose staged records all committed
+    carries no summary at all."""
+    fake_current.definition_response = definition_response(
+        [_stage_records_script("teach", "po_fact.json", [{"scope": "global"}])],
+        emits=[PO_FACT_EMIT],
+    )
+
+    exit_code = make_runner(fake_current, tmp_path).run()
+
+    assert exit_code == 0
+    assert "summary" not in run_report(fake_current)["data"]
+
+
 def test_staged_record_single_object_not_wrapped_in_list_is_accepted(fake_current, tmp_path):
     """A staged file may be one bare record object, not just a list of
     them -- the common case of teaching exactly one fact this run."""

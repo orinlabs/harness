@@ -85,6 +85,8 @@ DEFAULT_AGENT_MAX_TURNS = 30
 
 _STDERR_TAIL_CHARS = 2000
 _STAGING_DIRS = ("inputs", "work", "out")
+# `summary` on the run_report record type is capped at 255 chars.
+_SUMMARY_MAX_CHARS = 255
 
 
 def _now_iso() -> str:
@@ -123,6 +125,12 @@ class WorkflowRunner:
         self.project: str | None = None
         # record_type -> count of records this process POSTed (for run_report).
         self._records_emitted: Counter[str] = Counter()
+        # record_type -> count of staged records the platform refused (a
+        # schema mismatch, usually). Auto-commit is best-effort at the very
+        # end of a run, so a rejection can't fail a step; without this it
+        # would only ever exist in the sandbox log, which dies with the
+        # sandbox. Surfaced on the run_report summary — see _run_report_summary.
+        self._records_rejected: Counter[str] = Counter()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -509,21 +517,31 @@ class WorkflowRunner:
         """Post one auto-approved ``agent_proposal`` covering every staged
         entry of ``record_type``, then the record(s) themselves.
 
-        Each entry is the record's ``data`` block, with two reserved
+        Each entry is the record's ``data`` block, with three reserved
         sidecar keys popped off before validation: ``supersedes`` (id of
-        the record this corrects) and ``project_id`` (defaults to the
-        run's own project). A proposal-post rejection (e.g. schema-invalid
-        payload text) skips the whole file loudly; an individual record
-        rejection skips just that entry — either way nothing crashes the
-        run, since these are best-effort commits at the very end of it.
+        the record this corrects), ``project_id`` (defaults to the run's
+        own project), and ``extras`` (values the schema has no field for,
+        ``[{key, value, provenance}]``, posted beside ``data`` on the
+        record envelope). Record schemas are ``additionalProperties:
+        false``, so leaving any of the three in ``data`` is a guaranteed
+        422. A proposal-post rejection (e.g. schema-invalid payload text)
+        skips the whole file loudly; an individual record rejection skips
+        just that entry — either way nothing crashes the run, since these
+        are best-effort commits at the very end of it.
         """
         clean_entries = []
         for entry in entries:
             entry = dict(entry)
             supersedes = entry.pop("supersedes", None)
             project_id = entry.pop("project_id", None)
+            extras = entry.pop("extras", None)
             clean_entries.append(
-                {"data": entry, "supersedes": supersedes, "project_id": project_id}
+                {
+                    "data": entry,
+                    "supersedes": supersedes,
+                    "project_id": project_id,
+                    "extras": extras,
+                }
             )
 
         try:
@@ -555,6 +573,7 @@ class WorkflowRunner:
                 record_type,
                 e,
             )
+            self._records_rejected[record_type] += len(clean_entries)
             return
         self._records_emitted["agent_proposal"] += 1
 
@@ -566,10 +585,12 @@ class WorkflowRunner:
                     project=clean["project_id"] or self.project,
                     produced_at=_now_iso(),
                     data=clean["data"],
+                    extras=clean["extras"],
                     supersedes=clean["supersedes"],
                 )
             except CurrentAPIError as e:
                 logger.warning("staged %s record rejected; skipping it: %s", record_type, e)
+                self._records_rejected[record_type] += 1
                 continue
             self._records_emitted[record_type] += 1
 
@@ -746,6 +767,27 @@ class WorkflowRunner:
             entries.append(entry)
         return entries
 
+    def _run_report_summary(self, summary: str | None) -> str | None:
+        """The run_report ``summary``, with any auto-commit rejections folded
+        in.
+
+        A staged record the platform refused cannot fail a step — auto-commit
+        runs after the last one, best-effort — so without this the loss lives
+        only in the sandbox log, which dies with the sandbox. The field is
+        capped at ``_SUMMARY_MAX_CHARS``, and the rejection note is the part
+        nobody can reconstruct from elsewhere, so it survives intact and the
+        caller's summary is what gets trimmed to make room.
+        """
+        if not self._records_rejected:
+            return summary
+        dropped = ", ".join(f"{count} {rt}" for rt, count in sorted(self._records_rejected.items()))
+        note = f"Staged records rejected by the platform, not committed: {dropped}."
+        if summary:
+            room = _SUMMARY_MAX_CHARS - len(note) - 1
+            if room > 0:
+                return f"{summary[:room]} {note}"
+        return note[:_SUMMARY_MAX_CHARS]
+
     def _post_run_report(
         self,
         definition: dict[str, Any],
@@ -757,6 +799,7 @@ class WorkflowRunner:
         promoted: list[dict[str, str]],
         summary: str | None = None,
     ) -> None:
+        summary = self._run_report_summary(summary)
         data = {
             "workflow": definition.get("name"),
             "definition_hash": definition.get("rendered_hash"),
@@ -771,9 +814,9 @@ class WorkflowRunner:
             "promoted_outputs": promoted,
         }
         if summary:
-            # Optional in the run_report schema (max 255 chars); used to
-            # surface terminal-sequence trouble (a promotion failure, a
-            # runner crash) that no step's own error field can carry.
+            # Optional in the run_report schema; used to surface
+            # terminal-sequence trouble (a promotion failure, a runner crash,
+            # a rejected auto-commit) that no step's own error field can carry.
             data["summary"] = summary
         self.client.post_record(
             record_type="run_report",
