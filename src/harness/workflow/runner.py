@@ -456,7 +456,11 @@ class WorkflowRunner:
                 rel = path.relative_to(out_dir)
                 dest = dest_root / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dest)
+                # copyfile, not copy2: the volume is a FUSE S3 mount
+                # (mountpoint-s3) that rejects copy2's copystat/utime with
+                # EPERM, and object storage has no file metadata worth
+                # preserving anyway — content is all that matters here.
+                shutil.copyfile(path, dest)
                 promoted.append(
                     {
                         "path": str(Path("out") / rel),
@@ -550,8 +554,13 @@ class WorkflowRunner:
                 step_id=None,
                 project=self.project,
                 produced_at=_now_iso(),
+                # Must satisfy the platform's agent_proposal schema
+                # (additionalProperties: false; `proposal` limited to
+                # ^[a-z][a-z0-9_]*$) — so the auto-approved marker lives
+                # inside the free-form `payload`, and the proposal name
+                # uses underscores, never a colon.
                 data={
-                    "proposal": f"auto:{record_type}",
+                    "proposal": f"auto_commit_{record_type}",
                     "summary": (
                         f"Auto-approved: this run staged {len(clean_entries)} "
                         f"{record_type} record(s) — an existing-type append/"
@@ -561,9 +570,9 @@ class WorkflowRunner:
                     "payload": {
                         "record_type": record_type,
                         "entries": [c["data"] for c in clean_entries],
+                        "auto_approved": True,
                     },
                     "idempotency_key": f"wf-{self.run_id}-records-{record_type}",
-                    "auto_approved": True,
                 },
             )
         except CurrentAPIError as e:
