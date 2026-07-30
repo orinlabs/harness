@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -820,10 +821,26 @@ def test_staged_record_auto_commit_posts_proposal_then_records(fake_current, tmp
 
     assert exit_code == 0
     [proposal] = fake_current.records_of("agent_proposal")
-    assert proposal["data"]["proposal"] == "auto:po_fact"
-    assert proposal["data"]["auto_approved"] is True
+    assert proposal["data"]["proposal"] == "auto_commit_po_fact"
     assert proposal["data"]["idempotency_key"] == f"wf-{RUN_ID}-records-po_fact"
-    assert proposal["data"]["payload"] == {"record_type": "po_fact", "entries": entries}
+    assert proposal["data"]["payload"] == {
+        "record_type": "po_fact",
+        "entries": entries,
+        "auto_approved": True,
+    }
+    # The platform's agent_proposal schema is additionalProperties: false
+    # with `proposal` limited to ^[a-z][a-z0-9_]*$ -- the fake doesn't
+    # validate, so guard the contract here (a violation 422s every
+    # auto-commit in production and silently drops the staged records).
+    assert re.fullmatch(r"[a-z][a-z0-9_]*", proposal["data"]["proposal"])
+    assert set(proposal["data"]) <= {
+        "proposal",
+        "summary",
+        "payload",
+        "target",
+        "idempotency_key",
+        "expires_at",
+    }
 
     [record] = fake_current.records_of("po_fact")
     assert record["project"] == PROJECT
@@ -882,7 +899,7 @@ def test_staged_record_schema_rejection_is_skipped_not_fatal(fake_current, tmp_p
 
     assert exit_code == 0
     [proposal] = fake_current.records_of("agent_proposal")
-    assert proposal["data"]["proposal"] == "auto:po_fact"
+    assert proposal["data"]["proposal"] == "auto_commit_po_fact"
     assert fake_current.records_of("po_fact") == []  # rejected, not retried
     assert run_report(fake_current)["data"]["status"] == "succeeded"
 
@@ -1087,10 +1104,10 @@ def test_promotion_failure_still_commits_records_and_posts_run_report(
     (tmp_path / "data").mkdir()
     fake_current.definition_response = _promoting_definition()
 
-    def exploding_copy2(src, dst, **kwargs):
+    def exploding_copyfile(src, dst, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr("harness.workflow.runner.shutil.copy2", exploding_copy2)
+    monkeypatch.setattr("harness.workflow.runner.shutil.copyfile", exploding_copyfile)
 
     exit_code = make_runner(fake_current, tmp_path).run()
 
@@ -1112,15 +1129,15 @@ def test_staged_records_commit_before_outputs_promote(fake_current, tmp_path, mo
     (tmp_path / "data").mkdir()
     fake_current.definition_response = _promoting_definition()
 
-    real_copy2 = shutil_mod.copy2
+    real_copyfile = shutil_mod.copyfile
     wire_at_first_copy: list[list[str]] = []
 
-    def spying_copy2(src, dst, **kwargs):
+    def spying_copyfile(src, dst, **kwargs):
         if not wire_at_first_copy:
             wire_at_first_copy.append(_record_event_types(fake_current))
-        return real_copy2(src, dst, **kwargs)
+        return real_copyfile(src, dst, **kwargs)
 
-    monkeypatch.setattr("harness.workflow.runner.shutil.copy2", spying_copy2)
+    monkeypatch.setattr("harness.workflow.runner.shutil.copyfile", spying_copyfile)
 
     assert make_runner(fake_current, tmp_path).run() == 0
 
