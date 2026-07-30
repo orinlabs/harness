@@ -67,6 +67,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -146,6 +147,39 @@ class WorkflowRunner:
 
         started_at = _now_iso()
         report_steps: list[dict[str, Any]] = []
+        try:
+            return self._execute_run(definition, steps_state, approvals, started_at, report_steps)
+        except Exception as e:  # noqa: BLE001 — the run must still finalize
+            # Invariant 4 (terminal report) even when the runner itself
+            # blows up: without a run_report the run sits `running` until
+            # the platform's stale sweep reaps it hours later, and nothing
+            # in the UI says why. Best effort — if this post fails too, the
+            # sweep is still the backstop.
+            logger.exception("workflow runner crashed; posting best-effort failed run_report")
+            try:
+                self._post_run_report(
+                    definition,
+                    status="failed",
+                    started_at=started_at,
+                    finished_at=_now_iso(),
+                    report_steps=report_steps,
+                    promoted=[],
+                    summary=f"Runner crashed: {type(e).__name__}: {e}"[:255],
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "crash-path run_report failed; the stale sweep will reap this run"
+                )
+            raise
+
+    def _execute_run(
+        self,
+        definition: dict[str, Any],
+        steps_state: dict[str, dict[str, Any]],
+        approvals: dict[str, dict[str, Any]],
+        started_at: str,
+        report_steps: list[dict[str, Any]],
+    ) -> int:
         run_failed = False
 
         steps: list[dict[str, Any]] = definition.get("steps") or []
@@ -291,12 +325,23 @@ class WorkflowRunner:
             report_steps.extend(self._pending_report(steps[index + 1 :], steps_state))
             break
 
-        # Terminal: promote outputs and commit staged records (success
-        # only), then journal the report.
+        # Terminal (success only for the first two): commit staged records
+        # first — small API posts, and the durable ledger downstream runs
+        # read back — then promote outputs, the bulk file copy onto the
+        # workspace volume and the riskiest I/O of the whole run. Ordered
+        # and guarded so a promotion failure can never cost the records or
+        # the report: the error rides in the report's summary instead of
+        # crashing the runner.
         status = "failed" if run_failed else "succeeded"
-        promoted = [] if run_failed else self._promote_outputs(definition)
+        summary: str | None = None
+        promoted: list[dict[str, str]] = []
         if not run_failed:
             self._commit_staged_records(definition)
+            try:
+                promoted = self._promote_outputs(definition)
+            except Exception as e:  # noqa: BLE001 — finalize the run anyway
+                logger.exception("output promotion failed; finalizing the run without it")
+                summary = f"Output promotion failed: {type(e).__name__}: {e}"[:255]
         self._post_run_report(
             definition,
             status=status,
@@ -304,6 +349,7 @@ class WorkflowRunner:
             finished_at=_now_iso(),
             report_steps=report_steps,
             promoted=promoted,
+            summary=summary,
         )
         logger.info("workflow run %s: %s", self.run_id, status)
         return 1 if run_failed else 0
@@ -385,8 +431,19 @@ class WorkflowRunner:
 
         out_dir = self.working_dir / "out"
         sources = sorted(p for p in out_dir.rglob("*") if p.is_file())
+        total_bytes = sum(p.stat().st_size for p in sources)
+        # The volume is network-backed, so this copy is the slowest and
+        # flakiest I/O of the run — log enough that a hang or a crawl here
+        # is diagnosable from the sandbox log alone.
+        logger.info(
+            "promoting %d output file(s), %d byte(s), to %d destination(s)",
+            len(sources),
+            total_bytes,
+            len(dest_roots),
+        )
         promoted: list[dict[str, str]] = []
         for dest_root in dest_roots:
+            started = time.monotonic()
             for path in sources:
                 rel = path.relative_to(out_dir)
                 dest = dest_root / rel
@@ -399,7 +456,12 @@ class WorkflowRunner:
                         "content_hash": _sha256_file(dest),
                     }
                 )
-            logger.info("promoted %d output file(s) to %s", len(sources), dest_root)
+            logger.info(
+                "promoted %d output file(s) to %s in %.1fs",
+                len(sources),
+                dest_root,
+                time.monotonic() - started,
+            )
         return promoted
 
     def _commit_staged_records(self, definition: dict[str, Any]) -> None:
@@ -693,23 +755,30 @@ class WorkflowRunner:
         finished_at: str,
         report_steps: list[dict[str, Any]],
         promoted: list[dict[str, str]],
+        summary: str | None = None,
     ) -> None:
+        data = {
+            "workflow": definition.get("name"),
+            "definition_hash": definition.get("rendered_hash"),
+            "status": status,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "steps": report_steps,
+            "records_emitted": [
+                {"record_type": rt, "count": count}
+                for rt, count in sorted(self._records_emitted.items())
+            ],
+            "promoted_outputs": promoted,
+        }
+        if summary:
+            # Optional in the run_report schema (max 255 chars); used to
+            # surface terminal-sequence trouble (a promotion failure, a
+            # runner crash) that no step's own error field can carry.
+            data["summary"] = summary
         self.client.post_record(
             record_type="run_report",
             step_id=None,
             project=self.project,
             produced_at=finished_at,
-            data={
-                "workflow": definition.get("name"),
-                "definition_hash": definition.get("rendered_hash"),
-                "status": status,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "steps": report_steps,
-                "records_emitted": [
-                    {"record_type": rt, "count": count}
-                    for rt, count in sorted(self._records_emitted.items())
-                ],
-                "promoted_outputs": promoted,
-            },
+            data=data,
         )
