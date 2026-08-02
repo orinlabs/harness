@@ -26,8 +26,13 @@ class UserAgent:
         self.profile = user_def
         self.id = user_def.id
         self.name = user_def.name
-        self.phone = user_def.phone
-        self.email = user_def.email
+        # Primary phone/email mirror the multi-address shape; ``phones``
+        # / ``emails`` carry the full set so routing in
+        # :mod:`harness.evals.base` can match on any of them.
+        self.phone = user_def.primary_phone
+        self.email = user_def.primary_email
+        self.phones = list(user_def.phones)
+        self.emails = list(user_def.emails)
         self.channels = user_def.channels
         self.response_policy = user_def.response_policy
         self.instructions = user_def.instructions
@@ -163,9 +168,11 @@ class UserAgent:
             history_text = "\n".join(
                 f"[{m['role']}] {m['content']}" for m in self.conversation_history[-10:]
             )
+            phones_repr = ", ".join(self.phones) if self.phones else self.phone or "(none)"
+            emails_repr = ", ".join(self.emails) if self.emails else self.email or "(none)"
             system_prompt = (
                 f"You are {self.name}. You are a simulated user in an eval.\n"
-                f"Your profile: phone={self.phone}, email={self.email}, "
+                f"Your profile: phones={phones_repr}, emails={emails_repr}, "
                 f"channels={self.channels}\n\n"
             )
             if self.instructions:

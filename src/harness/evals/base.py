@@ -527,7 +527,7 @@ class Simulation(metaclass=SimulationMeta):
     def on_outbound_sms(self, to: str, body: str, sid: str):
         print(f"[sim] >>> AGENT SMS to {to}: {body[:200]}")
         for ua in self.user_agents.values():
-            if ua.phone == to:
+            if to and (ua.phone == to or to in ua.phones):
                 response = ua.generate_response(body, "sms")
                 if response:
                     print(f"[sim] <<< USER REPLY from {ua.name}: {response[:200]}")
@@ -537,7 +537,8 @@ class Simulation(metaclass=SimulationMeta):
     def on_outbound_email(self, to: list[str], subject: str, body: str):
         print(f"[sim] >>> AGENT EMAIL to {to}: {subject} — {body[:200]}")
         for ua in self.user_agents.values():
-            if ua.email in to:
+            ua_emails = set(ua.emails) | ({ua.email} if ua.email else set())
+            if any(addr in ua_emails for addr in to):
                 response = ua.generate_response(body, "email")
                 if response:
                     self._pending_user_replies.append((ua, response, "email"))

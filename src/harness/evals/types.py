@@ -19,14 +19,58 @@ class ResponsePolicy:
 
 @dataclass
 class UserDefinition:
+    """A simulated user with one or more addresses.
+
+    The new shape is multi-address: ``phones`` is the full ordered
+    list of phone numbers (primary first), ``emails`` is the full
+    ordered list of email addresses (primary first). The legacy
+    ``phone`` / ``email`` scalar fields remain as inputs for
+    backward-compatible scenario fixtures — they're folded into
+    ``phones`` / ``emails`` in :meth:`__post_init__` and you should
+    read them via :attr:`primary_phone` / :attr:`primary_email`.
+    """
+
     id: str
     name: str
+    # Legacy scalar inputs — accepted for back-compat with existing
+    # scenario fixtures. New scenarios should set ``phones`` / ``emails``.
     phone: str = ""
     email: str = ""
+    phones: list[str] = field(default_factory=list)
+    emails: list[str] = field(default_factory=list)
     channels: list[str] = field(default_factory=list)
     response_policy: list[ResponsePolicy] = field(default_factory=list)
     instructions: str = ""
     model: str = ""
+
+    def __post_init__(self) -> None:
+        # Fold scalar phone/email into the multi-value lists when the
+        # caller used the legacy shape, deduping while preserving order.
+        if self.phone and self.phone not in self.phones:
+            self.phones = [self.phone, *self.phones]
+        if self.emails is None:
+            self.emails = []
+        if self.email and self.email not in self.emails:
+            self.emails = [self.email, *self.emails]
+        # Keep the scalar mirrors in sync with the primary value so legacy
+        # call sites still see the right thing.
+        self.phone = self.phones[0] if self.phones else ""
+        self.email = self.emails[0] if self.emails else ""
+
+    @property
+    def primary_phone(self) -> str:
+        return self.phones[0] if self.phones else ""
+
+    @property
+    def primary_email(self) -> str:
+        return self.emails[0] if self.emails else ""
+
+    def matches_phone(self, value: str) -> bool:
+        """True when ``value`` is one of this user's phone numbers."""
+        return bool(value) and value in self.phones
+
+    def matches_email(self, value: str) -> bool:
+        return bool(value) and value in self.emails
 
 
 @dataclass
